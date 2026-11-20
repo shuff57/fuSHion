@@ -475,12 +475,13 @@ fn fit_overlay(p: &StudProfile) -> Result<String, Box<dyn std::error::Error>> {
             d.fin_width, d.root_width, d.min_section
         ),
         format!(
-            "Pocket: the fin grown {:.2} all round, {:.2} deep ({:.3} mm², {:.3} mm³ per fin); root cap r {:.3} leaves the root square to the waist; out to u {:.3}, rim {:.2}.",
+            "Pocket: the fin grown {:.2} all round, {:.2} deep ({:.3} mm², {:.3} mm³ per fin); r {:.3} fade from the root line, r {:.2} round past the tip; out to u {:.3}, rim {:.2}.",
             d.pocket_margin,
             d.pocket_depth,
             d.pocket_area,
             d.pocket_area * d.pocket_depth,
             d.root_cap_radius,
+            d.tip_round_radius,
             d.pocket_out,
             d.pocket_rim
         ),

@@ -2,8 +2,9 @@
 //! hand calculations made here, independently of the crate's own geometry: the peanut, a
 //! triple's middle lobe and finless units in closed form (their width
 //! integrated arc by arc), the slot and pocket areas by sampling a fine grid with inside tests
-//! written from the stud's dimensions (the pocket as every point within its margin of the
-//! fin's free edges that is not under the rest of the stud, with its root cap).
+//! written from the stud's dimensions (the pocket as every point at or past the slot's end
+//! within its margin of the fin's free edges that is not under the rest of the stud, with
+//! its root fade and the round that carries it past the fin's tip into the slot).
 //!
 //! STLs are written to `/tmp/fushion-custom/` for inspection.
 
@@ -40,17 +41,25 @@ struct Hand {
     vs: f64,
     hc: [f64; 2],
     rh: f64,
-    tail: f64,
     /// The fin's root corner (the slot's end meets the fin-side waist arc) and its tip (the
     /// hook's inner edge leaves the blend arc).
     root: [f64; 2],
     tip: [f64; 2],
     /// Pocket margin.
     m: f64,
-    /// The pocket's root cap: centre, radius and where it meets the offset waist arc.
-    cap_c: [f64; 2],
-    cap_r: f64,
-    cap_t: [f64; 2],
+    /// The pocket's root fade: centre, radius, where it leaves the root line and where it
+    /// meets the offset waist arc.
+    fade_c: [f64; 2],
+    fade_r: f64,
+    fade_from: [f64; 2],
+    fade_to: [f64; 2],
+    /// The pocket's tip round: centre, radius, where it leaves the offset blend arc, where it
+    /// comes nearest the slot's far edge (`y`) and where it meets the slot's centre line.
+    round_c: [f64; 2],
+    round_r: f64,
+    z: [f64; 2],
+    y: [f64; 2],
+    k: [f64; 2],
 }
 
 const S45: f64 = std::f64::consts::FRAC_1_SQRT_2;
@@ -131,7 +140,7 @@ impl Hand {
         assert!((d.slot_v.0 - v0).abs() < 1e-12 && (d.slot_v.1 - vs).abs() < 1e-12);
         // The fin's tip: the hook's inner edge (radius 0.95 about the hook centre) meets the
         // blend circle between 45° and 90° about the hook centre (the hook's 45° end is
-        // already outside the lobe, so the tail never touches the fin).
+        // already outside the lobe, so the slot ends clear of the fin).
         let hc = [uc + rh, vs];
         let on_hook = |t: f64| [hc[0] + (rh - hw) * t.cos(), hc[1] + (rh - hw) * t.sin()];
         assert!(dist(on_hook(PI / 4.0), ce) > re);
@@ -139,21 +148,50 @@ impl Hand {
         let tip = on_hook(th);
         let root = [uc + hw + 0.8, v0];
         assert!(dist(d.tip_corner, tip) < 1e-9 && dist(d.root_corner, root) < 1e-12);
-        // The root cap: a circle through the root's corner, square there to the waist arc
-        // (its centre along the waist's tangent from the corner), touching the waist arc's
+        // The root fade: along the root line 0.05 mm past the root's corner, then a circle
+        // tangent to the line there (its centre square above it) touching the waist arc's
         // 0.25 mm offset from outside.
         let m = 0.25;
-        let n = toward(root, tf, 1.0);
-        let t_dir = [-(n[1] - root[1]), n[0] - root[0]];
-        let cap_at = |k: f64| [root[0] + k * t_dir[0], root[1] + k * t_dir[1]];
-        let cap_r = bisect(|k| dist(cap_at(k), tf) - (rw - m + k), 0.01, 2.0);
-        let cap_c = cap_at(cap_r);
-        let cap_t = toward(tf, cap_c, rw - m);
+        let fade_from = [root[0] + 0.05, v0];
+        let fade_at = |k: f64| [fade_from[0], v0 + k];
+        let fade_r = bisect(|k| dist(fade_at(k), tf) - (rw - m + k), 0.01, 3.0);
+        let fade_c = fade_at(fade_r);
+        let fade_to = toward(tf, fade_c, rw - m);
         assert!(
-            dist(d.root_cap_center, cap_c) < 1e-9,
-            "{:?} vs {cap_c:?}",
+            dist(d.root_cap_center, fade_c) < 1e-9,
+            "{:?} vs {fade_c:?}",
             d.root_cap_center
         );
+        // The tip round: 0.5 mm, inside the blend arc's 0.25 mm offset and inside the circle
+        // 0.01 mm within the slot's far edge (radius 1.45 about the hook centre), touching
+        // both; its centre is 1.44 − 0.5 from the hook centre.
+        let round_r = 0.5;
+        let far = rh + hw - 0.01;
+        let round_at = |t: f64| {
+            [
+                hc[0] + (far - round_r) * t.cos(),
+                hc[1] + (far - round_r) * t.sin(),
+            ]
+        };
+        let along = bisect(
+            |t| dist(round_at(t), ce) - (re + m - round_r),
+            PI / 4.0,
+            PI / 2.0,
+        );
+        let round_c = round_at(along);
+        let z = toward(ce, round_c, re + m);
+        let y = toward(hc, round_c, far);
+        // On past `y`, into the slot, to the slot's centre line (radius 1.2).
+        let y_dir = (y[1] - round_c[1]).atan2(y[0] - round_c[0]);
+        let on_round = |a: f64| {
+            [
+                round_c[0] + round_r * a.cos(),
+                round_c[1] + round_r * a.sin(),
+            ]
+        };
+        let to_k = bisect(|w| dist(on_round(w), hc) - rh, y_dir, y_dir + PI);
+        let k = on_round(to_k);
+        assert!(dist(d.tip_round_center, round_c) < 1e-9);
         Self {
             r,
             a,
@@ -175,13 +213,18 @@ impl Hand {
             vs,
             hc,
             rh,
-            tail: d.tail,
             root,
             tip,
             m,
-            cap_c,
-            cap_r,
-            cap_t,
+            fade_c,
+            fade_r,
+            fade_from,
+            fade_to,
+            round_c,
+            round_r,
+            z,
+            y,
+            k,
         }
     }
 
@@ -224,22 +267,22 @@ impl Hand {
         (q[1] - self.hc[1]).atan2(q[0] - self.hc[0]).to_degrees()
     }
 
-    fn m_end(&self) -> [f64; 2] {
-        [self.hc[0] + self.rh * S45, self.hc[1] + self.rh * S45]
-    }
-
-    /// Inside the slot: within 0.25 mm of its centre line (straight, 135° hook, tail).
+    /// Inside the slot: within 0.25 mm of its centre line, straight and round the hook (to
+    /// 45° on its inner edge). Its far edge stops at `y`'s radius, and its end runs straight
+    /// from the inner edge's 45° end to 0.02 mm inside the far edge there.
     fn slot(&self, q: [f64; 2]) -> bool {
         let straight = (q[0] - self.uc).abs() <= self.hw && q[1] >= self.v0 && q[1] <= self.vs;
         let t = self.hook_angle(q);
         let d = (q[0] - self.hc[0]).hypot(q[1] - self.hc[1]);
-        let hook = q[1] >= self.vs && (45.0..=180.0).contains(&t) && (d - self.rh).abs() <= self.hw;
-        let m = self.m_end();
-        let (dx, dy) = (q[0] - m[0], q[1] - m[1]);
-        let along = dx * S45 - dy * S45;
-        let across = dx * S45 + dy * S45;
-        let tail = (0.0..=self.tail).contains(&along) && across.abs() <= self.hw;
-        straight || hook || tail
+        let ring = q[1] >= self.vs && (45.0..=180.0).contains(&t) && (d - self.rh).abs() <= self.hw;
+        let p4 = [
+            self.hc[0] + (self.rh - self.hw) * S45,
+            self.hc[1] + (self.rh - self.hw) * S45,
+        ];
+        let y_in = toward(self.hc, self.y, self.rh + self.hw - 0.02);
+        let inside_end =
+            (y_in[0] - p4[0]) * (q[1] - p4[1]) - (y_in[1] - p4[1]) * (q[0] - p4[0]) >= 0.0;
+        straight || (ring && (t >= self.hook_angle(self.y) || inside_end))
     }
 
     /// On the fin: past the slot's end, inside the peanut and not in the slot, beside the
@@ -290,30 +333,45 @@ impl Hand {
         .fold(f64::INFINITY, f64::min)
     }
 
-    /// Inside the pocket: on the fin, or where the rest of the stud does not stand (in the
-    /// slot or beside the stud) and either inside the root cap's circle, in the wedge about
-    /// the waist arc's centre between the root's corner and where the cap meets the offset
-    /// arc, or elsewhere at or above the slot's end within the margin of the fin's free edges.
+    /// Inside the pocket: on the fin, or at or past the slot's end where the rest of the stud
+    /// does not stand (in the slot or beside the stud) and
+    /// * in the wedge about the root fade's centre between where it leaves the root line and
+    ///   where it meets the offset waist arc: inside the fade's circle;
+    /// * else within the margin of the fin's free edges, or past the fin's tip (about the
+    ///   blend's centre) on the hook's side: inside the blend arc's offset, within `y`'s
+    ///   radius of the hook centre, inside the tip round's circle in the wedge about its
+    ///   centre from `z` to `k`, and within the slot's centre line (1.2 mm) past `k`.
     fn pocket(&self, q: [f64; 2]) -> bool {
         if self.fin(q) {
             return true;
         }
-        if self.peanut(q) && !self.slot(q) {
+        if (self.peanut(q) && !self.slot(q)) || q[1] < self.v0 {
             return false;
         }
-        let tf = [self.a, -self.a];
-        let cross = |p: [f64; 2], s: [f64; 2]| {
-            (p[0] - tf[0]) * (s[1] - tf[1]) - (p[1] - tf[1]) * (s[0] - tf[0])
+        // Whether `q` is in the wedge about `c` swept counter-clockwise from `p` to `s`
+        // (under 180°).
+        let wedge = |c: [f64; 2], p: [f64; 2], s: [f64; 2]| {
+            let cross = |u: [f64; 2], w: [f64; 2]| {
+                (u[0] - c[0]) * (w[1] - c[1]) - (u[1] - c[1]) * (w[0] - c[0])
+            };
+            cross(p, q) >= 0.0 && cross(q, s) >= 0.0
         };
-        let turn = cross(self.root, self.cap_t).signum();
-        let in_wedge = cross(self.root, q) * turn >= 0.0
-            && cross(q, self.cap_t) * turn >= 0.0
-            && dist(q, tf) <= self.rw;
-        if in_wedge {
-            dist(q, self.cap_c) <= self.cap_r
-        } else {
-            q[1] >= self.v0 && self.to_free_edges(q) <= self.m
+        if wedge(self.fade_c, self.fade_from, self.fade_to) {
+            return dist(q, self.fade_c) <= self.fade_r;
         }
+        if self.to_free_edges(q) <= self.m {
+            return true;
+        }
+        let blend_at = |p: [f64; 2]| (p[1] - self.ce[1]).atan2(p[0] - self.ce[0]);
+        let t = self.hook_angle(q);
+        let in_round =
+            !wedge(self.round_c, self.z, self.k) || dist(q, self.round_c) <= self.round_r;
+        blend_at(q) >= blend_at(self.tip)
+            && (0.0..=180.0).contains(&t)
+            && dist(q, self.ce) <= self.re + self.m
+            && dist(q, self.hc) <= dist(self.y, self.hc)
+            && in_round
+            && (t < self.hook_angle(self.k) || dist(q, self.hc) <= self.rh)
     }
 
     /// Twice the integral of the peanut's fin-side (`right`) and inner-side (`left`) half

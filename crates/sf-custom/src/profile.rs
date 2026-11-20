@@ -38,8 +38,9 @@ pub enum StudStyle {
     ///
     /// The slot's centre line runs straight along `v` at `u = slot_offset + slot_width / 2`
     /// from where the fin's root is `root_width` wide to a hook: a 135° turn of radius
-    /// `hook_radius` toward the fin side, then a short straight tail that leaves the lobe
-    /// heading 45° back toward the waist. The hook's outer edge peaks [`SLANT_CAP`] mm (along
+    /// `hook_radius` toward the fin side, its inner edge leaving the lobe before the turn ends
+    /// heading 45° back toward the waist; the slot ends there, out of the lobe, inside the
+    /// pocket. The hook's outer edge peaks [`SLANT_CAP`] mm (along
     /// `v`) short of the stud circle's far edge, so the stud keeps a cap there.
     SlantV2 {
         /// How far the fin reaches from the lobe centre across the row, in mm. A brick pushed
@@ -69,10 +70,11 @@ pub enum StudStyle {
         /// How far the pocket reaches past the fin all round, in mm: the pocket is the fin's
         /// footprint grown by this margin (lines moved out parallel, arcs to concentric arcs,
         /// convex corners rounded), so it shows as an even gap around the fin. On the slot
-        /// side it ends inside the slot (it must be under `slot_width`); at the root it stops
-        /// where the fin attaches, with a round of this radius about the root's outer corner
-        /// beside the waist. The default, half the slot, puts the pocket's edge on the slot's
-        /// centre line.
+        /// side it ends inside the slot (it must be under `slot_width`). At the root it stops
+        /// on the line where the fin attaches and fades out into the waist on a tangent arc;
+        /// past the fin's tip a tangent round carries it over to the slot's far edge, so from
+        /// above it reads as one smooth line. The default, half the slot, puts the pocket's
+        /// edge on the slot's centre line.
         #[serde(default = "default_pocket_margin")]
         pocket_margin: f64,
     },

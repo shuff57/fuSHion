@@ -209,6 +209,11 @@ fn crossings(p: &Seg, q: &Seg) -> Vec<(f64, f64)> {
     }
 }
 
+/// Whether two segments cross or touch.
+pub(crate) fn meets(p: &Seg, q: &Seg) -> bool {
+    !crossings(p, q).is_empty()
+}
+
 /// Crossings of a line `l` with an arc `c`, as fractions along each.
 fn line_arc(l: &Seg, c: &Seg) -> Vec<(f64, f64)> {
     let Seg::Line { a, b } = *l else {
@@ -242,6 +247,32 @@ fn line_arc(l: &Seg, c: &Seg) -> Vec<(f64, f64)> {
     out
 }
 
+/// Where the circle about `c0` of radius `r0` meets the one about `c1` of radius `r1`: the
+/// crossing to the left of the line from `c0` to `c1`, then the one to its right (`None` when
+/// they don't meet).
+pub(crate) fn circles_meet(c0: P2, r0: f64, c1: P2, r1: f64) -> Option<[P2; 2]> {
+    let d = len(sub(c1, c0));
+    if !(d > 1e-12 && d <= r0 + r1 && d >= (r0 - r1).abs()) {
+        return None;
+    }
+    let x = (d * d + r0 * r0 - r1 * r1) / (2.0 * d);
+    let h = (r0 * r0 - x * x).max(0.0).sqrt();
+    let e = [(c1[0] - c0[0]) / d, (c1[1] - c0[1]) / d];
+    let m = [c0[0] + x * e[0], c0[1] + x * e[1]];
+    Some([
+        [m[0] - h * e[1], m[1] + h * e[0]],
+        [m[0] + h * e[1], m[1] - h * e[0]],
+    ])
+}
+
+/// The distance from `p` to the nearest point of the segment from `a` to `b`.
+pub(crate) fn segment_distance(p: P2, a: P2, b: P2) -> f64 {
+    let d = sub(b, a);
+    let t = ((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1]) / (d[0] * d[0] + d[1] * d[1]);
+    let t = t.clamp(0.0, 1.0);
+    len(sub(p, [a[0] + t * d[0], a[1] + t * d[1]]))
+}
+
 /// Signed area of a loop (positive counter-clockwise).
 pub(crate) fn area(l: &[Seg]) -> f64 {
     l.iter().map(Seg::green).sum()
@@ -264,12 +295,7 @@ pub(crate) fn bbox(l: &[Seg]) -> (P2, P2) {
 #[cfg(test)]
 pub(crate) fn distance(s: &Seg, p: P2) -> f64 {
     match *s {
-        Seg::Line { a, b } => {
-            let d = sub(b, a);
-            let t = ((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1]) / (d[0] * d[0] + d[1] * d[1]);
-            let t = t.clamp(0.0, 1.0);
-            len(sub(p, [a[0] + t * d[0], a[1] + t * d[1]]))
-        }
+        Seg::Line { a, b } => segment_distance(p, a, b),
         Seg::Arc { a, b, .. } => {
             let Some((c, r, ..)) = s.arc_params() else {
                 return len(sub(p, a));
