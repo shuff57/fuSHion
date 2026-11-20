@@ -168,12 +168,17 @@ pub struct App {
     last_poll: f64,
 
     exported: Vec<PathBuf>,
+    /// A running export (custom parts make it take a few seconds).
+    export_task: Option<ExportSlot>,
     shot: Option<Shot>,
     /// Screenshot mode: simulate a click at this point (logical px).
     debug_click: Option<egui::Pos2>,
     /// Screenshot mode: open the settings popover.
     debug_settings: bool,
 }
+
+/// Where a background export leaves its result.
+type ExportSlot = Arc<Mutex<Option<Result<Vec<PathBuf>, String>>>>;
 
 fn mtime(p: &Path) -> Option<SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
@@ -283,6 +288,7 @@ impl App {
             source_mtime: None,
             last_poll: 0.0,
             exported: Vec::new(),
+            export_task: None,
             debug_click: None,
             debug_settings: std::env::var("STUDFORGE_SHOT_SETTINGS").is_ok(),
             shot: opts.screenshot.map(|path| Shot {

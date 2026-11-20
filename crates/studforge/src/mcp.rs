@@ -42,6 +42,30 @@ pub struct ExportParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct CustomParams {
+    /// The part, e.g. {"kind":"box","w":2,"d":4,"plates":3},
+    /// {"kind":"slope45","w":2,"d":3,"plates":3}, {"kind":"curve","w":1,"d":3,"plates":3}
+    /// or {"kind":"footprint","cells":[[0,0],[1,0],[1,1]],"plates":3}. Sizes in studs and
+    /// plates (3 plates = 1 brick); slopes fall toward -Y.
+    pub shape: serde_json::Value,
+    /// File name for the part (without extension).
+    pub name: String,
+    /// Use the experimental compliant stud instead of the standard FDM stud.
+    #[serde(default)]
+    pub compliant_stud: bool,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct CustomCommandsParams {
+    /// A SolidCraft batch: {"commands":[{"command":"solid.box","params":{...}}, ...],
+    /// "expect":{"volume_mm3":..., "tol":..., "bodies":1, "bbox":{...}}}. Millimetres;
+    /// only sketch.*, solid.*, parameters.* and body.rename commands are allowed.
+    pub batch: serde_json::Value,
+    /// File name for the part (without extension).
+    pub name: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct BudgetParams {
     /// Maximum number of parts, or null to use the spec's budget.
     pub budget: Option<u32>,
@@ -124,7 +148,36 @@ impl Studforge {
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
-    #[tool(description = "Export the current model: LDraw file with build steps, parts CSV and BrickLink wanted list.")]
+    #[tool(description = "Design a custom 3D-printable LEGO-compatible part from a template (box, 45° slope, curved slope, or any footprint of studs). Writes STL and 3MF (mm) into the session's custom folder. Use it for parts the report lists as custom part candidates.")]
+    async fn make_custom_part(&self, Parameters(p): Parameters<CustomParams>) -> Result<CallToolResult, McpError> {
+        match self.with_session(move |s| s.make_custom_part(&p.shape, p.compliant_stud, &p.name)).await {
+            Ok(m) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                "Made {} ({:.0} mm³) and {}",
+                m.stl.display(),
+                m.volume_mm3,
+                m.three_mf.display()
+            ))])),
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(e.message.to_string())])),
+        }
+    }
+
+    #[tool(description = "Design a freeform custom part with SolidCraft CAD commands (the same command language as SolidCraft's MCP server). The batch must include an `expect` block; the result is checked to be one closed solid no larger than 64 mm per side. Writes STL and 3MF into the session's custom folder.")]
+    async fn make_custom_part_from_commands(
+        &self,
+        Parameters(p): Parameters<CustomCommandsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        match self.with_session(move |s| s.make_custom_from_commands(&p.batch, &p.name)).await {
+            Ok(m) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                "Made {} ({:.0} mm³) and {}",
+                m.stl.display(),
+                m.volume_mm3,
+                m.three_mf.display()
+            ))])),
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(e.message.to_string())])),
+        }
+    }
+
+    #[tool(description = "Export the current model: LDraw file with build steps, parts CSV, BrickLink wanted list, and STL/3MF files for parts whose colour was never produced or is rare.")]
     async fn export_model(&self, Parameters(p): Parameters<ExportParams>) -> Result<CallToolResult, McpError> {
         let files = self
             .with_session(move |s| {

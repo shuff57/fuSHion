@@ -1,0 +1,613 @@
+//! Turns a [`CustomShape`] into SolidCraft commands, with the volume each stage must reach.
+//!
+//! Every part is built the same way, so each stage's volume has a closed form:
+//!
+//! 1. **Block**: the solid outline, full height.
+//! 2. **Hollow**: the underside cut out, leaving walls and a top (for slopes, a sloped roof).
+//! 3. **Tubes** (where there are any): rings standing in the hollow, full height; the part of a
+//!    tube that reaches above the hollow's ceiling lies in solid material and adds nothing.
+//! 4. **Studs** on top; for slotted studs, **Slots** cut into them.
+//! 5. **Roof** (slopes and curves only): the wedge above the slope cut away.
+
+use crate::profile::{StudProfile, StudStyle};
+use crate::shape::{CustomShape, Footprint, P2, signed_area};
+use crate::{CustomError, MAX_PART_MM, Result};
+use serde::Serialize;
+use serde_json::{Value, json};
+use std::f64::consts::{FRAC_PI_2, PI, SQRT_2};
+
+/// Relative volume tolerance used for every stage check (0.2 %, as SolidCraft's MCP `expect`).
+pub const VOLUME_TOL: f64 = 0.002;
+/// Bounding-box tolerance per coordinate, in mm (as SolidCraft's MCP `expect`).
+pub const BBOX_TOL_MM: f64 = 0.05;
+/// The lowest front lip a slope or curve keeps, in mm.
+const MIN_LIP: f64 = 1.0;
+/// How far cutters reach past the faces they cut, in mm, so no cut ends flush on a face.
+const OVERRUN: f64 = 1.0;
+
+/// Stud-grid cells or grid points `(i, j)`.
+type Cells = Vec<(i32, i32)>;
+/// A plan-view extent `(min, max)`, mm.
+type Extent2 = ([f64; 2], [f64; 2]);
+
+/// One stage of a build: its commands and the total volume the part must have after them.
+#[derive(Clone, Debug, Serialize)]
+pub struct Stage {
+    /// What the stage makes ("Block", "Hollow", "Tubes", "Studs", "Slots", "Roof").
+    pub name: String,
+    /// SolidCraft commands, each `{"command": id, "params": {...}}`.
+    pub commands: Vec<Value>,
+    /// Total part volume after this stage, mm³.
+    pub volume_mm3: f64,
+}
+
+/// A complete build: its stages, and the finished part's volume and bounding box.
+#[derive(Clone, Debug, Serialize)]
+pub struct Plan {
+    /// The stages in order.
+    pub stages: Vec<Stage>,
+    /// Finished volume, mm³ (the last stage's).
+    pub volume_mm3: f64,
+    /// Finished bounding box `(min, max)`, mm.
+    pub bbox_mm: ([f64; 3], [f64; 3]),
+}
+
+impl Plan {
+    /// The whole build as one SolidCraft batch, `{"commands": [...], "expect": {...}}`: the
+    /// arguments SolidCraft's MCP `batch` tool takes, with the finished volume, body count
+    /// and bounding box as its `expect`.
+    pub fn batch(&self) -> Value {
+        let commands: Vec<Value> = self
+            .stages
+            .iter()
+            .flat_map(|s| s.commands.iter().cloned())
+            .collect();
+        json!({
+            "commands": commands,
+            "expect": {
+                "volume_mm3": round6(self.volume_mm3),
+                "tol": VOLUME_TOL,
+                "bodies": 1,
+                "bbox": {"min": self.bbox_mm.0.map(round6), "max": self.bbox_mm.1.map(round6)},
+            },
+        })
+    }
+}
+
+fn round6(v: f64) -> f64 {
+    (v * 1e6).round() / 1e6
+}
+
+/// Collects stages, keeping the running volume.
+struct Builder {
+    stages: Vec<Stage>,
+    volume: f64,
+}
+
+impl Builder {
+    fn stage(&mut self, name: &str, commands: Vec<Value>, delta: f64) {
+        self.volume += delta;
+        self.stages.push(Stage {
+            name: name.into(),
+            commands,
+            volume_mm3: self.volume,
+        });
+    }
+}
+
+fn cmd(id: &str, params: Value) -> Value {
+    json!({"command": id, "params": params})
+}
+
+/// `sketch.create` on a principal plane moved `offset` mm along its normal.
+fn sketch(name: &str, plane: &str, offset: f64) -> Value {
+    cmd(
+        "sketch.create",
+        json!({"plane": plane, "offset": format!("{} mm", round6(offset)), "name": name}),
+    )
+}
+
+fn finish() -> Value {
+    cmd("sketch.finish", json!({}))
+}
+
+fn extrude(sketch: &str, name: &str, distance: f64, operation: &str) -> Value {
+    cmd(
+        "solid.extrude",
+        json!({"sketch": sketch, "name": name, "distance": round6(distance), "operation": operation}),
+    )
+}
+
+fn polyline(points: &[P2]) -> Value {
+    let pts: Vec<Value> = points
+        .iter()
+        .map(|p| json!([round6(p[0]), round6(p[1])]))
+        .collect();
+    cmd("sketch.line", json!({"points": pts, "closed": true}))
+}
+
+fn open_polyline(points: &[P2]) -> Value {
+    let pts: Vec<Value> = points
+        .iter()
+        .map(|p| json!([round6(p[0]), round6(p[1])]))
+        .collect();
+    cmd("sketch.line", json!({"points": pts}))
+}
+
+/// A circular arc from `start` to `end` about `center` (both ends at the same radius), drawn
+/// through its midpoint so it passes exactly through both ends.
+fn arc(start: P2, end: P2, center: P2) -> Value {
+    let r = (start[0] - center[0]).hypot(start[1] - center[1]);
+    let a0 = (start[1] - center[1]).atan2(start[0] - center[0]);
+    let a1 = (end[1] - center[1]).atan2(end[0] - center[0]);
+    // The shorter way round (roof arcs are quarter circles).
+    let mut da = a1 - a0;
+    while da > PI {
+        da -= 2.0 * PI;
+    }
+    while da < -PI {
+        da += 2.0 * PI;
+    }
+    let mid = a0 + da / 2.0;
+    let through = [center[0] + r * mid.cos(), center[1] + r * mid.sin()];
+    cmd(
+        "sketch.arc.three_point",
+        json!({"start": [round6(start[0]), round6(start[1])], "end": [round6(end[0]), round6(end[1])], "through": [round6(through[0]), round6(through[1])]}),
+    )
+}
+
+fn circle(c: P2, diameter: f64) -> Value {
+    cmd(
+        "sketch.circle.center",
+        json!({"center": [round6(c[0]), round6(c[1])], "diameter": round6(diameter)}),
+    )
+}
+
+/// Area of a disk of radius `r` inside the strip `|y| ≤ a`.
+fn disk_in_strip(r: f64, a: f64) -> f64 {
+    if a >= r {
+        return PI * r * r;
+    }
+    2.0 * (a * (r * r - a * a).sqrt() + r * r * (a / r).asin())
+}
+
+/// `∬ f(y) dA` over a disk of radius `r` centred at `y = y0` (Simpson's rule on
+/// `y = y0 + r·sin θ`, which takes away the square-root ends of the chords).
+fn disk_integral(r: f64, y0: f64, f: &dyn Fn(f64) -> f64) -> f64 {
+    const N: usize = 4000;
+    let h = PI / N as f64;
+    let g = |k: usize| {
+        let t = -FRAC_PI_2 + h * k as f64;
+        let c = t.cos();
+        f(y0 + r * t.sin()) * 2.0 * r * r * c * c
+    };
+    let mut s = g(0) + g(N);
+    for k in 1..N {
+        s += g(k) * if k % 2 == 1 { 4.0 } else { 2.0 };
+    }
+    s * h / 3.0
+}
+
+/// The plan for `shape` under `profile`: commands, stage volumes and bounding box.
+pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
+    profile.validate()?;
+    let plates = shape.plates();
+    if plates == 0 {
+        return Err(CustomError::InvalidShape(
+            "a part must be at least one plate tall".into(),
+        ));
+    }
+    let p = profile;
+    let h = p.body_height(plates);
+    let hollow_h = h - p.top_thickness;
+    let mut b = Builder {
+        stages: Vec::new(),
+        volume: 0.0,
+    };
+
+    // Cells with studs, tube points (grid units), and the plan's footprint extents.
+    let (studs, tubes, bbox_xy, roof): (Cells, Cells, Extent2, Option<Roof>) = match shape {
+        CustomShape::Box { w, d, .. } => {
+            let (w, d) = dims(*w, *d, 1)?;
+            block_and_hollow(&mut b, p, w, d, h, hollow_h);
+            let studs = grid(0..w, 0..d);
+            let tubes = grid(1..w, 1..d);
+            let ext = rect_extent(p, w, d);
+            (studs, tubes, ext, None)
+        }
+        CustomShape::Slope45 { w, d, .. } | CustomShape::Curve { w, d, .. } => {
+            let (w, d) = dims(*w, *d, 2)?;
+            let curved = matches!(shape, CustomShape::Curve { .. });
+            let roof = Roof::new(p, d, h, curved)?;
+            // Block.
+            let len = f64::from(w) * p.pitch - 2.0 * p.clearance;
+            let depth = f64::from(d) * p.pitch - 2.0 * p.clearance;
+            b.stage(
+                "Block",
+                vec![cmd("solid.box", json!({"length": round6(len), "width": round6(depth), "height": round6(h), "corner": [round6(p.clearance), round6(p.clearance), 0.0], "name": "Block", "body_name": "Part"}))],
+                len * depth * h,
+            );
+            // Hollow: a prism along X whose section follows the roof.
+            let inner_len = len - 2.0 * p.wall;
+            let section = roof.hollow_section(p, d);
+            let mut hollow = vec![sketch("HollowSketch", "YZ", p.clearance + p.wall)];
+            hollow.extend(roof.section_commands(&section));
+            hollow.push(finish());
+            hollow.push(extrude("HollowSketch", "Hollow", inner_len, "cut"));
+            b.stage("Hollow", hollow, -roof.hollow_area(p, d) * inner_len);
+            let tubes = grid(1..w, 1..d);
+            let studs: Vec<(i32, i32)> = grid(0..w, 0..d)
+                .into_iter()
+                .filter(|&(_, j)| f64::from(j) * p.pitch >= roof.y_top - 1e-9)
+                .collect();
+            (studs, tubes, rect_extent(p, w, d), Some(roof))
+        }
+        CustomShape::Footprint { cells, .. } => {
+            let f = Footprint::new(cells)?;
+            let outer = f.offset_loops(p.pitch, p.clearance);
+            let inner = f.offset_loops(p.pitch, p.clearance + p.wall);
+            let area: f64 = outer.iter().map(|l| signed_area(l)).sum();
+            let inner_area: f64 = inner.iter().map(|l| signed_area(l)).sum();
+            let mut block = vec![sketch("BlockSketch", "XY", 0.0)];
+            block.extend(outer.iter().map(|l| polyline(l)));
+            block.push(finish());
+            block.push(extrude("BlockSketch", "Block", h, "new"));
+            b.stage("Block", block, area * h);
+            let mut hollow = vec![sketch("HollowSketch", "XY", -OVERRUN)];
+            hollow.extend(inner.iter().map(|l| polyline(l)));
+            hollow.push(finish());
+            hollow.push(extrude("HollowSketch", "Hollow", hollow_h + OVERRUN, "cut"));
+            b.stage("Hollow", hollow, -inner_area * hollow_h);
+            let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+            for q in outer.iter().flatten() {
+                for k in 0..2 {
+                    lo[k] = lo[k].min(q[k]);
+                    hi[k] = hi[k].max(q[k]);
+                }
+            }
+            let studs: Vec<(i32, i32)> = f.cells.iter().copied().collect();
+            (studs, f.full_corners(), (lo, hi), None)
+        }
+    };
+
+    let size = [
+        bbox_xy.1[0] - bbox_xy.0[0],
+        bbox_xy.1[1] - bbox_xy.0[1],
+        h + p.stud_height,
+    ];
+    if size.iter().any(|s| *s > MAX_PART_MM) {
+        return Err(CustomError::TooLarge(format!(
+            "{} would be {:.1} × {:.1} × {:.1} mm; custom parts are limited to {MAX_PART_MM} mm a side",
+            shape.label(),
+            size[0],
+            size[1],
+            size[2]
+        )));
+    }
+
+    // Tubes: rings from the floor to the underside of the top.
+    if !tubes.is_empty() {
+        let (ro, ri) = (p.tube_outer_diameter / 2.0, p.tube_inner_diameter / 2.0);
+        let mut c = vec![sketch("TubeSketch", "XY", 0.0)];
+        let mut added = 0.0;
+        for &(i, j) in &tubes {
+            let at = [f64::from(i) * p.pitch, f64::from(j) * p.pitch];
+            c.push(circle(at, p.tube_outer_diameter));
+            c.push(circle(at, p.tube_inner_diameter));
+            added += match &roof {
+                // Only the part below the hollow's ceiling is new material.
+                Some(roof) => {
+                    let ceil = |y: f64| roof.ceiling(p, y).clamp(0.0, hollow_h);
+                    disk_integral(ro, at[1], &ceil) - disk_integral(ri, at[1], &ceil)
+                }
+                None => PI * (ro * ro - ri * ri) * hollow_h,
+            };
+        }
+        c.push(finish());
+        c.push(extrude("TubeSketch", "Tubes", hollow_h, "join"));
+        b.stage("Tubes", c, added);
+    }
+
+    // Studs.
+    let centres: Vec<P2> = studs
+        .iter()
+        .map(|&(i, j)| {
+            [
+                (f64::from(i) + 0.5) * p.pitch,
+                (f64::from(j) + 0.5) * p.pitch,
+            ]
+        })
+        .collect();
+    let rs = p.stud_diameter / 2.0;
+    let mut c = vec![sketch("StudSketch", "XY", h)];
+    let per_stud = match p.stud_style {
+        StudStyle::Solid => {
+            c.extend(centres.iter().map(|&q| circle(q, p.stud_diameter)));
+            PI * rs * rs * p.stud_height
+        }
+        StudStyle::Slotted { inner_diameter, .. } => {
+            for &q in &centres {
+                c.push(circle(q, p.stud_diameter));
+                c.push(circle(q, inner_diameter));
+            }
+            PI * (rs * rs - (inner_diameter / 2.0).powi(2)) * p.stud_height
+        }
+    };
+    c.push(finish());
+    c.push(extrude("StudSketch", "Studs", p.stud_height, "join"));
+    b.stage("Studs", c, per_stud * centres.len() as f64);
+
+    if let StudStyle::Slotted {
+        inner_diameter,
+        slot_width,
+        slot_depth,
+    } = p.stud_style
+    {
+        // One bar across each stud's diameter (along X) cuts both slots.
+        let half = slot_width / 2.0;
+        let reach = rs + 0.5;
+        let mut c = vec![sketch("SlotSketch", "XY", h + p.stud_height - slot_depth)];
+        for q in &centres {
+            c.push(cmd(
+                "sketch.rectangle.two_point",
+                json!({"p0": [round6(q[0] - reach), round6(q[1] - half)], "p1": [round6(q[0] + reach), round6(q[1] + half)]}),
+            ));
+        }
+        c.push(finish());
+        c.push(extrude("SlotSketch", "Slots", slot_depth + OVERRUN, "cut"));
+        let per =
+            (disk_in_strip(rs, half) - disk_in_strip(inner_diameter / 2.0, half)) * slot_depth;
+        b.stage("Slots", c, -per * centres.len() as f64);
+    }
+
+    if let (Some(roof), CustomShape::Slope45 { w, .. } | CustomShape::Curve { w, .. }) =
+        (&roof, shape)
+    {
+        let len = f64::from(*w) * p.pitch - 2.0 * p.clearance;
+        let mut c = vec![sketch("RoofSketch", "YZ", p.clearance - OVERRUN)];
+        c.extend(roof.wedge_commands(h));
+        c.push(finish());
+        c.push(extrude("RoofSketch", "Roof", len + 2.0 * OVERRUN, "cut"));
+        b.stage("Roof", c, -roof.wedge_area() * len);
+    }
+
+    let bbox = (
+        [bbox_xy.0[0], bbox_xy.0[1], 0.0],
+        [bbox_xy.1[0], bbox_xy.1[1], h + p.stud_height],
+    );
+    let volume = b.volume;
+    Ok(Plan {
+        stages: b.stages,
+        volume_mm3: volume,
+        bbox_mm: bbox,
+    })
+}
+
+/// Checks a `w × d` size: at least 1 (or `min_d` deep), at most 64 studs.
+fn dims(w: u32, d: u32, min_d: u32) -> Result<(i32, i32)> {
+    if w == 0 || d < min_d.max(1) {
+        return Err(CustomError::InvalidShape(format!(
+            "size {w}x{d} is too small (at least 1 wide and {} deep)",
+            min_d.max(1)
+        )));
+    }
+    let w = i32::try_from(w.min(64)).unwrap_or(64);
+    let d = i32::try_from(d.min(64)).unwrap_or(64);
+    Ok((w, d))
+}
+
+fn grid(is: std::ops::Range<i32>, js: std::ops::Range<i32>) -> Vec<(i32, i32)> {
+    is.flat_map(|i| js.clone().map(move |j| (i, j))).collect()
+}
+
+fn rect_extent(p: &StudProfile, w: i32, d: i32) -> ([f64; 2], [f64; 2]) {
+    (
+        [p.clearance, p.clearance],
+        [
+            f64::from(w) * p.pitch - p.clearance,
+            f64::from(d) * p.pitch - p.clearance,
+        ],
+    )
+}
+
+/// Block and rectangular hollow of a plain brick.
+fn block_and_hollow(b: &mut Builder, p: &StudProfile, w: i32, d: i32, h: f64, hollow_h: f64) {
+    let len = f64::from(w) * p.pitch - 2.0 * p.clearance;
+    let depth = f64::from(d) * p.pitch - 2.0 * p.clearance;
+    b.stage(
+        "Block",
+        vec![cmd("solid.box", json!({"length": round6(len), "width": round6(depth), "height": round6(h), "corner": [round6(p.clearance), round6(p.clearance), 0.0], "name": "Block", "body_name": "Part"}))],
+        len * depth * h,
+    );
+    let (il, id) = (len - 2.0 * p.wall, depth - 2.0 * p.wall);
+    let inset = p.clearance + p.wall;
+    b.stage(
+        "Hollow",
+        vec![cmd(
+            "solid.box",
+            json!({"length": round6(il), "width": round6(id), "height": round6(hollow_h + OVERRUN), "corner": [round6(inset), round6(inset), -OVERRUN], "operation": "cut", "name": "Hollow"}),
+        )],
+        -il * id * hollow_h,
+    );
+}
+
+/// The sloped (or curved) roof of a slope brick, in the brick's Y–Z section.
+///
+/// The roof rises from the front lip `(clearance, lip)` to the ridge `(y_top, h)`, a run and
+/// rise of `run` each: a 45° line, or a convex quarter circle of radius `run` about
+/// `(y_top, lip)`. Studs stand only where the top is flat (`y ≥ y_top`).
+#[derive(Clone, Copy, Debug)]
+struct Roof {
+    curved: bool,
+    lip: f64,
+    run: f64,
+    y_top: f64,
+    h: f64,
+    front: f64,
+}
+
+impl Roof {
+    fn new(p: &StudProfile, d: i32, h: f64, curved: bool) -> Result<Self> {
+        // The roof covers every row but the back one, unless the brick is too low for that.
+        let run = (f64::from(d - 1) * p.pitch - p.clearance).min(h - MIN_LIP);
+        if run <= p.wall * 2.0 {
+            return Err(CustomError::InvalidShape(format!(
+                "a {}-plate slope is too low for a roof (needs a body over {:.1} mm tall)",
+                (h / p.plate_height).round(),
+                MIN_LIP + p.wall * 2.0
+            )));
+        }
+        let lip = h - run;
+        let roof = Self {
+            curved,
+            lip,
+            run,
+            y_top: p.clearance + run,
+            h,
+            front: p.clearance,
+        };
+        // The underside of the roof must stay above the floor at the front wall.
+        if roof.ceiling(p, p.clearance + p.wall) <= 0.2 {
+            return Err(CustomError::InvalidShape(
+                "the slope's front lip is too low for its wall thickness".into(),
+            ));
+        }
+        // The hollow must keep a flat stretch behind the roof, inside the back wall.
+        let back_wall = f64::from(d) * p.pitch - p.clearance - p.wall;
+        if roof.knee(p).max(roof.y_top) >= back_wall - 0.2 {
+            return Err(CustomError::InvalidShape(
+                "the slope leaves no room for the hollow behind its roof".into(),
+            ));
+        }
+        Ok(roof)
+    }
+
+    /// Height of the hollow's ceiling at `y` (a wall's thickness under the roof, and the top's
+    /// thickness under the flat top).
+    fn ceiling(&self, p: &StudProfile, y: f64) -> f64 {
+        let flat = self.h - p.top_thickness;
+        if self.curved {
+            // Under the arc, then a step up to the flat ceiling behind the ridge.
+            if y >= self.y_top {
+                return flat;
+            }
+            let r = self.run - p.wall;
+            let dy = y - self.y_top;
+            (self.lip + (r * r - dy * dy).max(0.0).sqrt()).min(flat)
+        } else {
+            // A wall's thickness (measured square to the roof) under the 45° line, until it
+            // meets the flat ceiling a little behind the ridge.
+            (self.lip + (y - self.front) - p.wall * SQRT_2).min(flat)
+        }
+    }
+
+    /// The hollow's section (Y, Z) as a polygon, or for a curve the points of its outline with
+    /// the arc running from `arc.0` to `arc.1` about `arc.2`.
+    fn hollow_section(&self, p: &StudProfile, d: i32) -> Section {
+        let y0 = self.front + p.wall;
+        let y1 = f64::from(d) * p.pitch - p.clearance - p.wall;
+        let flat = self.h - p.top_thickness;
+        if self.curved {
+            let r = self.run - p.wall;
+            // Arc from the ridge side (y_top, lip + r) down to the front (y0, lip).
+            Section::Curved {
+                lines: vec![
+                    [y0, self.lip],
+                    [y0, -OVERRUN],
+                    [y1, -OVERRUN],
+                    [y1, flat],
+                    [self.y_top, flat],
+                    [self.y_top, self.lip + r],
+                ],
+                center: [self.y_top, self.lip],
+            }
+        } else {
+            Section::Polygon(vec![
+                [y0, -OVERRUN],
+                [y1, -OVERRUN],
+                [y1, flat],
+                [self.knee(p), flat],
+                [y0, self.ceiling(p, y0)],
+            ])
+        }
+    }
+
+    /// Area of the hollow's section above the floor (`z ≥ 0`).
+    fn hollow_area(&self, p: &StudProfile, d: i32) -> f64 {
+        let y0 = self.front + p.wall;
+        let y1 = f64::from(d) * p.pitch - p.clearance - p.wall;
+        let flat = self.h - p.top_thickness;
+        if self.curved {
+            // Behind the ridge: flat. In front: a rectangle up to the lip and a quarter disk.
+            let r = self.run - p.wall;
+            (y1 - self.y_top) * flat + (self.y_top - y0) * self.lip + PI * r * r / 4.0
+        } else {
+            // A trapezoid under the 45° line up to the knee, then flat.
+            let c0 = self.ceiling(p, y0);
+            let knee = self.knee(p);
+            (knee - y0) * (c0 + flat) / 2.0 + (y1 - knee) * flat
+        }
+    }
+
+    /// Where the underside of a 45° roof meets the flat ceiling.
+    fn knee(&self, p: &StudProfile) -> f64 {
+        self.h - p.top_thickness - self.lip + self.front + p.wall * SQRT_2
+    }
+
+    /// The commands drawing a hollow section.
+    fn section_commands(&self, s: &Section) -> Vec<Value> {
+        match s {
+            Section::Polygon(pts) => vec![polyline(pts)],
+            Section::Curved { lines, center } => {
+                // The open chain of lines, then the arc closing it from its last point to its first.
+                let (Some(first), Some(last)) = (lines.first(), lines.last()) else {
+                    return Vec::new();
+                };
+                vec![open_polyline(lines), arc(*last, *first, *center)]
+            }
+        }
+    }
+
+    /// Area of the wedge the roof cut takes off the block's section.
+    fn wedge_area(&self) -> f64 {
+        if self.curved {
+            self.run * self.run * (1.0 - PI / 4.0)
+        } else {
+            self.run * self.run / 2.0
+        }
+    }
+
+    /// The commands drawing the wedge above the roof, reaching past the block at the front
+    /// and over the top.
+    fn wedge_commands(&self, h: f64) -> Vec<Value> {
+        let front = self.front - OVERRUN;
+        if self.curved {
+            let lip_pt = [self.front, self.lip];
+            let ridge = [self.y_top, h];
+            let chain = [
+                ridge,
+                [self.y_top, h + OVERRUN],
+                [front, h + OVERRUN],
+                [front, self.lip],
+                lip_pt,
+            ];
+            vec![
+                open_polyline(&chain),
+                arc(lip_pt, ridge, [self.y_top, self.lip]),
+            ]
+        } else {
+            vec![polyline(&[
+                [front, self.lip - OVERRUN],
+                [self.y_top, h],
+                [self.y_top, h + OVERRUN],
+                [front, h + OVERRUN],
+            ])]
+        }
+    }
+}
+
+/// A hollow section: a polygon, or lines closed by an arc.
+enum Section {
+    Polygon(Vec<P2>),
+    Curved { lines: Vec<P2>, center: P2 },
+}

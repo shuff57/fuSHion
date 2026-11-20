@@ -14,6 +14,7 @@ sf-ldraw.workspace = true
 sf-render.workspace = true
 sf-export.workspace = true
 sf-catalog.workspace = true
+sf-custom = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
@@ -21,3 +22,8 @@ image.workspace = true
 base64.workspace = true
 reqwest.workspace = true
 dirs.workspace = true
+
+[features]
+default = ["custom"]
+# Custom printable bricks via SolidCraft (adds a long first build).
+custom = ["dep:sf-custom"]

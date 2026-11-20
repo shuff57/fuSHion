@@ -110,3 +110,17 @@ touching the ground or each other; floating pieces are reported as errors.
   base, add a stand or a baseplate.
 - **no effect**: a shape was too small to show at this size. Make it bigger
   or raise the resolution.
+
+## Custom printable parts
+When the report lists a custom part candidate (a colour never produced, a
+rare part) or a shape no catalog part can make, design a printable part:
+- `make_custom_part` with a template: `{"kind":"box","w":2,"d":4,"plates":3}`,
+  `{"kind":"slope45","w":2,"d":3,"plates":3}`, `{"kind":"curve","w":1,"d":3,"plates":3}`
+  or `{"kind":"footprint","cells":[[0,0],[1,0],[1,1]],"plates":3}`. Sizes are
+  studs and plates; slopes fall toward -Y.
+- `make_custom_part_from_commands` for anything else, written as a SolidCraft
+  command batch in millimetres (8 mm pitch, 9.6 mm brick, Ø4.8 × 1.8 mm studs,
+  Ø6.51/4.8 mm tubes, 1.2 mm walls, 0.1 mm side clearance) with an `expect`
+  block for the volume and bounding box.
+
+Export already writes printable files for never-produced and rare colours.

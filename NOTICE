@@ -1,0 +1,84 @@
+studforge
+Copyright (c) 2026 studforge contributors (MIT, see LICENSE)
+
+Binaries built with the default `custom-bricks` feature include SolidCraft
+(https://github.com/tangency-labs/solidcraft, MIT OR Apache-2.0) and its kernel
+solidcore (Apache-2.0). Their notices follow.
+
+===== SolidCraft NOTICE =====
+SolidCraft
+Copyright (c) 2026 SolidCraft contributors.
+Licensed under the MIT License or the Apache License, Version 2.0, at your option
+(LICENSE-MIT, LICENSE-APACHE).
+
+Brand and interface
+
+SolidCraft's brand and interface are not under MIT OR Apache-2.0. The UI kit (crates/ui-kit), the
+look (crates/look: the interface icons, glyphs and built-in themes), the theme (crates/theme: the
+design tokens and palettes), and the SolidCraft name, logo, app icon and brand kit are under the
+SolidCraft Brand and Interface Licence (LICENSE-BRAND). They may be used, changed and contributed
+to as part of SolidCraft; using them in anything else needs the maintainers' written permission.
+Third-party fonts in those folders keep their own licences.
+
+Third-party material
+
+Software dependencies are listed in Cargo.lock; their licences are in THIRD-PARTY-LICENSES.txt
+(`cargo xtask licences`), which the programs also carry (Help > About > Licences,
+`solidcraft-cli licences`). The geometry kernel is solidcore, a Rust port of the SMLib and SM_API components of
+USD BRep (https://github.com/NVIDIA-Omniverse/usd-brep), licensed under the Apache License 2.0.
+solidcore is vendored in `solidcore/` together with its history; its own LICENSE, NOTICE and
+ATTRIBUTION.md are there. Copyright (c) 2026 The solidcore contributors; USD BRep is
+Copyright (c) 2020-2026 NVIDIA CORPORATION & AFFILIATES.
+
+Some code is adapted from sibling projects in the storytold family (CADCraft, GridCraft), which are
+licensed MIT OR Apache-2.0; ATTRIBUTION.md lists the files.
+The release packaging (.github/workflows/release.yml, packaging/) is adapted from PhotoCraft
+(https://github.com/storytold/photocraft), licensed under the Apache License 2.0.
+
+The incremental Radiance RGBE row adapter in crates/render/src/lighting/hdr.rs adapts
+decoding state machines from image 0.25.10 (https://github.com/image-rs/image),
+MIT OR Apache-2.0. ATTRIBUTION.md describes the bounded/cancellable changes; the
+original licence texts are included in THIRD-PARTY-LICENSES.txt.
+
+Most bundled assets are drawn in code or contributed originally; third-party fonts (Liberation Sans
+for sketch text, BIZ UDPGothic for web Japanese display) are licensed under SIL OFL 1.1. The
+per-file list is in ATTRIBUTION.md.
+
+SolidCraft is an independent project and is not affiliated with, sponsored by or endorsed by
+Autodesk, Dassault Systèmes, PTC, Siemens, Blender or any other CAD vendor. Fusion, AutoCAD,
+Inventor, Alias and Tinkercad are trademarks of Autodesk, Inc.; SolidWorks is a trademark of
+Dassault Systèmes; Onshape and Creo are trademarks of PTC; Blender is a trademark of the Blender
+Foundation. Product names appear only to describe compatibility, such as the mouse navigation
+presets in Preferences › Navigation and file formats from public specifications.
+
+===== solidcore NOTICE =====
+solidcore
+Copyright (c) 2026 The solidcore contributors
+
+This product is a Rust port (a derivative work) of the SMLib and SM_API
+components of USD BRep, https://github.com/NVIDIA-Omniverse/usd-brep
+(v1.0.1, commit 3fd5b95), licensed under the Apache License, Version 2.0.
+See ATTRIBUTION.md for exactly which upstream material is used.
+
+The upstream work carries the following notice:
+
+  USD BRep is Copyright (c) 2020-2026, NVIDIA CORPORATION & AFFILIATES. All
+  rights reserved. NVIDIA-authored portions of this product are licensed under
+  the Apache License, Version 2.0, except where otherwise noted.
+
+The upstream SMLib and SM_API source files carry the SPDX header:
+
+  SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+  SPDX-License-Identifier: Apache-2.0
+
+Upstream third-party notices (THIRD_PARTY_NOTICES.md at the pinned commit) cover
+OpenUSD, oneTBB, hwloc, MaterialX, OpenSubdiv, CPython, HACL*, pybind11, the
+UsdSolid proposals, usd-validation-nvidia, the repo bootstrap scripts and optional
+Python GUI tooling. None of those components is part of SMLib or SM_API, and none
+is used, ported or redistributed by solidcore, so no further third-party notices
+apply.
+
+Modifications: the C++ sources were translated to Rust and restructured (arena
+topology, typed ids, error values instead of status codes, explicit kernel
+state instead of a global context). Each ported Rust file names the upstream
+file(s) it derives from in its header.

@@ -271,36 +271,57 @@ impl App {
     }
 
     fn export_section(&mut self, ui: &mut egui::Ui) {
+        // Collect a finished export.
+        if let Some(task) = &self.export_task {
+            let done = task.lock().ok().and_then(|mut g| g.take());
+            if let Some(result) = done {
+                self.export_task = None;
+                match result {
+                    Ok(paths) => {
+                        let n = paths.len();
+                        self.exported = paths;
+                        self.set_status(format!("Exported {n} files"), false);
+                    }
+                    Err(e) => self.set_status(format!("Export failed: {e}"), true),
+                }
+            } else {
+                ui.ctx().request_repaint_after(std::time::Duration::from_millis(150));
+            }
+        }
         let Some(s) = &self.session else { return };
         let has_model = s.model.is_some();
         ui.label(RichText::new("Export").size(16.0).strong());
-        ui.label(
-            RichText::new("LDraw model, parts list (CSV) and BrickLink wanted list.")
-                .small()
-                .weak(),
-        );
+        let what = if sf_agent::custom::ENABLED {
+            "LDraw model, parts list (CSV), BrickLink wanted list, and STL/3MF files for parts that need printing."
+        } else {
+            "LDraw model, parts list (CSV) and BrickLink wanted list."
+        };
+        ui.label(RichText::new(what).small().weak());
         ui.add_space(2.0);
-        if ui
-            .add_enabled(has_model, egui::Button::new("Export to folder…"))
-            .clicked()
+        let busy = self.export_task.is_some();
+        let label = if busy { "Exporting…" } else { "Export to folder…" };
+        if ui.add_enabled(has_model && !busy, egui::Button::new(label)).clicked()
             && let Some(dir) = rfd::FileDialog::new().pick_folder()
         {
-            match s.export(&dir) {
-                Ok(paths) => {
-                    let n = paths.len();
-                    self.exported = paths;
-                    self.set_status(format!("Exported {n} files to {}", dir.display()), false);
+            match s.export_job() {
+                Ok(job) => {
+                    let slot = std::sync::Arc::new(std::sync::Mutex::new(None));
+                    let out = slot.clone();
+                    let ctx = ui.ctx().clone();
+                    std::thread::spawn(move || {
+                        let r = job.run(&dir).map_err(|e| format!("{e:#}"));
+                        if let Ok(mut g) = out.lock() {
+                            *g = Some(r);
+                        }
+                        ctx.request_repaint();
+                    });
+                    self.export_task = Some(slot);
                 }
                 Err(e) => self.set_status(format!("Export failed: {e:#}"), true),
             }
         }
         for p in &self.exported {
-            ui.label(
-                RichText::new(p.display().to_string())
-                    .small()
-                    .monospace()
-                    .weak(),
-            );
+            ui.label(RichText::new(p.display().to_string()).small().monospace().weak());
         }
     }
 }

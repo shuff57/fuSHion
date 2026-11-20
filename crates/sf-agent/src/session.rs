@@ -234,9 +234,48 @@ impl Session {
         Ok(())
     }
 
-    /// Write `model.ldr`, `parts.csv` and `bricklink.xml` into `out`.
+    /// Write the LDraw model, parts CSV, BrickLink wanted list and any
+    /// custom printable parts into `out`.
     pub fn export(&self, out: &Path) -> Result<Vec<PathBuf>> {
+        self.export_job()?.run(out)
+    }
+
+    /// Everything an export needs, detached from the session so it can run
+    /// on another thread (custom parts take about a second each).
+    pub fn export_job(&self) -> Result<ExportJob> {
         let Some(model) = &self.model else { bail!("nothing built yet") };
+        Ok(ExportJob {
+            model: model.clone(),
+            palette: self.palette.clone(),
+            catalog: self.catalog.clone(),
+            availability: self.availability.clone(),
+        })
+    }
+
+    /// Generate a custom part into the session's `custom` folder.
+    pub fn make_custom_part(&self, shape: &serde_json::Value, v2: bool, name: &str) -> Result<crate::custom::MadePart> {
+        crate::custom::make_part(shape, v2, &self.dir.join("custom"), name)
+    }
+
+    /// Generate a freeform custom part from SolidCraft commands into the
+    /// session's `custom` folder.
+    pub fn make_custom_from_commands(&self, batch: &serde_json::Value, name: &str) -> Result<crate::custom::MadePart> {
+        crate::custom::make_part_from_commands(batch, &self.dir.join("custom"), name)
+    }
+}
+
+/// A detached export (see [`Session::export_job`]).
+#[derive(Clone)]
+pub struct ExportJob {
+    pub model: Model,
+    pub palette: Palette,
+    pub catalog: Option<Arc<sf_catalog::CatalogIndex>>,
+    pub availability: Arc<dyn Availability>,
+}
+
+impl ExportJob {
+    pub fn run(&self, out: &Path) -> Result<Vec<PathBuf>> {
+        let model = &self.model;
         std::fs::create_dir_all(out)?;
         let cat = self.catalog.as_deref();
         let mut written = Vec::new();
@@ -254,6 +293,17 @@ impl Session {
                 written.push(p);
             }
             Err(e) => eprintln!("BrickLink wanted list skipped: {e}"),
+        }
+        let needs = crate::custom::custom_needs(model, self.availability.as_ref());
+        if !needs.is_empty() && crate::custom::ENABLED {
+            let (files, notes) = crate::custom::make_needed_parts(&needs, &self.palette, &out.join("custom"))?;
+            written.extend(files);
+            if !notes.is_empty() {
+                let p = out.join("custom").join("notes.txt");
+                std::fs::create_dir_all(out.join("custom"))?;
+                std::fs::write(&p, notes.join("\n"))?;
+                written.push(p);
+            }
         }
         Ok(written)
     }

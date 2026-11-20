@@ -98,7 +98,7 @@ claude mcp add studforge -- studforge mcp --session ~/studforge-session
 Then ask Claude: *"Use studforge to build ~/Pictures/fox.jpg as a brick
 model, about 400 parts."* Tools: `get_guide`, `set_source_image`,
 `view_source_image`, `set_budget`, `build_model`, `get_state`,
-`export_model`. Open the same session folder in the desktop app
+`export_model`, `make_custom_part`, `make_custom_part_from_commands`. Open the same session folder in the desktop app
 (`studforge gui --session ~/studforge-session`) to watch builds appear live.
 
 ### Command line
@@ -107,6 +107,7 @@ model, about 400 parts."* Tools: `get_guide`, `set_source_image`,
 studforge design photo.jpg --budget 400 [--backend api|claude-code] [--prompt "make it a relief"]
 studforge build spec.json [--image photo.jpg] [--budget 400]   # no Claude: build a spec you wrote
 studforge export --session <dir> <out-dir>
+studforge custom '{"kind":"slope45","w":2,"d":3,"plates":3}' --out parts   # a printable part
 studforge guide                                                # print the shape language
 ```
 
@@ -128,7 +129,16 @@ and the spec history.
 When a model needs a part that doesn't exist (a colour never produced, a rare
 part, a cluster of tiny parts that would be better as one piece), studforge
 generates it with [SolidCraft](https://github.com/tangency-labs/solidcraft)'s
-parametric CAD engine, linked in-process. The default connector uses the
+parametric CAD engine, linked in-process. Export writes STL and 3MF files for
+every part whose colour was never produced or is rare, plus
+`custom/custom-parts.csv`. Templates cover boxes, 45° slopes, curved slopes and
+any footprint of studs; through MCP, Claude can also write freeform parts as
+SolidCraft command batches, which are checked for volume, size and a closed
+mesh before anything is written. Every part's volume is verified against the
+expected value at each modelling stage.
+
+SolidCraft adds roughly 15 minutes to the first build. To skip it:
+`cargo install --path crates/studforge --no-default-features`. The default connector uses the
 standard FDM-tuned dimensions also used by Slant 3D's free brick tool (8 mm
 pitch, Ø4.8 mm studs, 0.1 mm side clearance). An experimental compliant stud,
 inspired by the leaf-spring design Slant 3D described in *We Made a Better LEGO
@@ -152,7 +162,7 @@ or upload them to a print service.
 
 ## Credits and licences
 
-studforge is MIT licensed. It downloads, but does not redistribute, the
+studforge is MIT licensed; see `NOTICE` for SolidCraft's notices. It downloads, but does not redistribute, the
 [LDraw parts library](https://library.ldraw.org) (CC BY 4.0 and earlier
 licences; see the library's `CAreadme.txt`) and
 [Rebrickable](https://rebrickable.com) catalog data. SolidCraft is MIT OR

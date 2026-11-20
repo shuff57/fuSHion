@@ -75,6 +75,19 @@ enum Cmd {
         #[arg(long)]
         session: Option<PathBuf>,
     },
+    /// Make a custom 3D-printable part (STL + 3MF), e.g.
+    /// `studforge custom '{"kind":"slope45","w":2,"d":3,"plates":3}' --out parts`.
+    Custom {
+        /// The part as JSON: kind box | slope45 | curve | footprint (see `studforge guide`).
+        shape: String,
+        #[arg(long, default_value = ".")]
+        out: PathBuf,
+        #[arg(long, default_value = "custom-part")]
+        name: String,
+        /// Use the experimental compliant stud.
+        #[arg(long)]
+        compliant_stud: bool,
+    },
     /// Print the spec guide.
     Guide,
 }
@@ -88,6 +101,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd.unwrap_or(Cmd::Gui { session: None, screenshot: None }) {
         Cmd::Gui { session, screenshot } => gui::run_with(gui::GuiOptions { session, screenshot }),
+        Cmd::Custom { shape, out, name, compliant_stud } => {
+            let shape: serde_json::Value = serde_json::from_str(&shape).context("the shape must be JSON")?;
+            let made = sf_agent::custom::make_part(&shape, compliant_stud, &out, &name)?;
+            println!("{} ({:.0} mm³)\n{}", made.stl.display(), made.volume_mm3, made.three_mf.display());
+            Ok(())
+        }
         Cmd::Guide => {
             print!("{}", sf_spec::GUIDE);
             Ok(())

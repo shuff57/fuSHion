@@ -1,0 +1,21 @@
+[package]
+name = "sf-custom"
+description = "Custom 3D-printable LEGO-compatible bricks for studforge, modelled with the SolidCraft B-rep engine."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+# SolidCraft (MIT OR Apache-2.0; its vendored kernel solidcore is Apache-2.0), pinned to the
+# reviewed commit. `default-features = false` drops the `plugins` feature and with it wasmtime.
+# Only the engine and its file-format crate are linked: never ui-kit, look or theme
+# (those are under SolidCraft's separate LICENSE-BRAND).
+solidcraft-engine = { git = "https://github.com/tangency-labs/solidcraft", rev = "f523fdf6302dc70fa7654b3368d54d6ab7bf2552", default-features = false }
+solidcraft-io = { git = "https://github.com/tangency-labs/solidcraft", rev = "f523fdf6302dc70fa7654b3368d54d6ab7bf2552" }
+
+[dev-dependencies]
+png.workspace = true

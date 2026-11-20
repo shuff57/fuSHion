@@ -30,3 +30,8 @@ egui-wgpu.workspace = true
 wgpu.workspace = true
 bytemuck.workspace = true
 rfd.workspace = true
+
+[features]
+default = ["custom-bricks"]
+# Design custom 3D-printable bricks with SolidCraft (adds ~15 min to a cold build).
+custom-bricks = ["sf-agent/custom"]

@@ -17,7 +17,8 @@ sf-ldraw = { path = "crates/sf-ldraw" }
 sf-render = { path = "crates/sf-render" }
 sf-catalog = { path = "crates/sf-catalog" }
 sf-export = { path = "crates/sf-export" }
-sf-agent = { path = "crates/sf-agent" }
+sf-agent = { path = "crates/sf-agent", default-features = false }
+sf-custom = { path = "crates/sf-custom" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
