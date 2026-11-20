@@ -832,7 +832,9 @@ impl Lobe {
             pocket,
             pocket_probe,
             pocket_depth,
-            groove: pocket_depth / 2.0,
+            // The slot cuts the top as deep as the pocket beside it, so the relief has
+            // one flat floor (no step along the slot).
+            groove: pocket_depth,
             dims,
         })
     }

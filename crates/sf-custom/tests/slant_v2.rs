@@ -467,7 +467,8 @@ fn check_v2(w: u32, d: u32, u: Units, ribs: usize) -> CustomPart {
         + plain * u.plain_pairs as f64
         + (plain + mid) * u.plain_triples as f64)
         * 1.8;
-    let slots = (slot_peanut * 1.8 + slot_out * 0.3) * lobes;
+    // The slot grooves the top as deep as the pocket (0.6), so the relief floor is flat.
+    let slots = (slot_peanut * 1.8 + slot_out * 0.6) * lobes;
     let chamfer = chamfer_rect(l, dd) + tubes * chamfer_tube();
     let hand =
         shell + tubes * tube(8.2) + ribs as f64 * rib(8.2) - chamfer - pockets + studs - slots;
