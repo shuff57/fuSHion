@@ -1,0 +1,15 @@
+[package]
+name = "sf-render"
+description = "Headless CPU software renderer for studforge models (multi-view sheets, thumbnails)."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sf-core.workspace = true
+sf-ldraw.workspace = true
+image.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true

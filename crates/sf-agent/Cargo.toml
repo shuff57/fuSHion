@@ -1,0 +1,23 @@
+[package]
+name = "sf-agent"
+description = "Claude integration: build sessions, the Messages API tool loop, and the Claude Code backend."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sf-core.workspace = true
+sf-spec.workspace = true
+sf-engine.workspace = true
+sf-ldraw.workspace = true
+sf-render.workspace = true
+sf-export.workspace = true
+sf-catalog.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+image.workspace = true
+base64.workspace = true
+reqwest.workspace = true
+dirs.workspace = true

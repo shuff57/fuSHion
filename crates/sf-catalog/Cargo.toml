@@ -1,0 +1,16 @@
+[package]
+name = "sf-catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sf-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+flate2.workspace = true
+csv.workspace = true
+reqwest.workspace = true
+dirs.workspace = true

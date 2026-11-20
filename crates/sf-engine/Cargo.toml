@@ -1,0 +1,15 @@
+[package]
+name = "sf-engine"
+description = "Packs voxels into real parts, checks connectivity and balance, orders build steps."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sf-core.workspace = true
+sf-spec.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+image.workspace = true

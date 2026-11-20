@@ -1,0 +1,11 @@
+[package]
+name = "sf-core"
+description = "Shared types for studforge: grid units, colours, the part catalog, placements and models."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
