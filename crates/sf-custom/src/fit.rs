@@ -9,9 +9,13 @@
 //! past the slot's end) are counted apart from the rest: a fin may press into a wall or a
 //! tube, the rest may not. The deepest line of every wall and tube is also tested for lying
 //! inside a stud, which catches a wall that crosses a stud outright.
+//!
+//! [`fit`] checks a plain brick (no wall ribs) pushed onto the part's studs. [`fit_below`]
+//! turns it round: the part, with its wall ribs when its profile has them, pushed onto a box
+//! brick below, whose studs meet the part's walls, tubes and ribs.
 
 use crate::geom::{self, Frame, Loop, Seg};
-use crate::profile::{StudProfile, StudStyle};
+use crate::profile::{StudProfile, StudStyle, WALL_RIB_WIDTH};
 use crate::shape::{CustomShape, P2};
 use crate::slant::{self, Lobe};
 use crate::{CustomError, Result};
@@ -52,6 +56,11 @@ pub struct FitReport {
     pub round_tube_clearance: Option<f64>,
     /// Walls or tubes whose middle lies inside a stud (a wall across a waist, say).
     pub crossings: Vec<String>,
+    /// Least clearance between a wall rib and any stud material that is not a fin
+    /// (negative: how far the rib presses in; `None` without ribs).
+    pub rib_clearance: Option<f64>,
+    /// Deepest a fin presses into a wall rib (0 when none touches).
+    pub fin_rib_preload: f64,
 }
 
 impl FitReport {
@@ -162,6 +171,9 @@ enum Feature {
     Walls { outer: (P2, P2), inner: (P2, P2) },
     /// A tube ring.
     Tube { c: P2, ro: f64, ri: f64 },
+    /// A wall rib: the rectangle `(min, max)` it stands on, from inside the wall to its face,
+    /// and the unit normal of its face (pointing into the hollow).
+    Rib { at: (P2, P2), n: P2 },
 }
 
 fn sd_box(p: P2, (lo, hi): (P2, P2)) -> f64 {
@@ -181,6 +193,19 @@ impl Feature {
                 let d = (p[0] - c[0]).hypot(p[1] - c[1]);
                 (d - ro).max(ri - d)
             }
+            // Inside a rib, how far the point lies behind its face along the face's normal: the
+            // way a stud or fin pressed by it has to give (sliding sideways is not open to it).
+            Self::Rib { at, n } => {
+                let sd = sd_box(p, at);
+                if sd > 0.0 {
+                    return sd;
+                }
+                let face = [
+                    if n[0] > 0.0 { at.1[0] } else { at.0[0] },
+                    if n[1] > 0.0 { at.1[1] } else { at.0[1] },
+                ];
+                (p[0] - face[0]) * n[0] + (p[1] - face[1]) * n[1]
+            }
         }
     }
 
@@ -188,6 +213,11 @@ impl Feature {
         match *self {
             Self::Walls { .. } => "wall".into(),
             Self::Tube { c, .. } => format!("tube at ({:.0}, {:.0})", c[0], c[1]),
+            Self::Rib { at, .. } => format!(
+                "rib at ({:.1}, {:.1})",
+                (at.0[0] + at.1[0]) / 2.0,
+                (at.0[1] + at.1[1]) / 2.0
+            ),
         }
     }
 
@@ -230,6 +260,8 @@ impl Feature {
                     })
                     .collect()
             }
+            // A rib is narrower than the sampling of a stud's outline; the samples find it.
+            Self::Rib { .. } => Vec::new(),
         }
     }
 
@@ -238,6 +270,35 @@ impl Feature {
         match self {
             Self::Walls { .. } => p.wall / 2.0,
             Self::Tube { ro, ri, .. } => (ro - ri) / 2.0,
+            Self::Rib { at, .. } => (at.1[0] - at.0[0]).min(at.1[1] - at.0[1]) / 2.0,
+        }
+    }
+}
+
+impl Stud {
+    /// The same stud moved by `d`.
+    fn shifted(self, d: P2) -> Self {
+        let mv = |p: P2| [p[0] + d[0], p[1] + d[1]];
+        let frame = Frame {
+            o: d,
+            x: [1.0, 0.0],
+            y: [0.0, 1.0],
+        };
+        let region = match self.region {
+            Region::Round { c, r } => Region::Round { c: mv(c), r },
+            Region::Peanut {
+                peanut,
+                slots,
+                lobes,
+            } => Region::Peanut {
+                peanut: frame.map_loop(&peanut),
+                slots: slots.map(|s| frame.map_loop(&s)),
+                lobes: lobes.map(|f| Frame { o: mv(f.o), ..f }),
+            },
+        };
+        Self {
+            samples: self.samples.into_iter().map(|(p, f)| (mv(p), f)).collect(),
+            region,
         }
     }
 }
@@ -277,8 +338,9 @@ fn studs(shape: &CustomShape, p: &StudProfile) -> Result<Vec<Stud>> {
     })
 }
 
-/// The walls and tubes of `top` over the part's stud grid.
-fn features(p: &StudProfile, top: &TopBrick) -> Vec<Feature> {
+/// The walls and tubes of `top` over the part's stud grid, and its wall ribs when `ribs`
+/// (laid out as the build lays them out: one on each wall at each stud position).
+fn features(p: &StudProfile, top: &TopBrick, ribs: bool) -> Vec<Feature> {
     let (x0, y0) = (f64::from(top.at.0) * p.pitch, f64::from(top.at.1) * p.pitch);
     let (x1, y1) = (
         x0 + f64::from(top.w) * p.pitch,
@@ -298,13 +360,84 @@ fn features(p: &StudProfile, top: &TopBrick) -> Vec<Feature> {
             });
         }
     }
+    if ribs {
+        let (face, back) = (p.clearance + p.wall, p.clearance + p.wall / 2.0);
+        let (t, hw) = (p.wall_rib_protrusion(), WALL_RIB_WIDTH / 2.0);
+        for i in 0..top.w {
+            let xc = x0 + (f64::from(i) + 0.5) * p.pitch;
+            out.push(Feature::Rib {
+                at: ([xc - hw, y0 + back], [xc + hw, y0 + face + t]),
+                n: [0.0, 1.0],
+            });
+            out.push(Feature::Rib {
+                at: ([xc - hw, y1 - face - t], [xc + hw, y1 - back]),
+                n: [0.0, -1.0],
+            });
+        }
+        for j in 0..top.d {
+            let yc = y0 + (f64::from(j) + 0.5) * p.pitch;
+            out.push(Feature::Rib {
+                at: ([x0 + back, yc - hw], [x0 + face + t, yc + hw]),
+                n: [1.0, 0.0],
+            });
+            out.push(Feature::Rib {
+                at: ([x1 - face - t, yc - hw], [x1 - back, yc + hw]),
+                n: [-1.0, 0.0],
+            });
+        }
+    }
     out
 }
 
-/// Where `top`, pushed onto the box `shape` built with `profile`, meets its studs.
+/// Where `top`, pushed onto the box `shape` built with `profile`, meets its studs. The brick
+/// on top is a plain one with `profile`'s walls and tubes (no wall ribs).
 pub fn fit(shape: &CustomShape, profile: &StudProfile, top: &TopBrick) -> Result<FitReport> {
     let studs = studs(shape, profile)?;
-    let feats = features(profile, top);
+    let feats = features(profile, top, false);
+    Ok(report(&studs, &feats, profile, profile))
+}
+
+/// Where the box `part` built with `profile` (with its wall ribs, if it has them), pushed onto
+/// a `below.w × below.d` box brick built with `below_profile` whose cell `(0, 0)` lies under
+/// the part's cell `below.at`, meets the studs of that brick.
+pub fn fit_below(
+    part: &CustomShape,
+    profile: &StudProfile,
+    below: &TopBrick,
+    below_profile: &StudProfile,
+) -> Result<FitReport> {
+    let CustomShape::Box { w, d, .. } = *part else {
+        return Err(CustomError::InvalidShape(
+            "fit checks are made on box parts".into(),
+        ));
+    };
+    profile.validate()?;
+    let base = CustomShape::Box {
+        w: below.w,
+        d: below.d,
+        plates: 1,
+    };
+    let shift = [
+        f64::from(below.at.0) * below_profile.pitch,
+        f64::from(below.at.1) * below_profile.pitch,
+    ];
+    let studs: Vec<Stud> = studs(&base, below_profile)?
+        .into_iter()
+        .map(|s| s.shifted(shift))
+        .collect();
+    let me = TopBrick { w, d, at: (0, 0) };
+    let feats = features(profile, &me, profile.wall_ribs);
+    Ok(report(&studs, &feats, below_profile, profile))
+}
+
+/// Measures every stud (made with `stud_profile`) against every feature (of a brick made with
+/// `profile`).
+fn report(
+    studs: &[Stud],
+    feats: &[Feature],
+    stud_profile: &StudProfile,
+    profile: &StudProfile,
+) -> FitReport {
     let mut r = FitReport {
         body_tube_clearance: f64::INFINITY,
         body_wall_clearance: f64::INFINITY,
@@ -314,22 +447,32 @@ pub fn fit(shape: &CustomShape, profile: &StudProfile, top: &TopBrick) -> Result
         fin_clearance: f64::INFINITY,
         round_tube_clearance: None,
         crossings: Vec::new(),
+        rib_clearance: None,
+        fin_rib_preload: 0.0,
     };
-    let lobe = Lobe::new(profile).ok();
+    let lobe = Lobe::new(stud_profile).ok();
     let mut least_body = f64::INFINITY;
-    for s in &studs {
+    for s in studs {
         let round = matches!(s.region, Region::Round { .. });
         for &(q, fin) in &s.samples {
-            for f in &feats {
+            for f in feats {
                 let sd = f.sd(q);
+                let rib = matches!(f, Feature::Rib { .. });
                 if fin {
                     r.fin_clearance = r.fin_clearance.min(sd);
-                    let slot = if f.is_wall() {
+                    let slot = if rib {
+                        &mut r.fin_rib_preload
+                    } else if f.is_wall() {
                         &mut r.fin_wall_preload
                     } else {
                         &mut r.fin_tube_preload
                     };
                     *slot = slot.max(-sd);
+                    continue;
+                }
+                if rib {
+                    let c = r.rib_clearance.get_or_insert(f64::INFINITY);
+                    *c = c.min(sd);
                     continue;
                 }
                 if f.is_wall() {
@@ -348,7 +491,7 @@ pub fn fit(shape: &CustomShape, profile: &StudProfile, top: &TopBrick) -> Result
             }
         }
         // A wall or tube whose middle lies in the stud: the stud is through it.
-        for f in &feats {
+        for f in feats {
             for q in f.core() {
                 if s.region.contains(q) {
                     let fin = lobe.as_ref().is_some_and(|l| s.region.on_fin(l, q));
@@ -373,7 +516,10 @@ pub fn fit(shape: &CustomShape, profile: &StudProfile, top: &TopBrick) -> Result
             }
         }
     }
-    Ok(r)
+    if r.rib_clearance.is_none() && feats.iter().any(|f| matches!(f, Feature::Rib { .. })) {
+        r.rib_clearance = Some(f64::INFINITY);
+    }
+    r
 }
 
 /// A Slant v2 peanut drawn in its own frame (origin at the waist centre, `v` along the row

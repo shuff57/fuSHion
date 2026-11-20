@@ -106,6 +106,23 @@ pub struct StudProfile {
     /// (0 for none).
     #[serde(default = "default_chamfer")]
     pub bottom_chamfer: f64,
+    /// Thin vertical ribs on the inner faces of the walls, one at each stud position along
+    /// every wall (centred where a stud of a brick pushed in from below meets the wall), as on
+    /// LEGO's own bricks. Each stands [`StudProfile::wall_rib_protrusion`] proud of the wall,
+    /// [`WALL_RIB_WIDTH`] wide, from the bottom edge (with a [`StudProfile::wall_rib_lead_in`]
+    /// lead-in) up into the top. Off by default: Slant 3D dropped them as too fine a
+    /// tolerance for FDM. They are sized for standard round studs: the fins of a Slant v2
+    /// stud pushed in under them would press about 0.5 mm into a rib, past their slot's flex.
+    #[serde(default)]
+    pub wall_ribs: bool,
+    /// How far each wall rib presses into a standard stud pushed in from below, in mm.
+    #[serde(default = "default_rib_interference")]
+    pub wall_rib_interference: f64,
+    /// Radius of the rounds on the vertical outside edges (the corners of the outline, convex
+    /// and concave), in mm; 0 for sharp corners. At most [`StudProfile::wall`], so the square
+    /// hollow keeps a full wall at every corner, and more than the bottom chamfer.
+    #[serde(default)]
+    pub edge_radius: f64,
 }
 
 /// Thickness of a centre rib, in mm.
@@ -114,12 +131,22 @@ pub const RIB_THICKNESS: f64 = 1.0;
 /// (1.8 mm) pushed in from below, with room for elephant's foot.
 pub const RIB_GAP: f64 = 2.2;
 
+/// Width of a wall rib along its wall, in mm.
+pub const WALL_RIB_WIDTH: f64 = 0.6;
+/// Largest lead-in chamfer on a wall rib's lower inner edge, in mm (it is at most ⅔ of the
+/// rib's protrusion).
+pub const WALL_RIB_LEAD_IN: f64 = 0.2;
+
 fn yes() -> bool {
     true
 }
 
 fn default_chamfer() -> f64 {
     0.2
+}
+
+fn default_rib_interference() -> f64 {
+    0.05
 }
 
 impl Default for StudProfile {
@@ -147,6 +174,9 @@ impl StudProfile {
             stud_style: StudStyle::Solid,
             center_ribs: true,
             bottom_chamfer: default_chamfer(),
+            wall_ribs: false,
+            wall_rib_interference: default_rib_interference(),
+            edge_radius: 0.0,
         }
     }
 
@@ -182,6 +212,19 @@ impl StudProfile {
     #[deprecated(note = "renamed to `slant_v2_experimental`")]
     pub fn compliant_v2_experimental() -> Self {
         Self::slant_v2_experimental()
+    }
+
+    /// How far a wall rib stands proud of the wall's inner face, in mm: from the inner face
+    /// (`pitch / 2 − clearance − wall` from a stud centre) to the surface of a standard
+    /// `stud_diameter` stud, plus [`StudProfile::wall_rib_interference`].
+    pub fn wall_rib_protrusion(&self) -> f64 {
+        self.pitch / 2.0 - self.clearance - self.wall - self.stud_diameter / 2.0
+            + self.wall_rib_interference
+    }
+
+    /// The lead-in chamfer on a wall rib's lower inner edge, in mm.
+    pub fn wall_rib_lead_in(&self) -> f64 {
+        WALL_RIB_LEAD_IN.min(self.wall_rib_protrusion() * 2.0 / 3.0)
     }
 
     /// Height of a body `plates` plates tall (studs not included).
@@ -242,6 +285,37 @@ impl StudProfile {
         }
         if self.top_thickness >= self.plate_height {
             return bad("top thickness must be less than one plate".into());
+        }
+        if !(self.edge_radius.is_finite() && self.edge_radius >= 0.0) {
+            return bad(format!(
+                "edge_radius must be 0 or a positive number of mm, got {}",
+                self.edge_radius
+            ));
+        }
+        // A round of radius r leaves (wall − r)·√2 + r of wall across a square hollow corner:
+        // at least the wall only while r ≤ wall.
+        if self.edge_radius > self.wall {
+            return bad(format!(
+                "edge_radius {} mm is more than the wall ({} mm): the hollow's square corners would thin the wall",
+                self.edge_radius, self.wall
+            ));
+        }
+        if self.edge_radius > 0.0 && self.edge_radius <= self.bottom_chamfer {
+            return bad("edge_radius must be more than the bottom chamfer (or 0)".into());
+        }
+        if self.wall_ribs {
+            if !(self.wall_rib_interference.is_finite() && self.wall_rib_interference >= 0.0) {
+                return bad(format!(
+                    "wall_rib_interference must be 0 or a positive number of mm, got {}",
+                    self.wall_rib_interference
+                ));
+            }
+            let t = self.wall_rib_protrusion();
+            if !(0.1..=1.0).contains(&t) {
+                return bad(format!(
+                    "wall ribs would stand {t:.3} mm proud of the wall (0.1–1.0 mm makes a rib)"
+                ));
+            }
         }
         if let StudStyle::SlantV2 { .. } = self.stud_style {
             crate::slant::Lobe::new(self)?;

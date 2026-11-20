@@ -121,7 +121,15 @@ rare part) or a shape no catalog part can make, design a printable part:
   experimental Slant v2 stud (peanut studs with leaf-spring fins along the long
   edges, 1.4 mm top), shaped to fit standard bricks; bricks pushed onto it must
   start and end on a pair of studs, never between the two studs of a pair. The
-  standard profile has centre ribs and a 0.2 mm bottom chamfer.
+  standard profile has centre ribs and a 0.2 mm bottom chamfer. The stud profile
+  also has two options, off by default and not yet settable through
+  `make_custom_part`: `wall_ribs` (thin 0.6 mm ribs on the inside of every
+  wall, one per stud position, pressing a Ø4.8 stud from below by
+  `wall_rib_interference`, 0.05 mm; on footprints they sit mid-cell on straight
+  wall runs only; under a slope's roof only where a stud can reach; a Slant v2
+  brick pushed in under them would overload its fins) and `edge_radius`
+  (rounded vertical outside edges, convex and concave, at most the wall, e.g.
+  0.5 mm).
 - `make_custom_part_from_commands` for anything else, written as a SolidCraft
   command batch in millimetres (8 mm pitch, 9.6 mm brick, Ø4.8 × 1.8 mm studs,
   Ø6.51/4.8 mm tubes, 1.2 mm walls, 0.1 mm side clearance) with an `expect`

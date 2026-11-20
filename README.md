@@ -135,7 +135,10 @@ every part whose colour was never produced or is rare, plus
 any footprint of studs; through MCP, Claude can also write freeform parts as
 SolidCraft command batches, which are checked for volume, size and a closed
 mesh before anything is written. Every part's volume is verified against the
-expected value at each modelling stage.
+expected value at each modelling stage. Two optional profile settings, both off
+by default, follow LEGO's and Slant 3D's undersides: thin wall ribs that grip
+studs pushed in from below (`wall_ribs`), and rounded vertical outside edges
+(`edge_radius`).
 
 SolidCraft adds roughly 15 minutes to the first build. To skip it:
 `cargo install --path crates/fushion --no-default-features`. The default connector uses the

@@ -13,7 +13,8 @@
 //!   exports STL and 3MF.
 //! * [`build_from_commands`]: the same safety for a freeform batch (one Claude wrote).
 //! * [`fit`]: where a brick pushed onto a box part meets its studs, in plane geometry (no
-//!   SolidCraft): clearances, and how far Slant v2 fins press.
+//!   SolidCraft): clearances, and how far Slant v2 fins press; [`fit_below`] the same for the
+//!   part pushed onto a brick below, where its wall ribs grip that brick's studs.
 //!
 //! All lengths are millimetres; the part stands on `z = 0` with its studs pointing up (+Z).
 
@@ -28,11 +29,12 @@ mod run;
 mod shape;
 mod slant;
 
-pub use fit::{FitReport, SlantOutline, TopBrick, fit, slant_outline};
+pub use fit::{FitReport, SlantOutline, TopBrick, fit, fit_below, slant_outline};
 pub use mesh::{MeshReport, analyze_stl};
 pub use plan::{BBOX_TOL_MM, Plan, Stage, VOLUME_TOL, plan};
 pub use profile::{
     MIN_FIN_SECTION, MIN_POCKET_FLOOR, RIB_GAP, RIB_THICKNESS, SLANT_CAP, StudProfile, StudStyle,
+    WALL_RIB_LEAD_IN, WALL_RIB_WIDTH,
 };
 pub use run::{MAX_COMMANDS, build, build_from_commands, build_plan};
 pub use shape::CustomShape;

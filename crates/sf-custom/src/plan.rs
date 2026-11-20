@@ -4,16 +4,23 @@
 //!
 //! 1. **Block**: the solid outline, full height.
 //! 2. **Hollow**: the underside cut out, leaving walls and a top (for slopes, a sloped roof).
-//! 3. **Tubes** (where there are any): rings standing in the hollow, full height; the part of a
+//! 3. **Fillet** (with an [`edge_radius`](StudProfile::edge_radius)): the vertical outside
+//!    edges rounded, each convex corner losing `(tan(φ/2) − φ/2)·r²·h` and each concave one
+//!    gaining as much (`(1 − π/4)·r²·h` for the square corners every outline here has).
+//! 4. **Tubes** (where there are any): rings standing in the hollow, full height; the part of a
 //!    tube that reaches above the hollow's ceiling lies in solid material and adds nothing.
-//! 4. **Ribs** (2-wide boxes): a cross-wall through every second tube.
-//! 5. **Chamfer**: the bottom outer edges and tube bottoms.
-//! 6. **Pockets** (Slant v2 studs): a pocket in the top under each fin.
-//! 7. **Studs** on top; for Slant v2 studs, then **Slots** that cut the fins free.
-//! 8. **Roof** (slopes and curves only): the wedge above the slope cut away.
+//! 5. **Ribs** (2-wide boxes): a cross-wall through every second tube.
+//! 6. **Chamfer**: the bottom outer edges (straight and rounded) and tube bottoms.
+//! 7. **WallRibs** and **RibLeadIns** (with [`wall_ribs`](StudProfile::wall_ribs)): a thin rib
+//!    on the inner face of every wall at each stud position, then a lead-in chamfer on each
+//!    rib's lower inner edge.
+//! 8. **Pockets** (Slant v2 studs): a pocket in the top under each fin.
+//! 9. **Studs** on top; for Slant v2 studs, then **Slots** that cut the fins free.
+//! 10. **Roof** (slopes and curves only): the wedge above the slope cut away (less the bits of
+//!     it the rounded front corners had already taken).
 
 use crate::geom::{Loop, Seg};
-use crate::profile::{RIB_GAP, RIB_THICKNESS, StudProfile, StudStyle};
+use crate::profile::{RIB_GAP, RIB_THICKNESS, StudProfile, StudStyle, WALL_RIB_WIDTH};
 use crate::shape::{CustomShape, Footprint, P2, signed_area};
 use crate::slant::{self, Lobe};
 use crate::{CustomError, MAX_PART_MM, Result};
@@ -30,6 +37,9 @@ pub const BBOX_TOL_MM: f64 = 0.05;
 const MIN_LIP: f64 = 1.0;
 /// How far cutters reach past the faces they cut, in mm, so no cut ends flush on a face.
 const OVERRUN: f64 = 1.0;
+/// How far a wall rib reaches up into the top above the hollow, in mm (a Slant v2 pocket
+/// leaves at least 0.8 mm of floor, so this stays clear of it).
+const WALL_RIB_TOP_EMBED: f64 = 0.3;
 
 /// Stud-grid cells or grid points `(i, j)`.
 type Cells = Vec<(i32, i32)>;
@@ -39,8 +49,8 @@ type Extent2 = ([f64; 2], [f64; 2]);
 /// One stage of a build: its commands and the total volume the part must have after them.
 #[derive(Clone, Debug, Serialize)]
 pub struct Stage {
-    /// What the stage makes ("Block", "Hollow", "Tubes", "Ribs", "Chamfer", "Pockets",
-    /// "Studs", "Slots", "Roof").
+    /// What the stage makes ("Block", "Hollow", "Fillet", "Tubes", "Ribs", "Chamfer",
+    /// "WallRibs", "RibLeadIns", "Pockets", "Studs", "Slots", "Roof").
     pub name: String,
     /// SolidCraft commands, each `{"command": id, "params": {...}}`.
     pub commands: Vec<Value>,
@@ -195,6 +205,72 @@ fn disk_integral(r: f64, y0: f64, f: &dyn Fn(f64) -> f64) -> f64 {
     s * h / 3.0
 }
 
+/// `∫ f` over `[a, b]` by Simpson's rule on `n` (even) intervals.
+fn simpson(f: &dyn Fn(f64) -> f64, a: f64, b: f64, n: usize) -> f64 {
+    let h = (b - a) / n as f64;
+    let mut s = f(a) + f(b);
+    for k in 1..n {
+        s += f(a + h * k as f64) * if k % 2 == 1 { 4.0 } else { 2.0 };
+    }
+    s * h / 3.0
+}
+
+/// One corner of an outline: where it is, the unit vectors from it along its two edges, its
+/// turning angle `φ` and whether it is convex (material inside the turn).
+struct Corner {
+    at: P2,
+    u_prev: P2,
+    u_next: P2,
+    phi: f64,
+    convex: bool,
+}
+
+fn corners(l: &[P2]) -> Vec<Corner> {
+    let n = l.len();
+    (0..n)
+        .map(|k| {
+            let (a, q, b) = (l[(k + n - 1) % n], l[k], l[(k + 1) % n]);
+            let unit = |p: P2| {
+                let d = [p[0] - q[0], p[1] - q[1]];
+                let len = d[0].hypot(d[1]).max(f64::MIN_POSITIVE);
+                [d[0] / len, d[1] / len]
+            };
+            let (u0, u1) = (unit(a), unit(b));
+            // Travel directions in and out of the corner.
+            let (din, dout) = ([-u0[0], -u0[1]], u1);
+            let cross = din[0] * dout[1] - din[1] * dout[0];
+            let dot = din[0] * dout[0] + din[1] * dout[1];
+            Corner {
+                at: q,
+                u_prev: u0,
+                u_next: u1,
+                phi: cross.atan2(dot).abs(),
+                convex: cross > 0.0,
+            }
+        })
+        .collect()
+}
+
+impl Corner {
+    /// The middle of a round of radius `r` in this corner.
+    fn arc_mid(&self, r: f64) -> P2 {
+        let b = [
+            self.u_prev[0] + self.u_next[0],
+            self.u_prev[1] + self.u_next[1],
+        ];
+        let bl = b[0].hypot(b[1]);
+        let b = [b[0] / bl, b[1] / bl];
+        // The round's centre is r / cos(φ/2) from the corner along the bisector.
+        let d = r / (self.phi / 2.0).cos() - r;
+        [self.at[0] + b[0] * d, self.at[1] + b[1] * d]
+    }
+
+    /// Area a round of radius `r` takes off a convex corner (or adds to a concave one).
+    fn round_area(&self, r: f64) -> f64 {
+        r * r * ((self.phi / 2.0).tan() - self.phi / 2.0)
+    }
+}
+
 /// The plan for `shape` under `profile`: commands, stage volumes and bounding box.
 pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
     profile.validate()?;
@@ -294,6 +370,29 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
         }
     };
 
+    // Fillet: the vertical outside edges, picked half-way up (before any roof is cut, every
+    // one of them runs the full height).
+    let er = p.edge_radius;
+    if er > 0.0 {
+        let mut picks = Vec::new();
+        let mut delta = 0.0;
+        for l in &outline {
+            for k in corners(l) {
+                picks.push(json!([round6(k.at[0]), round6(k.at[1]), round6(h / 2.0)]));
+                let sign = if k.convex { -1.0 } else { 1.0 };
+                delta += sign * k.round_area(er) * h;
+            }
+        }
+        b.stage(
+            "Fillet",
+            vec![cmd(
+                "solid.fillet",
+                json!({"edges": picks, "radius": round6(er), "name": "EdgeRounds"}),
+            )],
+            delta,
+        );
+    }
+
     let size = [
         bbox_xy.1[0] - bbox_xy.0[0],
         bbox_xy.1[1] - bbox_xy.0[1],
@@ -347,13 +446,20 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
             let n = l.len();
             for k in 0..n {
                 let (a, q) = (l[k], l[(k + 1) % n]);
+                // A round shortens both ends of a straight edge alike: its middle stays put.
                 picks.push(json!([
                     round6((a[0] + q[0]) / 2.0),
                     round6((a[1] + q[1]) / 2.0),
                     0.0
                 ]));
             }
-            removed += chamfer_loop_volume(l, c);
+            if er > 0.0 {
+                for k in corners(l) {
+                    let m = k.arc_mid(er);
+                    picks.push(json!([round6(m[0]), round6(m[1]), 0.0]));
+                }
+            }
+            removed += chamfer_loop_volume(l, c, er);
         }
         for at in &tube_centres {
             picks.push(json!([round6(at[0] + ro), round6(at[1]), 0.0]));
@@ -369,6 +475,10 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
             )],
             -removed,
         );
+    }
+
+    if p.wall_ribs {
+        wall_ribs(&mut b, p, &cells, hollow_h, roof.as_ref());
     }
 
     let rs = p.stud_diameter / 2.0;
@@ -458,7 +568,13 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
         c.extend(roof.wedge_commands(h));
         c.push(finish());
         c.push(extrude("RoofSketch", "Roof", len + 2.0 * OVERRUN, "cut"));
-        b.stage("Roof", c, -roof.wedge_area() * len);
+        // The two rounded front corners had already lost their share of the wedge.
+        let rounded = if er > 0.0 {
+            2.0 * roof.wedge_over_round(er)
+        } else {
+            0.0
+        };
+        b.stage("Roof", c, -roof.wedge_area() * len + rounded);
     }
 
     let bbox = (
@@ -495,20 +611,140 @@ fn rect_loop((lo, hi): Extent2) -> Vec<P2> {
 }
 
 /// Volume an equal-distance chamfer `c` takes off the bottom edges of a prism with this
-/// outline (material on the left, no collinear points). At height `z < c` the section is
-/// the outline moved `δ = c − z` into the material, mitred at the corners, which loses
-/// `perimeter·δ − (convex − reflex corners)·δ²`; integrated over `z`.
-fn chamfer_loop_volume(l: &[P2], c: f64) -> f64 {
+/// outline (material on the left, no collinear points), its corners rounded to radius `r`
+/// (0 for sharp). At height `z < c` the section is the outline moved `δ = c − z` into the
+/// material, which loses `perimeter·δ − K·δ²`: a sharp corner turning by `φ` adds
+/// `tan(φ/2)` to `K` (mitred), a rounded one `φ/2` (its arc shrinks with `δ`, which needs
+/// `r ≥ c`), negative for concave corners. A round of radius `r` shortens the perimeter by
+/// `2·r·tan(φ/2) − r·φ` per corner. Integrated over `z`: `perimeter·c²/2 − K·c³/3`.
+fn chamfer_loop_volume(l: &[P2], c: f64, r: f64) -> f64 {
     let n = l.len();
     let mut perimeter = 0.0;
-    let mut turns = 0.0;
+    let mut k_sum = 0.0;
     for k in 0..n {
-        let (a, q, r) = (l[k], l[(k + 1) % n], l[(k + 2) % n]);
+        let (a, q) = (l[k], l[(k + 1) % n]);
         perimeter += (q[0] - a[0]).hypot(q[1] - a[1]);
-        let cross = (q[0] - a[0]) * (r[1] - q[1]) - (q[1] - a[1]) * (r[0] - q[0]);
-        turns += cross.signum();
     }
-    perimeter * c * c / 2.0 - turns * c * c * c / 3.0
+    for k in corners(l) {
+        let sign = if k.convex { 1.0 } else { -1.0 };
+        let half = k.phi / 2.0;
+        if r > 0.0 {
+            perimeter -= 2.0 * r * half.tan() - r * k.phi;
+            k_sum += sign * half;
+        } else {
+            k_sum += sign * half.tan();
+        }
+    }
+    perimeter * c * c / 2.0 - k_sum * c * c * c / 3.0
+}
+
+/// Wall ribs: on the inner face of the wall along every edge of a cell that has no
+/// neighbour, a rib [`WALL_RIB_WIDTH`] wide centred on the cell's stud, so a stud pushed in
+/// from below meets it square on. Each rib stands [`StudProfile::wall_rib_protrusion`] proud
+/// of the face, from the floor into the top (embedded half a wall deep in the wall and
+/// [`WALL_RIB_TOP_EMBED`] into the top). Every rib lies on a straight run of wall: a cell
+/// edge's middle is at least `pitch/2 − clearance − wall` from any corner of the hollow, so
+/// on footprints ribs keep clear of convex and concave corners alike. Under a slope's roof a
+/// rib is left out where the hollow's ceiling over it is lower than a stud, which could not
+/// reach it.
+fn wall_ribs(
+    b: &mut Builder,
+    p: &StudProfile,
+    cells: &BTreeSet<(i32, i32)>,
+    hollow_h: f64,
+    roof: Option<&Roof>,
+) {
+    let t = p.wall_rib_protrusion();
+    let lead = p.wall_rib_lead_in();
+    let hw = WALL_RIB_WIDTH / 2.0;
+    let face = p.clearance + p.wall;
+    let back = p.clearance + p.wall / 2.0;
+    let ceil = |y: f64| roof.map_or(hollow_h, |r| r.ceiling(p, y).clamp(0.0, hollow_h));
+    let mut sk = vec![sketch("WallRibSketch", "XY", 0.0)];
+    let mut picks = Vec::new();
+    let (mut added, mut count) = (0.0, 0usize);
+    for &(i, j) in cells {
+        let (x0, y0) = (f64::from(i) * p.pitch, f64::from(j) * p.pitch);
+        let (xc, yc) = (x0 + p.pitch / 2.0, y0 + p.pitch / 2.0);
+        let (x1, y1) = (x0 + p.pitch, y0 + p.pitch);
+        // (neighbour, rib rectangle, middle of its lower inner edge, protrusion along Y?)
+        let sides = [
+            (
+                (i - 1, j),
+                [x0 + back, yc - hw],
+                [x0 + face + t, yc + hw],
+                [x0 + face + t, yc],
+                false,
+            ),
+            (
+                (i + 1, j),
+                [x1 - face - t, yc - hw],
+                [x1 - back, yc + hw],
+                [x1 - face - t, yc],
+                false,
+            ),
+            (
+                (i, j - 1),
+                [xc - hw, y0 + back],
+                [xc + hw, y0 + face + t],
+                [xc, y0 + face + t],
+                true,
+            ),
+            (
+                (i, j + 1),
+                [xc - hw, y1 - face - t],
+                [xc + hw, y1 - back],
+                [xc, y1 - face - t],
+                true,
+            ),
+        ];
+        for (n, lo, hi, edge, along_y) in sides {
+            if cells.contains(&n) {
+                continue;
+            }
+            // The protruding part's footprint in Y (the ceiling only varies along Y).
+            let (ya, yb) = if along_y {
+                if n.1 < j {
+                    (y0 + face, y0 + face + t)
+                } else {
+                    (y1 - face - t, y1 - face)
+                }
+            } else {
+                (yc - hw, yc + hw)
+            };
+            let across = if along_y { WALL_RIB_WIDTH } else { t };
+            let low = ceil(ya).min(ceil(yb)).min(ceil((ya + yb) / 2.0));
+            if low < p.stud_height {
+                continue;
+            }
+            sk.push(cmd(
+                "sketch.rectangle.two_point",
+                json!({"p0": [round6(lo[0]), round6(lo[1])], "p1": [round6(hi[0]), round6(hi[1])]}),
+            ));
+            picks.push(json!([round6(edge[0]), round6(edge[1]), 0.0]));
+            added += across * simpson(&ceil, ya, yb, 2000);
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return;
+    }
+    sk.push(finish());
+    sk.push(extrude(
+        "WallRibSketch",
+        "WallRibs",
+        hollow_h + WALL_RIB_TOP_EMBED,
+        "join",
+    ));
+    b.stage("WallRibs", sk, added);
+    b.stage(
+        "RibLeadIns",
+        vec![cmd(
+            "solid.chamfer",
+            json!({"edges": picks, "distance": round6(lead), "name": "RibLeadIns"}),
+        )],
+        -(lead * lead / 2.0) * WALL_RIB_WIDTH * count as f64,
+    );
 }
 
 /// Centre ribs under a 2-wide box: one through every second tube along the long side.
@@ -745,6 +981,28 @@ impl Roof {
                 vec![open_polyline(lines), arc(*last, *first, *center)]
             }
         }
+    }
+
+    /// Height of the roof's outer surface at `y` (in front of the ridge).
+    fn surface(&self, y: f64) -> f64 {
+        if self.curved {
+            let dy = y - self.y_top;
+            self.lip + (self.run * self.run - dy * dy).max(0.0).sqrt()
+        } else {
+            self.lip + (y - self.front)
+        }
+    }
+
+    /// Volume of the wedge above the roof over one front corner's round of radius `r` (the
+    /// sliver between the square corner and the round, which the fillet already took away):
+    /// `∬ (h − surface(y)) dA` over it. With `u = r·sin θ` measured back from the round's
+    /// centre line, the sliver is `r·(1 − cos θ)` wide, which takes away the square-root end.
+    fn wedge_over_round(&self, r: f64) -> f64 {
+        let f = |t: f64| {
+            let y = self.front + r - r * t.sin();
+            r * (1.0 - t.cos()) * (self.h - self.surface(y)) * r * t.cos()
+        };
+        simpson(&f, 0.0, FRAC_PI_2, 4000)
     }
 
     /// Area of the wedge the roof cut takes off the block's section.
