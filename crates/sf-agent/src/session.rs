@@ -105,6 +105,7 @@ impl Session {
         if let Ok(t) = std::fs::read_to_string(self.dir.join("model.json")) {
             self.model = serde_json::from_str(&t).ok();
         }
+        self.report = None;
         if let Some(m) = &mut self.model {
             let (_, r) = sf_engine::reanalyze(m, &self.palette, self.availability.as_ref());
             self.report = Some(r);
@@ -129,7 +130,7 @@ impl Session {
     /// Set the source image (any format `image` reads). Stored as PNG.
     pub fn set_image(&mut self, path: &Path) -> Result<()> {
         let img = image::open(path).with_context(|| format!("reading image {}", path.display()))?.to_rgba8();
-        img.save(self.dir.join("source.png"))?;
+        write_bytes_atomic(&self.dir.join("source.png"), &encode_png(&img)?)?;
         self.image = Some(img);
         Ok(())
     }
@@ -145,7 +146,12 @@ impl Session {
         let (w, h) = img.dimensions();
         let scaled = if w.max(h) > max_side {
             let f = max_side as f32 / w.max(h) as f32;
-            image::imageops::resize(img, (w as f32 * f) as u32, (h as f32 * f) as u32, image::imageops::FilterType::Triangle)
+            image::imageops::resize(
+                img,
+                ((w as f32 * f) as u32).max(1),
+                ((h as f32 * f) as u32).max(1),
+                image::imageops::FilterType::Triangle,
+            )
         } else {
             img.clone()
         };
@@ -163,8 +169,9 @@ impl Session {
             ..Default::default()
         };
         let result = sf_engine::build(&spec, &opts, self.image.as_ref())?;
-        let n = std::fs::read_dir(self.dir.join("history")).map(|d| d.count()).unwrap_or(0);
-        std::fs::write(self.dir.join("history").join(format!("{:03}-spec.json", n + 1)), serde_json::to_string_pretty(&spec)?)?;
+        let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let name = format!("{stamp}-{}-spec.json", std::process::id());
+        write_atomic(&self.dir.join("history").join(name), &serde_json::to_string_pretty(&spec)?)?;
         self.spec = Some(spec);
         self.model = Some(result.model);
         self.report = Some(result.report);
@@ -192,7 +199,7 @@ impl Session {
         let opts = RenderOptions { view_size: size, edges: true, background: [236, 238, 241] };
         let img = sf_render::render_sheet(model, &self.palette, &self.meshes, views, &opts);
         let png = encode_png(&img)?;
-        std::fs::write(self.dir.join("render.png"), &png)?;
+        write_bytes_atomic(&self.dir.join("render.png"), &png)?;
         Ok(png)
     }
 
@@ -251,9 +258,20 @@ pub fn encode_png(img: &image::RgbaImage) -> Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn write_atomic(path: &Path, text: &str) -> Result<()> {
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path)?;
+/// Write via a uniquely named temporary file and rename, so readers in
+/// other processes never see a half-written file.
+pub fn write_atomic(path: &Path, text: &str) -> Result<()> {
+    write_bytes_atomic(path, text.as_bytes())
+}
+
+pub fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let tmp = path.with_file_name(format!(".{name}.{}.{n}.tmp", std::process::id()));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })?;
     Ok(())
 }

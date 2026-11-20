@@ -47,7 +47,6 @@ pub fn run_turn(session: &Session, studforge_exe: &Path, user_text: &str) -> Res
     let mcp = write_mcp_config(session, studforge_exe)?;
     let mut cmd = Command::new("claude");
     cmd.arg("-p")
-        .arg(&prompt)
         .arg("--output-format")
         .arg("json")
         .arg("--mcp-config")
@@ -55,15 +54,30 @@ pub fn run_turn(session: &Session, studforge_exe: &Path, user_text: &str) -> Res
         .arg("--strict-mcp-config")
         .arg("--allowedTools")
         .arg("mcp__studforge__get_guide mcp__studforge__view_source_image mcp__studforge__build_model mcp__studforge__get_state")
+        // studforge only needs its own tools; keep Claude out of the shell and files.
+        .arg("--disallowedTools")
+        .arg("Bash Edit Write NotebookEdit WebFetch WebSearch")
         .current_dir(&session.dir);
     if let Some(id) = &resume {
         cmd.arg("--resume").arg(id);
     }
+    // `--` ends the options, so a prompt starting with `-` stays a prompt.
+    cmd.arg("--").arg(&prompt);
     let out = cmd.output().context("running `claude` (is Claude Code installed and logged in?)")?;
     let stdout = String::from_utf8_lossy(&out.stdout);
-    let v: Value = serde_json::from_str(stdout.trim()).with_context(|| {
+    let parsed: Result<Value> = serde_json::from_str(stdout.trim()).with_context(|| {
         format!("Claude Code returned unexpected output: {}{}", stdout.chars().take(400).collect::<String>(), String::from_utf8_lossy(&out.stderr))
-    })?;
+    });
+    let v = match parsed {
+        Ok(v) => v,
+        Err(e) => {
+            // A stale or broken resume id would fail every later turn the same way.
+            if resume.is_some() {
+                let _ = std::fs::remove_file(&id_path);
+            }
+            return Err(e);
+        }
+    };
     if let Some(id) = v["session_id"].as_str() {
         std::fs::write(&id_path, id)?;
     }

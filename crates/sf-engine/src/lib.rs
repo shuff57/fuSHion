@@ -92,8 +92,14 @@ pub fn build(spec: &Spec, opts: &BuildOptions, image: Option<&image::RgbaImage>)
                 hi = mid - 1;
             }
         }
-        let r = best.unwrap_or(4);
-        let (c, p) = build_at(spec, opts, image, Some(r), rounds)?;
+        // The final build repairs and anchors, which can add a few parts;
+        // step down until it really fits.
+        let mut r = best.unwrap_or(4);
+        let (mut c, mut p) = build_at(spec, opts, image, Some(r), rounds)?;
+        while p.placements.len() as u32 > budget && r > 4 {
+            r -= 1;
+            (c, p) = build_at(spec, opts, image, Some(r), rounds)?;
+        }
         (c, p, Some(r))
     };
     let (mut packed, mut compiled) = (packed, compiled);
@@ -108,10 +114,12 @@ pub fn build(spec: &Spec, opts: &BuildOptions, image: Option<&image::RgbaImage>)
     report.resolution = resolution;
     report.warnings.extend(compiled.warnings.iter().cloned());
     if report.parts as u32 > budget {
-        report.warnings.push(format!(
-            "{} parts is over the budget of {budget} even at the smallest size; simplify the shapes",
-            report.parts
-        ));
+        let why = match (fixed, searchable) {
+            (Some(r), _) => format!("at the fixed size of {r} studs; lower `resolution` (or the relief width) or remove it"),
+            (None, false) => "because a drawn relief is built at the size of its rows; draw fewer or shorter rows".to_string(),
+            (None, true) => "even at the smallest size; simplify the shapes".to_string(),
+        };
+        report.warnings.push(format!("{} parts is over the budget of {budget} {why}", report.parts));
     }
     if packed.anchored > 0 {
         report.warnings.push(format!(
@@ -125,7 +133,7 @@ pub fn build(spec: &Spec, opts: &BuildOptions, image: Option<&image::RgbaImage>)
             packed.dropped
         ));
     }
-    for (part, color) in &packed.unavailable {
+    for (part, color) in packed.unavailable.iter().filter(|(pt, c)| model.placements.iter().any(|p| &p.part == pt && p.color == *c)) {
         report.warnings.push(format!(
             "{} in {} was never produced; placed anyway (custom part candidate)",
             part,

@@ -4,7 +4,7 @@
 
 #![allow(clippy::needless_range_loop)] // grid code reads clearer with indices
 
-use crate::{CompileOptions, Compiled, SAMPLES, resolve_color};
+use crate::{CompileOptions, Compiled, MAX_RELIEF_PLATES, MAX_RELIEF_SIDE, SAMPLES, check_dims, resolve_color};
 use anyhow::{Result, bail};
 use serde::{Deserialize, Serialize};
 use sf_core::{Cell, ColorId, Fill, Palette, VoxelGrid};
@@ -129,6 +129,9 @@ pub(crate) fn compile(
             cells
         }
     };
+    if colours.len() > MAX_RELIEF_SIDE || colours.iter().any(|r| r.len() > MAX_RELIEF_SIDE) {
+        bail!("relief is larger than {MAX_RELIEF_SIDE} × {MAX_RELIEF_SIDE} cells; use fewer or shorter rows");
+    }
     let depth = colours.len() as i32;
     let width = colours.iter().map(|r| r.len()).max().unwrap_or(0) as i32;
     if width == 0 {
@@ -141,11 +144,11 @@ pub(crate) fn compile(
             ReliefHeights::Luminance { max_plates } => {
                 let c = colours[row][x].map(|c| palette.rgb(c)).unwrap_or([0, 0, 0]);
                 let l = sf_core::color::srgb_to_lab(c)[0] / 100.0;
-                (l * *max_plates as f64).round() as u32
+                (l * (*max_plates).min(MAX_RELIEF_PLATES) as f64).round() as u32
             }
         }
     };
-    let base = r.base_plates.max(1);
+    let base = r.base_plates.clamp(1, MAX_RELIEF_PLATES);
     let mut max_h = base;
     for (row, cols) in colours.iter().enumerate() {
         for x in 0..cols.len() {
@@ -154,7 +157,8 @@ pub(crate) fn compile(
             }
         }
     }
-    let dims = [width, max_h as i32, depth];
+    let dims = [width, max_h.min(2 * MAX_RELIEF_PLATES) as i32, depth];
+    check_dims(dims)?;
     let mut grid = VoxelGrid::new(dims);
     for (row, cols) in colours.iter().enumerate() {
         let z = depth - 1 - row as i32;
@@ -246,7 +250,7 @@ fn crop_to_cells(img: &image::RgbaImage, cells: &[Vec<Option<ColorId>>]) -> Opti
 /// Average the image over a `w`-wide grid of cells and snap to the palette.
 fn sample_image(img: &image::RgbaImage, w: u32, palette: &Palette, max_colors: Option<u32>) -> Vec<Vec<Option<ColorId>>> {
     let (iw, ih) = img.dimensions();
-    let h = ((w as f64 * ih as f64 / iw as f64).round() as u32).max(1);
+    let h = ((w as f64 * ih as f64 / iw.max(1) as f64).round() as u32).clamp(1, MAX_RELIEF_SIDE as u32);
     let mut avg = vec![vec![None; w as usize]; h as usize];
     for (row, line) in avg.iter_mut().enumerate() {
         for (x, slot) in line.iter_mut().enumerate() {

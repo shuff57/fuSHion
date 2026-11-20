@@ -66,6 +66,10 @@ pub enum Event {
 }
 
 pub fn system_prompt() -> String {
+    system_prompt_with(5)
+}
+
+pub fn system_prompt_with(max_builds: u32) -> String {
     format!(
         "You are studforge's designer. You turn a picture into a buildable model made of \
 LEGO-compatible bricks. You work by writing a shape spec and calling `build_model`; the engine \
@@ -76,7 +80,7 @@ the subject and the report shows no structure issues. Use at most {} builds per 
 reply with two or three plain sentences: what you built, what you changed last, and anything the \
 user might want to adjust. When the user asks for a change, edit your previous spec rather than \
 starting over.\n\n{}",
-        5,
+        max_builds,
         sf_spec::GUIDE
     )
 }
@@ -100,19 +104,43 @@ pub struct Conversation {
     path: PathBuf,
 }
 
+/// Start a fresh conversation once this many renders are in it, carrying the
+/// current spec over, so requests stay small.
+const MAX_IMAGES: usize = 16;
+
 impl Conversation {
+    /// Load the saved conversation. A corrupt file is moved to
+    /// `conversation.json.bak` and the conversation starts fresh.
     pub fn load(session: &Session) -> Self {
         let path = session.dir.join("conversation.json");
-        let messages = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok()).unwrap_or_default();
+        let messages = match std::fs::read_to_string(&path) {
+            Ok(t) => match serde_json::from_str(&t) {
+                Ok(m) => m,
+                Err(_) => {
+                    let _ = std::fs::rename(&path, path.with_extension("json.bak"));
+                    Vec::new()
+                }
+            },
+            Err(_) => Vec::new(),
+        };
         Self { messages, path }
     }
     pub fn save(&self) -> Result<()> {
-        std::fs::write(&self.path, serde_json::to_string(&self.messages)?)?;
-        Ok(())
+        crate::session::write_atomic(&self.path, &serde_json::to_string(&self.messages)?)
     }
     pub fn clear(&mut self) -> Result<()> {
         self.messages.clear();
         self.save()
+    }
+    fn image_count(&self) -> usize {
+        fn count(v: &Value) -> usize {
+            match v {
+                Value::Object(o) => usize::from(o.get("type").and_then(Value::as_str) == Some("image")) + o.values().map(count).sum::<usize>(),
+                Value::Array(a) => a.iter().map(count).sum(),
+                _ => 0,
+            }
+        }
+        self.messages.iter().map(count).sum()
     }
 }
 
@@ -168,7 +196,8 @@ fn b64(bytes: &[u8]) -> String {
 }
 
 /// Run one user turn: the first turn sends the source image; later turns
-/// are chat edits. Returns Claude's final text.
+/// are chat edits. Returns Claude's final text. Always ends with
+/// [`Event::Done`], also on errors.
 pub fn run_turn(
     session: &mut Session,
     cfg: &ClaudeConfig,
@@ -176,31 +205,63 @@ pub fn run_turn(
     user_text: &str,
     on_event: &mut dyn FnMut(Event),
 ) -> Result<String> {
+    let r = run_turn_inner(session, cfg, convo, user_text, on_event);
+    on_event(Event::Done);
+    r
+}
+
+fn first_message(session: &Session, user_text: &str, carry_spec: Option<String>) -> Result<Vec<Value>> {
     let mut content = Vec::new();
-    if convo.messages.is_empty() {
-        let png = session.source_png(1568)?;
-        content.push(json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64(&png)}}));
-        let budget = session.budget.unwrap_or(sf_engine::DEFAULT_BUDGET);
-        content.push(json!({"type": "text", "text": format!(
-            "Build this picture as a brick model. Part budget: {budget}. {}",
-            if user_text.trim().is_empty() { "Pick the mode that suits the picture.".to_string() } else { user_text.to_string() }
-        )}));
+    let png = session.source_png(1568)?;
+    content.push(json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64(&png)}}));
+    let budget = session.budget.unwrap_or(sf_engine::DEFAULT_BUDGET);
+    let mut text = format!(
+        "Build this picture as a brick model. Part budget: {budget}. {}",
+        if user_text.trim().is_empty() { "Pick the mode that suits the picture." } else { user_text }
+    );
+    if let Some(spec) = carry_spec {
+        text = format!(
+            "We are continuing an earlier design of this picture (part budget {budget}). The current spec is below; \
+             build it first, then apply this request: {}\n\nCurrent spec:\n{spec}",
+            if user_text.trim().is_empty() { "keep improving it." } else { user_text }
+        );
+    }
+    content.push(json!({"type": "text", "text": text}));
+    Ok(content)
+}
+
+fn run_turn_inner(
+    session: &mut Session,
+    cfg: &ClaudeConfig,
+    convo: &mut Conversation,
+    user_text: &str,
+    on_event: &mut dyn FnMut(Event),
+) -> Result<String> {
+    // Long conversations: start over with the current spec carried along.
+    if convo.image_count() > MAX_IMAGES {
+        let spec = session.spec.as_ref().map(serde_json::to_string_pretty).transpose()?;
+        convo.messages.clear();
+        let content = first_message(session, user_text, spec)?;
+        convo.messages.push(json!({"role": "user", "content": content}));
+    } else if convo.messages.is_empty() {
+        let content = first_message(session, user_text, None)?;
+        convo.messages.push(json!({"role": "user", "content": content}));
     } else {
         let mut t = user_text.to_string();
         if let Some(b) = session.budget {
             t.push_str(&format!("\n(Part budget: {b}.)"));
         }
-        content.push(json!({"type": "text", "text": t}));
-    }
-    // A previous turn may have stopped right after tool results; merge into
-    // that user message so roles keep alternating.
-    match convo.messages.last_mut() {
-        Some(last) if last["role"] == "user" => {
-            if let Some(arr) = last["content"].as_array_mut() {
-                arr.extend(content);
+        let content = vec![json!({"type": "text", "text": t})];
+        // A previous turn may have stopped right after tool results; merge into
+        // that user message so roles keep alternating.
+        match convo.messages.last_mut() {
+            Some(last) if last["role"] == "user" => {
+                if let Some(arr) = last["content"].as_array_mut() {
+                    arr.extend(content);
+                }
             }
+            _ => convo.messages.push(json!({"role": "user", "content": content})),
         }
-        _ => convo.messages.push(json!({"role": "user", "content": content})),
     }
     convo.save()?;
 
@@ -210,7 +271,8 @@ pub fn run_turn(
         let body = json!({
             "model": cfg.model,
             "max_tokens": 16000,
-            "system": [{"type": "text", "text": system_prompt(), "cache_control": {"type": "ephemeral"}}],
+            "system": [{"type": "text", "text": system_prompt_with(cfg.max_builds), "cache_control": {"type": "ephemeral"}}],
+            "cache_control": {"type": "ephemeral"},
             "tools": tools(),
             "thinking": {"type": "adaptive"},
             "output_config": {"effort": cfg.effort},
@@ -220,8 +282,15 @@ pub fn run_turn(
         let resp = post(cfg, &body)?;
         let stop = resp["stop_reason"].as_str().unwrap_or("").to_string();
         let blocks = resp["content"].as_array().cloned().unwrap_or_default();
+        if stop == "refusal" {
+            // Nothing from a declined turn goes into the saved conversation.
+            let why = resp["stop_details"]["explanation"].as_str().unwrap_or("no reason given");
+            bail!("Claude declined this request: {why}");
+        }
+        if blocks.is_empty() {
+            bail!("Claude returned an empty reply (stop reason `{stop}`); try again");
+        }
         convo.messages.push(json!({"role": "assistant", "content": blocks}));
-        convo.save()?;
         for b in &blocks {
             if b["type"] == "text"
                 && let Some(t) = b["text"].as_str()
@@ -231,55 +300,64 @@ pub fn run_turn(
                 on_event(Event::Text(t.to_string()));
             }
         }
-        match stop.as_str() {
-            "tool_use" => {
-                let mut results = Vec::new();
-                for b in blocks.iter().filter(|b| b["type"] == "tool_use") {
-                    let id = b["id"].as_str().unwrap_or_default();
-                    if b["name"] != "build_model" {
-                        results.push(json!({"type": "tool_result", "tool_use_id": id, "is_error": true,
-                            "content": format!("unknown tool {}", b["name"])}));
-                        continue;
-                    }
-                    if builds >= cfg.max_builds {
-                        results.push(json!({"type": "tool_result", "tool_use_id": id, "is_error": true,
-                            "content": "Build limit for this request reached. Do not build again; summarise for the user now."}));
-                        continue;
-                    }
-                    builds += 1;
-                    let spec = &b["input"]["spec"];
-                    let title = spec["title"].as_str().unwrap_or("model").to_string();
-                    on_event(Event::Building(title));
-                    match session.build_spec(&spec.to_string()) {
-                        Ok(out) => {
-                            on_event(Event::Built(out.report_text.clone()));
-                            results.push(json!({"type": "tool_result", "tool_use_id": id, "content": [
-                                {"type": "text", "text": format!("Build {builds} of at most {}.\n{}", cfg.max_builds, out.report_text)},
-                                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64(&out.sheet_png)}}
-                            ]}));
-                        }
-                        Err(e) => {
-                            let msg = format!("{e:#}");
-                            on_event(Event::BuildFailed(msg.clone()));
-                            results.push(json!({"type": "tool_result", "tool_use_id": id, "is_error": true, "content": msg}));
-                        }
-                    }
-                }
+        let tool_uses: Vec<&Value> = blocks.iter().filter(|b| b["type"] == "tool_use").collect();
+        if stop != "tool_use" {
+            // A reply cut short can still end in a tool_use block; answer it so
+            // the next request is valid.
+            if !tool_uses.is_empty() {
+                let results: Vec<Value> = tool_uses
+                    .iter()
+                    .map(|b| json!({"type": "tool_result", "tool_use_id": b["id"], "is_error": true,
+                        "content": "This call was cut off and did not run."}))
+                    .collect();
                 convo.messages.push(json!({"role": "user", "content": results}));
-                convo.save()?;
             }
-            "end_turn" | "stop_sequence" => break,
-            "max_tokens" => {
-                final_text.push_str("\n(Claude's reply was cut off at the token limit.)");
-                break;
+            convo.save()?;
+            match stop.as_str() {
+                "end_turn" | "stop_sequence" => {}
+                "max_tokens" => final_text.push_str("\n(Claude's reply was cut off at the token limit.)"),
+                "model_context_window_exceeded" => {
+                    final_text.push_str("\n(The conversation is too long; it will restart with the current spec next time.)")
+                }
+                "pause_turn" => continue,
+                other => final_text.push_str(&format!("\n(Stopped: {other}.)")),
             }
-            "refusal" => {
-                let why = resp["stop_details"]["explanation"].as_str().unwrap_or("no reason given");
-                bail!("Claude declined this request: {why}");
-            }
-            other => bail!("unexpected stop reason `{other}`"),
+            break;
         }
+        let mut results = Vec::new();
+        for b in tool_uses {
+            let id = b["id"].as_str().unwrap_or_default();
+            if b["name"] != "build_model" {
+                results.push(json!({"type": "tool_result", "tool_use_id": id, "is_error": true,
+                    "content": format!("unknown tool {}", b["name"])}));
+                continue;
+            }
+            if builds >= cfg.max_builds {
+                results.push(json!({"type": "tool_result", "tool_use_id": id, "is_error": true,
+                    "content": "Build limit for this request reached. Do not build again; summarise for the user now."}));
+                continue;
+            }
+            builds += 1;
+            let spec = &b["input"]["spec"];
+            let title = spec["title"].as_str().unwrap_or("model").to_string();
+            on_event(Event::Building(title));
+            match session.build_spec(&spec.to_string()) {
+                Ok(out) => {
+                    on_event(Event::Built(out.report_text.clone()));
+                    results.push(json!({"type": "tool_result", "tool_use_id": id, "content": [
+                        {"type": "text", "text": format!("Build {builds} of at most {}.\n{}", cfg.max_builds, out.report_text)},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64(&out.sheet_png)}}
+                    ]}));
+                }
+                Err(e) => {
+                    let msg = format!("{e:#}");
+                    on_event(Event::BuildFailed(msg.clone()));
+                    results.push(json!({"type": "tool_result", "tool_use_id": id, "is_error": true, "content": msg}));
+                }
+            }
+        }
+        convo.messages.push(json!({"role": "user", "content": results}));
+        convo.save()?;
     }
-    on_event(Event::Done);
     Ok(final_text)
 }

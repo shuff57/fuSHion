@@ -74,7 +74,10 @@ struct Packer<'a> {
     rng: u64,
     /// For hidden interior cells: the colour of the nearest visible cell, so
     /// interior parts blend in wherever they end up exposed.
-    inner: Vec<ColorId>,
+    inner: &'a [ColorId],
+    /// Empty cells no part may fill: above a slope's sloped columns and
+    /// below an inverted slope's overhang.
+    blocked: Vec<bool>,
 }
 
 /// Multi-source BFS from visible cells through filled cells.
@@ -143,10 +146,11 @@ fn rot_for(d: (i32, i32)) -> Rot {
 }
 
 impl<'a> Packer<'a> {
-    fn new(c: &'a Compiled, avail: &'a dyn Availability) -> Self {
+    fn new(c: &'a Compiled, avail: &'a dyn Availability, inner: &'a [ColorId]) -> Self {
         let dims = c.grid.dims;
         let n = (dims[0] * dims[1] * dims[2]) as usize;
         Packer {
+            blocked: vec![false; n],
             c,
             avail,
             dims,
@@ -155,7 +159,7 @@ impl<'a> Packer<'a> {
             unavailable: Vec::new(),
             jitter: 0,
             rng: 0x9E37_79B9_7F4A_7C15,
-            inner: nearest_surface_colors(c),
+            inner,
         }
     }
 
@@ -181,7 +185,7 @@ impl<'a> Packer<'a> {
         (o >= 0).then_some(o as usize)
     }
     fn free(&self, c: Cell) -> Option<Key> {
-        if !self.in_b(c) || self.owner[self.idx(c)] >= 0 {
+        if !self.in_b(c) || self.owner[self.idx(c)] >= 0 || self.blocked[self.idx(c)] {
             return None;
         }
         key(self.c.grid.get(c))
@@ -202,6 +206,27 @@ impl<'a> Packer<'a> {
             debug_assert!(self.owner[k] < 0, "overlap at {c:?}");
             self.owner[k] = i;
         }
+        // Keep the space over a slope (and under an inverted slope's
+        // overhang) clear, or the slope is hidden or blocked.
+        if let Some(d) = p.def() {
+            let (blocked_y, sloped): (i32, Vec<(u8, u8)>) = match d.shape {
+                Shape::Slope { high } => {
+                    (p.top(), (0..d.size[1]).flat_map(|lz| (high..d.size[0]).map(move |lx| (lx, lz))).collect())
+                }
+                Shape::InvertedSlope { high } => {
+                    (p.origin.y - 1, (0..d.size[1]).flat_map(|lz| (high..d.size[0]).map(move |lx| (lx, lz))).collect())
+                }
+                _ => (0, Vec::new()),
+            };
+            for (lx, lz) in sloped {
+                let (x, z) = p.local_to_grid(lx, lz);
+                let c = Cell::new(x, blocked_y, z);
+                if self.in_b(c) {
+                    let k = self.idx(c);
+                    self.blocked[k] = true;
+                }
+            }
+        }
         self.out.push(p);
     }
 
@@ -215,7 +240,7 @@ impl<'a> Packer<'a> {
         let mut filled = 0;
         for dy in 0..3 {
             let c = Cell::new(x, y + dy, z);
-            if !self.in_b(c) || self.owner[self.idx(c)] >= 0 {
+            if !self.in_b(c) || self.owner[self.idx(c)] >= 0 || self.blocked[self.idx(c)] {
                 return None;
             }
             if let Some(kc) = key(self.c.grid.get(c)) {
@@ -291,10 +316,18 @@ impl<'a> Packer<'a> {
                         continue;
                     }
                     for inverted in [false, true] {
-                        if !inverted && y + 3 < dy && self.c.grid.get(Cell::new(x, y + 3, z)).is_filled() {
+                        if !inverted
+                            && y + 3 < dy
+                            && (self.c.grid.get(Cell::new(x, y + 3, z)).is_filled()
+                                || self.owner(Cell::new(x, y + 3, z)).is_some())
+                        {
                             continue; // something sits on the sloped column
                         }
-                        if inverted && (y == 0 || self.c.grid.get(Cell::new(x, y - 1, z)).is_filled()) {
+                        if inverted
+                            && (y == 0
+                                || self.c.grid.get(Cell::new(x, y - 1, z)).is_filled()
+                                || self.owner(Cell::new(x, y - 1, z)).is_some())
+                        {
                             continue; // inverted slopes need open space below
                         }
                         let (b, w) = self.wedge_fit((x, z), y, d, inverted);
@@ -447,7 +480,8 @@ impl<'a> Packer<'a> {
 /// Pack a compiled grid into placements.
 fn pack_once(c: &Compiled, avail: &dyn Availability, opts: &PackOptions) -> (Vec<Placement>, Vec<(String, ColorId)>) {
     let dims = c.grid.dims;
-    let mut pk = Packer::new(c, avail);
+    let inner = nearest_surface_colors(c);
+    let mut pk = Packer::new(c, avail, &inner);
     // Pick the course phase that yields the most brick cells.
     let phase = (0..3)
         .max_by_key(|&p| {
@@ -491,8 +525,10 @@ fn pack_once(c: &Compiled, avail: &dyn Availability, opts: &PackOptions) -> (Vec
             y += 1;
         }
     }
-    let mut unavailable = pk.unavailable;
-    let placements = repair(c, avail, pk.out, opts.repair_rounds, &mut unavailable);
+    let mut unavailable = std::mem::take(&mut pk.unavailable);
+    let out = std::mem::take(&mut pk.out);
+    drop(pk);
+    let placements = repair(c, avail, &inner, out, opts.repair_rounds, &mut unavailable);
     (placements, unavailable)
 }
 
@@ -519,13 +555,15 @@ fn anchor(c: &Compiled, placements: &[Placement], groups: &[Vec<usize>]) -> Opti
     let mut out = c.clone();
     let mut changed = false;
     for g in groups {
-        let cells: Vec<Cell> = g.iter().flat_map(|&i| placements[i].cells().collect::<Vec<_>>()).collect();
-        let color = placements[g[0]].color;
+        // Each cell with the colour of the part that holds it.
+        let cells: Vec<(Cell, ColorId)> =
+            g.iter().flat_map(|&i| placements[i].cells().map(|cell| (cell, placements[i].color)).collect::<Vec<_>>()).collect();
+        let in_group = |cell: Cell| cells.iter().any(|(c2, _)| *c2 == cell);
         // First choice: a hovering overhang with a short gap underneath rests
         // on what is below once the gap (at most one brick) is filled.
         let mut filled_gap = false;
-        for cell in &cells {
-            if cells.contains(&Cell::new(cell.x, cell.y - 1, cell.z)) {
+        for &(cell, color) in &cells {
+            if in_group(Cell::new(cell.x, cell.y - 1, cell.z)) {
                 continue;
             }
             let mut gap = Vec::new();
@@ -546,10 +584,23 @@ fn anchor(c: &Compiled, placements: &[Placement], groups: &[Vec<usize>]) -> Opti
             changed = true;
             continue;
         }
-        'cells: for cell in &cells {
+        // Second choice: extend the feature one stud into the body, but only
+        // into a cell nobody can see (interior, or a surface cell whose only
+        // open side is covered by the feature itself).
+        let hidden = |nb: Cell| -> bool {
+            match c.grid.get(nb) {
+                Fill::Interior => true,
+                Fill::Solid(_) => [(1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)].iter().all(|&(dx, dy, dz)| {
+                    let n2 = Cell::new(nb.x + dx, nb.y + dy, nb.z + dz);
+                    (n2.y < 0) || c.grid.get(n2).is_filled() || in_group(n2)
+                }),
+                Fill::Empty => false,
+            }
+        };
+        'cells: for &(cell, color) in &cells {
             for (ax, az) in [(0, 1), (0, -1), (1, 0), (-1, 0)] {
                 let nb = Cell::new(cell.x + ax, cell.y, cell.z + az);
-                if cells.contains(&nb) || !c.grid.get(nb).is_filled() {
+                if in_group(nb) || !hidden(nb) {
                     continue;
                 }
                 if c.grid.get(nb) != Fill::Solid(color) {
@@ -611,6 +662,7 @@ fn badness(a: &crate::physics::Analysis) -> (usize, usize) {
 pub(crate) fn repair(
     c: &Compiled,
     avail: &dyn Availability,
+    inner: &[ColorId],
     mut placements: Vec<Placement>,
     rounds: u32,
     unavailable: &mut Vec<(String, ColorId)>,
@@ -669,7 +721,7 @@ pub(crate) fn repair(
             stale += 1;
             continue;
         }
-        let mut pk = Packer::new(c, avail);
+        let mut pk = Packer::new(c, avail, inner);
         pk.jitter = 14;
         pk.rng = seed | 1;
         for p in kept {
@@ -773,4 +825,61 @@ mod tests {
         let slopes = p.placements.iter().filter(|pl| pl.def().unwrap().is_slope()).count();
         assert!(slopes > 0, "expected some slopes on a dome");
     }
+
+    /// Random specs: no overlaps, no part contradicting a visible cell's
+    /// colour, nothing on a slope's sloped column or under an inverted slope's
+    /// overhang, and every visible cell covered unless its part was dropped.
+    #[test]
+    fn packing_invariants_on_random_specs() {
+        let mut seed = 0x5eed_u64;
+        let mut rnd = |lo: f32, hi: f32| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            lo + (hi - lo) * ((seed >> 33) as f32 / (1u64 << 31) as f32)
+        };
+        let colours = ["Red", "White", "Blue", "Yellow", "Black", "Orange", "Green"];
+        for case in 0..60 {
+            let mut shapes = Vec::new();
+            for _ in 0..(2 + case % 5) {
+                let kind = ["ellipsoid", "box", "cylinder"][(rnd(0.0, 2.99)) as usize];
+                let col = colours[rnd(0.0, 6.99) as usize];
+                let op = if rnd(0.0, 1.0) < 0.2 { "paint" } else { "add" };
+                shapes.push(format!(
+                    r#"{{"shape":"{kind}","center":[{:.2},{:.2},{:.2}],"size":[{:.2},{:.2},{:.2}],"color":"{col}","op":"{op}"}}"#,
+                    rnd(-4.0, 4.0), rnd(0.0, 8.0), rnd(-4.0, 4.0), rnd(1.0, 9.0), rnd(1.0, 9.0), rnd(1.0, 9.0)
+                ));
+            }
+            let json = format!(r#"{{"shapes":[{}]}}"#, shapes.join(","));
+            let Ok(spec) = Spec::from_json(&json) else { continue };
+            let res = 8 + (case % 4) as u32 * 4;
+            let Ok(c) = compile(&spec, &Palette::builtin(), &CompileOptions { resolution: Some(res), image: None }) else { continue };
+            let p = pack(&c, &UnknownAvailability, &PackOptions::default());
+            let grid = p.compiled.as_ref().unwrap_or(&c).grid.clone();
+            let mut owner = std::collections::HashMap::new();
+            for (i, pl) in p.placements.iter().enumerate() {
+                for cell in pl.cells() {
+                    assert!(owner.insert(cell, i).is_none(), "case {case}: overlap at {cell:?}\n{json}");
+                    if let Fill::Solid(col) = grid.get(cell) {
+                        assert_eq!(col, pl.color, "case {case}: colour mismatch at {cell:?}\n{json}");
+                    }
+                }
+            }
+            for pl in &p.placements {
+                let d = pl.def().unwrap();
+                let (y, high) = match d.shape {
+                    Shape::Slope { high } => (pl.top(), high),
+                    Shape::InvertedSlope { high } => (pl.origin.y - 1, high),
+                    _ => continue,
+                };
+                for lz in 0..d.size[1] {
+                    for lx in high..d.size[0] {
+                        let (x, z) = pl.local_to_grid(lx, lz);
+                        assert!(!owner.contains_key(&Cell::new(x, y, z)), "case {case}: part blocks a slope at ({x},{y},{z})\n{json}");
+                    }
+                }
+            }
+            let uncovered = grid.filled().filter(|(cell, f)| matches!(f, Fill::Solid(_)) && !owner.contains_key(cell)).count();
+            assert!(uncovered == 0 || p.dropped > 0, "case {case}: {uncovered} visible cells uncovered\n{json}");
+        }
+    }
+
 }

@@ -32,6 +32,26 @@ pub const SAMPLES: usize = SX * SY * SZ;
 /// Plate height in studs (3.2 mm / 8 mm).
 pub const PLATE_IN_STUDS: f32 = 0.4;
 
+/// Largest grid the compiler will allocate (about 0.3 GB of working memory).
+pub const MAX_CELLS: i64 = 16_000_000;
+/// Caps on size fields, so a careless spec can't ask for a huge grid.
+pub const MAX_BASE_MARGIN: u32 = 16;
+pub const MAX_BASE_PLATES: u32 = 9;
+pub const MAX_RELIEF_PLATES: u32 = 36;
+pub const MAX_RELIEF_SIDE: usize = 512;
+
+/// Refuse grids larger than [`MAX_CELLS`] before allocating them.
+pub(crate) fn check_dims(dims: [i32; 3]) -> Result<()> {
+    let n = dims.iter().try_fold(1i64, |acc, &d| if d < 0 { None } else { acc.checked_mul(d as i64) });
+    match n {
+        Some(n) if n <= MAX_CELLS => Ok(()),
+        _ => bail!(
+            "the model would need a {} × {} × {} grid, which is too large; lower the resolution or the sizes",
+            dims[0], dims[1], dims[2]
+        ),
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Spec {
     #[serde(default = "one")]
@@ -176,7 +196,12 @@ pub fn compile(spec: &Spec, palette: &Palette, opts: &CompileOptions) -> Result<
     };
     if let Some(base) = &spec.base {
         let color = resolve_color(palette, &base.color, &mut warnings);
-        add_base(&mut out, base, color);
+        if base.margin > MAX_BASE_MARGIN || base.plates > MAX_BASE_PLATES {
+            warnings.push(format!(
+                "base margin is capped at {MAX_BASE_MARGIN} studs and thickness at {MAX_BASE_PLATES} plates"
+            ));
+        }
+        add_base(&mut out, base, color)?;
     }
     out.grid.mark_interior();
     out.warnings = warnings;
@@ -216,6 +241,7 @@ fn compile_shapes(
         ((ext[1] / upp).ceil() as i32).max(1),
         ((ext[2] / ups).ceil() as i32).max(1),
     ];
+    check_dims(dims)?;
     // Centre the model in the grid horizontally; sit it on y = 0.
     let origin = [
         lo[0] - (dims[0] as f32 * ups - ext[0]) / 2.0,
@@ -379,11 +405,12 @@ fn crop(c: &mut Compiled) {
     c.samples = s;
 }
 
-fn add_base(c: &mut Compiled, base: &BaseSpec, color: ColorId) {
-    let m = base.margin as i32;
-    let t = base.plates.max(1) as i32;
+fn add_base(c: &mut Compiled, base: &BaseSpec, color: ColorId) -> Result<()> {
+    let m = base.margin.min(MAX_BASE_MARGIN) as i32;
+    let t = base.plates.clamp(1, MAX_BASE_PLATES) as i32;
     let [dx, dy, dz] = c.grid.dims;
     let nd = [dx + 2 * m, dy + t, dz + 2 * m];
+    check_dims(nd)?;
     let mut g = VoxelGrid::new(nd);
     let mut s = vec![0u32; (nd[0] * nd[1] * nd[2]) as usize];
     for y in 0..nd[1] {
@@ -403,6 +430,7 @@ fn add_base(c: &mut Compiled, base: &BaseSpec, color: ColorId) {
     }
     c.grid = g;
     c.samples = s;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -487,4 +515,22 @@ mod tests {
         assert_eq!(c.grid.get(Cell::new(0, 0, 0)), Fill::Solid(2));
         assert_eq!(c.grid.get(Cell::new(1, 1, 1)), Fill::Solid(4));
     }
+
+    #[test]
+    fn hostile_sizes_are_capped_not_fatal() {
+        let p = Palette::builtin();
+        let opts = CompileOptions { resolution: Some(8), image: None };
+        for json in [
+            r#"{"shapes":[{"shape":"box","center":[0,0,0],"size":[2,2,2]}],"base":{"margin":100000,"plates":4294967295}}"#,
+            r#"{"mode":"relief","relief":{"rows":["ab"],"legend":{"a":"Red","b":"Blue"},"base_plates":4294967295}}"#,
+            r#"{"mode":"relief","relief":{"rows":["ab"],"legend":{"a":"Red","b":"Blue"},"heights":{"luminance":{"max_plates":2000000000}}}}"#,
+        ] {
+            let c = compile(&Spec::from_json(json).unwrap(), &p, &opts).unwrap();
+            let n: i64 = c.grid.dims.iter().map(|&d| d as i64).product();
+            assert!(n < 100_000, "grid too big: {:?}", c.grid.dims);
+        }
+        let wide = format!(r#"{{"mode":"relief","relief":{{"rows":["{}"],"legend":{{"a":"Red"}}}}}}"#, "a".repeat(5000));
+        assert!(compile(&Spec::from_json(&wide).unwrap(), &p, &opts).is_err());
+    }
+
 }
