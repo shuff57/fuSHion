@@ -6,13 +6,34 @@
 //! * **lobe frame**: origin at a lobe's centre, `u` toward the fin side, `v` away from the
 //!   waist. Lobe B's frame is the peanut frame moved by `+pitch/2` along `v`; lobe A's is its
 //!   mirror image about the waist line.
+//!
+//! # The outline (lobe B's frame; `a = pitch / 2`, `r = stud_diameter / 2`)
+//!
+//! A brick pushed on has tubes (radius `R_t = tube_outer_diameter / 2`) at the four diagonal
+//! points `(±a, ±a)` around each lobe, and the inside face of its wall at `u = a − clearance −
+//! wall`. Every junction below is tangent, so the outline has no corners:
+//!
+//! 1. **Waist arcs** about `(±a, −a)`, radius `R_w = R_t + waist_clearance`: a tube beside the
+//!    waist, on either side, clears it. The waist is `2(a − R_w)` wide.
+//! 2. **Fin bump** `F`: the circle with its rightmost point at `(fin_reach, −fin_peak)` that
+//!    touches the fin-side waist arc from outside. With `s = a − fin_reach` and
+//!    `h = a − fin_peak`, its radius is `ρ = (s² + h² − R_w²) / (2(R_w − s))`.
+//! 3. **Blend** `E`: a circle containing the stud circle and touching it at `blend_angle` (the
+//!    point `T`), and containing `F`, touching it at `P`. With `d` the unit vector at
+//!    `blend_angle` and `c_F` the bump's centre, `E` has centre `−k·d` and radius `r + k`,
+//!    `k = ((r − ρ)² − |c_F|²) / (2(c_F·d − (r − ρ)))`.
+//! 4. **Stud circle** from `T` over the far end and down the inner side.
+//! 5. **Inner round** `G`, radius `waist_round`, inside the stud circle and touching it, and
+//!    touching the inner waist arc from outside.
+//!
+//! Lobe A is lobe B mirrored about the waist line.
 
 use crate::geom::{self, Frame, Loop, Seg};
-use crate::profile::{MIN_POCKET_FLOOR, SLANT_CAP, StudProfile, StudStyle};
+use crate::profile::{MIN_FIN_SECTION, MIN_POCKET_FLOOR, SLANT_CAP, StudProfile, StudStyle};
 use crate::shape::P2;
 use crate::{CustomError, Result};
 use std::collections::BTreeSet;
-use std::f64::consts::PI;
+use std::f64::consts::{FRAC_PI_4, PI};
 
 /// How far a pocket reaches past its slot's end, toward the waist, in mm (so the pocket's
 /// end wall and the slot's end wall are never the same face).
@@ -21,7 +42,7 @@ const POCKET_LEAD: f64 = 0.2;
 const TAIL_PAST: f64 = 0.3;
 /// How far the pocket's outline runs on past the slot's tail, in mm.
 const POCKET_TAIL: f64 = 0.2;
-/// How far the pocket reaches outboard of the slot tail and the lobe, in mm.
+/// How far the pocket reaches outboard of the slot tail and the fin, in mm.
 const POCKET_OUT: f64 = 0.15;
 /// The thinnest rim a pocket may leave to the brick's outside face, in mm.
 const MIN_RIM: f64 = 0.5;
@@ -45,11 +66,34 @@ pub(crate) struct Lobe {
     pub dims: SlantDims,
 }
 
-/// The derived dimensions of a v2 stud (mm), for reports and tests.
+/// The derived dimensions of a v2 stud (mm; points in a lobe's own frame: origin at its
+/// centre, `u` toward the fin side, `v` away from the waist), for reports and tests.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SlantDims {
-    /// Lobe diameter.
-    pub lobe_diameter: f64,
+    /// Radius of the stud circle (inner side and far end).
+    pub stud_radius: f64,
+    /// How far the fin reaches across the row.
+    pub fin_reach: f64,
+    /// The fin's outermost point.
+    pub fin_peak: P2,
+    /// Centre and radius of the fin bump.
+    pub bump_center: P2,
+    /// Radius of the fin bump.
+    pub bump_radius: f64,
+    /// Where the bump meets the waist arc.
+    pub bump_start: P2,
+    /// Centre of the blend arc.
+    pub blend_center: P2,
+    /// Radius of the blend arc.
+    pub blend_radius: f64,
+    /// Where the bump meets the blend arc.
+    pub blend_start: P2,
+    /// Where the blend arc meets the stud circle.
+    pub blend_end: P2,
+    /// Centre of the inner round.
+    pub round_center: P2,
+    /// Radius of the inner round.
+    pub round_radius: f64,
     /// Waist width.
     pub waist_width: f64,
     /// Radius of the waist's concave sides.
@@ -58,18 +102,25 @@ pub struct SlantDims {
     pub slot_width: f64,
     /// Slot centre line, outboard of the lobe centre line.
     pub slot_center: f64,
-    /// Where the slot's straight part starts and ends (`v` in the lobe frame).
+    /// Where the slot's straight part starts and ends (`v`).
     pub slot_v: (f64, f64),
-    /// Centre of the hook (lobe frame) and its centre-line radius.
+    /// Centre of the hook.
     pub hook_center: P2,
     /// Hook centre-line radius.
     pub hook_radius: f64,
     /// Length of the straight tail after the hook, on the centre line.
     pub tail: f64,
-    /// Widest fin: from the slot's outer edge to the lobe's edge.
+    /// Where the hook's outer edge leaves the stud circle, in degrees from the fin direction:
+    /// the cap is the stud circle beyond it.
+    pub cap_angle: f64,
+    /// Widest fin: from the slot's outer edge to the fin's outermost point.
     pub fin_width: f64,
-    /// Root length (waist line to slot end).
+    /// From the waist line to the slot's end, along the row.
     pub root_length: f64,
+    /// The fin root across the row at the slot's end, from the slot to the waist arc.
+    pub root_width: f64,
+    /// Thinnest solid between the slot and either waist arc.
+    pub min_section: f64,
     /// Pocket depth.
     pub pocket_depth: f64,
     /// Pocket reach outboard of the lobe centre.
@@ -84,19 +135,67 @@ fn add(p: P2, q: P2, k: f64) -> P2 {
     [p[0] + k * q[0], p[1] + k * q[1]]
 }
 
+fn sub(p: P2, q: P2) -> P2 {
+    [p[0] - q[0], p[1] - q[1]]
+}
+
 fn norm(p: P2) -> f64 {
     p[0].hypot(p[1])
+}
+
+fn unit(p: P2) -> P2 {
+    let l = norm(p);
+    [p[0] / l, p[1] / l]
+}
+
+fn dot(p: P2, q: P2) -> f64 {
+    p[0] * q[0] + p[1] * q[1]
+}
+
+/// Lobe B's frame point `q` in the peanut frame.
+fn up(q: P2, a: f64) -> P2 {
+    [q[0], q[1] + a]
+}
+
+/// A segment mirrored about the waist line (`v ↦ −v`, peanut frame) and run backwards, so a
+/// chain of lobe B read counter-clockwise becomes lobe A's, also counter-clockwise.
+fn mirrored(s: &Seg) -> Seg {
+    let m = |p: P2| [p[0], -p[1]];
+    match *s {
+        Seg::Line { a, b } => Seg::Line { a: m(b), b: m(a) },
+        Seg::Arc { a, b, c, ccw } => Seg::Arc {
+            a: m(b),
+            b: m(a),
+            c: m(c),
+            ccw,
+        },
+    }
+}
+
+/// How far from `p` along unit `dir` a ray leaves the circle about `c` of radius `r` (0 when
+/// `p` is already outside).
+fn leave(p: P2, dir: P2, c: P2, r: f64) -> f64 {
+    let q = sub(p, c);
+    let (b, cc) = (dot(q, dir), dot(q, q) - r * r);
+    if cc >= 0.0 {
+        0.0
+    } else {
+        -b + (b * b - cc).sqrt()
+    }
 }
 
 impl Lobe {
     /// The v2 geometry of `p`, or why its numbers don't make one.
     pub fn new(p: &StudProfile) -> Result<Self> {
         let StudStyle::SlantV2 {
-            lobe_scale,
-            waist_width,
+            fin_reach,
+            fin_peak,
+            blend_angle,
+            waist_clearance,
+            waist_round,
             slot_width,
             slot_offset,
-            root_length,
+            root_width,
             hook_radius,
             pocket_depth,
         } = p.stud_style
@@ -107,10 +206,12 @@ impl Lobe {
         };
         let bad = |why: String| Err(CustomError::InvalidProfile(format!("Slant v2 stud: {why}")));
         for (name, v) in [
-            ("lobe_scale", lobe_scale),
-            ("waist_width", waist_width),
+            ("fin_reach", fin_reach),
+            ("blend_angle", blend_angle),
+            ("waist_clearance", waist_clearance),
+            ("waist_round", waist_round),
             ("slot_width", slot_width),
-            ("root_length", root_length),
+            ("root_width", root_width),
             ("hook_radius", hook_radius),
             ("pocket_depth", pocket_depth),
         ] {
@@ -118,22 +219,15 @@ impl Lobe {
                 return bad(format!("{name} must be a positive number, got {v}"));
             }
         }
-        if !(slot_offset.is_finite() && slot_offset >= 0.0) {
-            return bad(format!(
-                "slot_offset must be 0 or more mm, got {slot_offset}"
-            ));
+        for (name, v) in [("slot_offset", slot_offset), ("fin_peak", fin_peak)] {
+            if !(v.is_finite() && v >= 0.0) {
+                return bad(format!("{name} must be 0 or more mm, got {v}"));
+            }
         }
-        let r = lobe_scale * p.stud_diameter / 2.0;
+        let r = p.stud_diameter / 2.0;
         let a = p.pitch / 2.0;
-        let w = waist_width / 2.0;
         let t = slot_width;
         let hw = t / 2.0;
-        if 2.0 * r >= p.pitch - 2.0 * p.clearance {
-            return bad(format!("lobes Ø{:.2} mm are wider than a cell", 2.0 * r));
-        }
-        if w >= r - 0.1 || w <= 0.0 {
-            return bad("the waist must be narrower than a lobe".into());
-        }
         if p.top_thickness < pocket_depth + MIN_POCKET_FLOOR - 1e-9 {
             return bad(format!(
                 "a {pocket_depth} mm pocket needs a top at least {:.2} mm thick (it is {})",
@@ -141,77 +235,177 @@ impl Lobe {
                 p.top_thickness
             ));
         }
-        if root_length <= POCKET_LEAD + 0.2 || root_length >= a - 1.0 {
+        // The fin presses into the wall of a brick pushed on by `preload`; it must stay inside
+        // the room its slot gives it.
+        let wall_face = a - p.clearance - p.wall;
+        let preload = fin_reach - wall_face;
+        if fin_reach <= r || preload >= slot_width - 0.05 {
             return bad(format!(
-                "root_length {root_length} mm must be between {:.1} and {:.1}",
-                POCKET_LEAD + 0.2,
-                a - 1.0
+                "fin_reach {fin_reach} mm must be between the stud radius {r} and {:.2} (the wall's inside face {wall_face:.2} plus the slot less 0.05)",
+                wall_face + slot_width - 0.05
             ));
         }
+        if fin_peak >= r {
+            return bad(format!("fin_peak {fin_peak} mm must be under {r}"));
+        }
 
-        // Peanut: the waist's concave sides are arcs of radius R about (±c, 0), tangent to
-        // both lobes: (R + w)² + a² = (R + r)².
-        let big_r = (w * w + a * a - r * r) / (2.0 * (r - w));
-        let c = big_r + w;
-        let k = 1.0 / (big_r + r);
-        let (tu, tv) = (c * r * k, a * big_r * k);
-        let trb = [tu, -tv];
-        let trt = [tu, tv];
-        let tlt = [-tu, tv];
-        let tlb = [-tu, -tv];
-        let peanut = vec![
+        // 1. Waist arcs about (±a, −a).
+        let rw = p.tube_outer_diameter / 2.0 + waist_clearance;
+        if a - rw < 0.3 {
+            return bad(format!(
+                "the waist would be {:.2} mm wide: tubes this big leave no waist",
+                2.0 * (a - rw)
+            ));
+        }
+        let tf = [a, -a];
+        let ti = [-a, -a];
+        // 2. Fin bump: rightmost point (fin_reach, −fin_peak), touching the waist arc outside.
+        let (s, h) = (a - fin_reach, a - fin_peak);
+        let rho = (s * s + h * h - rw * rw) / (2.0 * (rw - s));
+        if !(rho > 0.05 && rho < fin_reach) {
+            return bad(format!(
+                "the fin's bump comes out {rho:.3} mm in radius (fin_peak too close to the waist)"
+            ));
+        }
+        let cf = [fin_reach - rho, -fin_peak];
+        let j = add(cf, unit(sub(tf, cf)), rho);
+        // 3. Blend: contains the stud circle and the bump, touching each.
+        let th = blend_angle.to_radians();
+        let d = [th.cos(), th.sin()];
+        let den = 2.0 * (dot(cf, d) - (r - rho));
+        let k = ((r - rho).powi(2) - dot(cf, cf)) / den;
+        if !(den < 0.0 && k.is_finite() && k > 0.0 && k < 100.0) {
+            return bad(format!(
+                "no arc blends the fin into the stud circle at {blend_angle}° (raise blend_angle or fin_peak)"
+            ));
+        }
+        let ce = [-k * d[0], -k * d[1]];
+        let re = r + k;
+        let pp = add(cf, unit(sub(cf, ce)), rho);
+        let tt = [r * d[0], r * d[1]];
+        if !(pp[1] > -fin_peak && pp[1] < tt[1]) {
+            return bad("the fin's blend starts outside its bump".into());
+        }
+        // 5. Inner round: inside the stud circle, outside the inner waist arc.
+        let dg = r - waist_round;
+        let dd = norm(ti);
+        let cos_delta = (dg * dg + dd * dd - (rw + waist_round).powi(2)) / (2.0 * dg * dd);
+        if !(dg > 0.0 && (-1.0..=1.0).contains(&cos_delta)) {
+            return bad(format!(
+                "a {waist_round} mm round does not fit between the stud and the waist"
+            ));
+        }
+        let psi = PI + FRAC_PI_4 - cos_delta.acos();
+        let dir_g = [psi.cos(), psi.sin()];
+        let cg = [dg * dir_g[0], dg * dir_g[1]];
+        let g1 = [r * dir_g[0], r * dir_g[1]];
+        let g2 = add(cg, unit(sub(ti, cg)), waist_round);
+
+        // Lobe B's chain, from the fin-side waist arc round to the inner one (lobe frame).
+        let chain = [
             Seg::Arc {
-                a: trb,
-                b: trt,
-                c: [c, 0.0],
-                ccw: false,
-            },
-            Seg::Arc {
-                a: trt,
-                b: tlt,
-                c: [0.0, a],
+                a: j,
+                b: pp,
+                c: cf,
                 ccw: true,
             },
             Seg::Arc {
-                a: tlt,
-                b: tlb,
-                c: [-c, 0.0],
-                ccw: false,
+                a: pp,
+                b: tt,
+                c: ce,
+                ccw: true,
             },
             Seg::Arc {
-                a: tlb,
-                b: trb,
-                c: [0.0, -a],
+                a: tt,
+                b: g1,
+                c: [0.0, 0.0],
+                ccw: true,
+            },
+            Seg::Arc {
+                a: g1,
+                b: g2,
+                c: cg,
                 ccw: true,
             },
         ];
-        // Half-width of the peanut at `v` (peanut frame, |v| ≤ a + r).
-        let half_width = |v: f64| {
-            let v = v.abs();
-            if v >= tv {
-                (r * r - (v - a) * (v - a)).max(0.0).sqrt()
-            } else {
-                c - (big_r * big_r - v * v).sqrt()
-            }
+        let shift = |s: &Seg| match *s {
+            Seg::Line { a: p0, b: p1 } => line(up(p0, a), up(p1, a)),
+            Seg::Arc {
+                a: p0,
+                b: p1,
+                c,
+                ccw,
+            } => Seg::Arc {
+                a: up(p0, a),
+                b: up(p1, a),
+                c: up(c, a),
+                ccw,
+            },
         };
+        let b_chain: Vec<Seg> = chain.iter().map(shift).collect();
+        let jb = up(j, a);
+        let g2b = up(g2, a);
+        let m = |q: P2| [q[0], -q[1]];
+        let mut peanut = vec![Seg::Arc {
+            a: m(jb),
+            b: jb,
+            c: [a, 0.0],
+            ccw: false,
+        }];
+        peanut.extend(b_chain.iter().copied());
+        peanut.push(Seg::Arc {
+            a: g2b,
+            b: m(g2b),
+            c: [-a, 0.0],
+            ccw: false,
+        });
+        peanut.extend(b_chain.iter().rev().map(mirrored));
 
-        // Slot, in lobe B's frame.
+        // Slot, in lobe B's frame. It starts where the fin's root is `root_width` across.
         let uc = slot_offset + hw;
-        let v0 = root_length - a;
+        let fin_edge = uc + hw;
+        let across = a - fin_edge - root_width;
+        if across <= 0.0 || across >= rw {
+            return bad("the fin root does not fit beside the slot".into());
+        }
+        let v0 = -a + (rw * rw - across * across).sqrt();
+        if v0 > j[1] {
+            return bad("the slot starts beyond the fin's bump (smaller root_width)".into());
+        }
+        let min_section = norm(sub([fin_edge, v0], tf)) - rw;
+        let inner_section = norm(sub([uc - hw, v0], ti)) - rw;
+        let min_section = min_section.min(inner_section);
+        if min_section < MIN_FIN_SECTION {
+            return bad(format!(
+                "the slot leaves {min_section:.2} mm to the waist (under {MIN_FIN_SECTION})"
+            ));
+        }
         let v_s = r - SLANT_CAP - hw - hook_radius;
         if v_s <= v0 + 0.2 {
             return bad(
-                "the hook leaves no straight slot (smaller hook_radius or root_length)".into(),
+                "the hook leaves no straight slot (smaller hook_radius or root_width)".into(),
             );
         }
         if hook_radius <= hw + 0.2 {
             return bad("the hook is tighter than the slot is wide".into());
         }
-        if uc + hw + 0.2 > half_width(root_length) {
-            return bad("the slot's end lies outside the waist".into());
-        }
         let hc = [uc + hook_radius, v_s];
-        let th = PI / 4.0; // the hook ends heading 45° back toward the waist
+        // Where the hook's outer edge leaves the stud circle: the cap is the stud circle
+        // beyond it, so the blend must end before it.
+        let cap_angle = {
+            let (ro, l) = (hook_radius + hw, norm(hc));
+            let x = (r * r - ro * ro + l * l) / (2.0 * l);
+            let y = (r * r - x * x).max(0.0).sqrt();
+            let e = unit(hc);
+            let q = [x * e[0] - y * e[1], x * e[1] + y * e[0]];
+            q[1].atan2(q[0]).to_degrees()
+        };
+        if cap_angle < blend_angle {
+            return bad(format!(
+                "the blend ends at {blend_angle}°, past the slot's mouth (the cap starts at {cap_angle:.1}°)"
+            ));
+        }
+        let th = FRAC_PI_4; // the hook ends heading 45° back toward the waist
         let (ct, st) = (th.cos(), th.sin());
         let dir = [st, -ct];
         let out_n = [ct, st]; // from the fin side of the tail to its far side
@@ -219,16 +413,9 @@ impl Lobe {
             hc[0] + (hook_radius - hw) * ct,
             hc[1] + (hook_radius - hw) * st,
         ];
-        // The tail runs on until the fin side's edge is TAIL_PAST outside the lobe.
-        let exit = {
-            let (b, cc) = (p4[0] * dir[0] + p4[1] * dir[1], norm(p4).powi(2) - r * r);
-            if cc >= 0.0 {
-                0.0
-            } else {
-                -b + (b * b - cc).sqrt()
-            }
-        };
-        let tail = exit + TAIL_PAST;
+        // The tail runs on until the fin side's edge is TAIL_PAST outside the lobe (which
+        // lies inside the blend circle).
+        let tail = leave(p4, dir, ce, re) + TAIL_PAST;
         let p1 = [uc - hw, v0];
         let p2 = [uc + hw, v0];
         let p3 = [uc + hw, v_s];
@@ -257,11 +444,11 @@ impl Lobe {
             line(p8, p1),
         ];
 
-        // Pocket: everything on the fin side of the slot's centre line, out past the lobe.
+        // Pocket: everything on the fin side of the slot's centre line, out past the fin.
         let m_start = [uc, v_s];
         let m_end = [hc[0] + hook_radius * ct, hc[1] + hook_radius * st];
         let e2 = add(m_end, dir, tail + POCKET_TAIL);
-        let u_out = e2[0].max(r) + POCKET_OUT;
+        let u_out = e2[0].max(fin_reach) + POCKET_OUT;
         let vp0 = v0 - POCKET_LEAD;
         if u_out > a - p.clearance - MIN_RIM {
             return bad(format!(
@@ -283,17 +470,31 @@ impl Lobe {
         ]);
 
         let dims = SlantDims {
-            lobe_diameter: 2.0 * r,
-            waist_width,
-            waist_radius: big_r,
+            stud_radius: r,
+            fin_reach,
+            fin_peak: [fin_reach, -fin_peak],
+            bump_center: cf,
+            bump_radius: rho,
+            bump_start: j,
+            blend_center: ce,
+            blend_radius: re,
+            blend_start: pp,
+            blend_end: tt,
+            round_center: cg,
+            round_radius: waist_round,
+            waist_width: 2.0 * (a - rw),
+            waist_radius: rw,
             slot_width: t,
             slot_center: uc,
             slot_v: (v0, v_s),
             hook_center: hc,
             hook_radius,
             tail,
-            fin_width: r - (uc + hw),
-            root_length,
+            cap_angle,
+            fin_width: fin_reach - fin_edge,
+            root_length: v0 + a,
+            root_width,
+            min_section,
             pocket_depth,
             pocket_out: u_out,
         };
@@ -341,6 +542,11 @@ impl Lobe {
     /// the pocket.
     pub fn slot_volume(&self, stud_height: f64) -> f64 {
         self.slot_in_peanut() * stud_height + self.slot_outside_pocket() * self.groove
+    }
+
+    /// Whether lobe B's frame point `q` is on a fin (over the pocket, past the slot's end).
+    pub fn on_fin(&self, q: P2) -> bool {
+        q[1] > self.dims.slot_v.0 + 1e-9 && geom::contains(&self.pocket, q)
     }
 }
 
@@ -471,8 +677,7 @@ pub(crate) fn fin_probe_points(l: &Lobe) -> Vec<P2> {
             let q = [
                 -0.1 + 3.0 * f64::from(i) / f64::from(n),
                 l.dims.slot_v.0
-                    + (l.dims.lobe_diameter / 2.0 + 0.1 - l.dims.slot_v.0) * f64::from(j)
-                        / f64::from(n),
+                    + (l.dims.stud_radius + 0.1 - l.dims.slot_v.0) * f64::from(j) / f64::from(n),
             ];
             if geom::contains(&l.peanut, to_peanut(q)) && !geom::contains(&l.slot, q) {
                 // On the fin side of the slot's straight part, or under the hook.
@@ -517,32 +722,102 @@ mod tests {
         n as f64 * step * step
     }
 
+    /// Unit tangent of a segment at its start (`end = false`) or end, in its direction of
+    /// travel.
+    fn tangent(s: &Seg, end: bool) -> P2 {
+        match *s {
+            Seg::Line { a, b } => unit(sub(b, a)),
+            Seg::Arc { a, b, c, ccw } => {
+                let p = if end { b } else { a };
+                let n = unit(sub(p, c));
+                if ccw { [-n[1], n[0]] } else { [n[1], -n[0]] }
+            }
+        }
+    }
+
     #[test]
-    fn peanut_area_matches_its_closed_form() {
+    fn the_outline_is_closed_and_tangent_at_every_junction() {
         let l = lobe();
-        let (r, a) = (l.dims.lobe_diameter / 2.0, l.a);
-        let w = 1.6;
-        let big_r = l.dims.waist_radius;
-        let c = big_r + w;
-        assert!(
-            ((c * c + a * a).sqrt() - (big_r + r)).abs() < 1e-12,
-            "arcs tangent"
+        let n = l.peanut.len();
+        assert_eq!(n, 10);
+        for k in 0..n {
+            let (s, t) = (&l.peanut[k], &l.peanut[(k + 1) % n]);
+            let (Seg::Arc { b: end, .. }, Seg::Arc { a: start, .. }) = (*s, *t) else {
+                panic!("the peanut is all arcs");
+            };
+            assert!(norm(sub(end, start)) < 1e-12, "gap after segment {k}");
+            let (u, w) = (tangent(s, true), tangent(t, false));
+            assert!(
+                norm(sub(u, w)) < 1e-9,
+                "corner after segment {k}: {u:?} vs {w:?}"
+            );
+            // Each arc's ends lie on its circle.
+            if let Seg::Arc { a, b, c, .. } = *s {
+                assert!(
+                    (norm(sub(a, c)) - norm(sub(b, c))).abs() < 1e-12,
+                    "segment {k}"
+                );
+            }
+        }
+        // Mirror symmetric about the waist line.
+        for i in 0..60 {
+            for j in 0..130 {
+                let q = [
+                    -3.0 + 0.1 * f64::from(i) + 0.013,
+                    0.05 * f64::from(j) + 0.007,
+                ];
+                assert_eq!(
+                    geom::contains(&l.peanut, q),
+                    geom::contains(&l.peanut, [q[0], -q[1]]),
+                    "{q:?}"
+                );
+            }
+        }
+        let d = l.dims;
+        assert!((d.waist_width - 1.39).abs() < 1e-9);
+        assert!((d.waist_radius - 3.305).abs() < 1e-12);
+        // The fin peaks at u = 2.85; the stud circle stays Ø4.8.
+        assert!((d.bump_center[0] + d.bump_radius - 2.85).abs() < 1e-12);
+        assert!((d.stud_radius - 2.4).abs() < 1e-12);
+        // The blend touches the stud circle at 40°, inside the slot's mouth.
+        assert!((d.blend_end[1].atan2(d.blend_end[0]).to_degrees() - 40.0).abs() < 1e-9);
+        assert!(d.cap_angle > 40.0);
+    }
+
+    #[test]
+    fn peanut_area_matches_a_fine_grid() {
+        let l = lobe();
+        let step = 0.002;
+        let grid = sampled(
+            |q| geom::contains(&l.peanut, q),
+            [-3.0, -6.5],
+            [3.0, 6.5],
+            step,
         );
-        let tv = a * big_r / (big_r + r);
-        // Two disks, plus the waist band |v| ≤ tv between the concave arcs, less the two caps
-        // of the disks that lie in that band.
-        let band = 4.0 * c * tv
-            - 2.0 * (tv * (big_r * big_r - tv * tv).sqrt() + big_r * big_r * (tv / big_r).asin());
-        let d = a - tv;
-        let cap = r * r * (d / r).acos() - d * (r * r - d * d).sqrt();
-        let hand = 2.0 * PI * r * r + band - 2.0 * cap;
         assert!(
-            (l.peanut_area() - hand).abs() < 1e-9,
-            "{} vs {hand}",
+            (l.peanut_area() - grid).abs() < 2e-3,
+            "{} vs {grid}",
             l.peanut_area()
         );
-        // Waist width as asked.
-        assert!((c - big_r - w).abs() < 1e-12);
+        // Inside: the stud circles, the fin peaks; outside: the tubes' clearance at the waist.
+        for q in [
+            [0.0, 4.0],
+            [-2.39, 4.0],
+            [2.84, 3.7],
+            [0.0, 0.0],
+            [0.69, 0.0],
+        ] {
+            assert!(geom::contains(&l.peanut, q), "{q:?}");
+        }
+        for q in [
+            [0.7, 0.0],
+            [-0.7, 0.0],
+            [2.86, 3.7],
+            [0.0, 6.41],
+            [-2.41, 4.0],
+        ] {
+            assert!(!geom::contains(&l.peanut, q), "{q:?}");
+        }
     }
 
     #[test]
@@ -613,10 +888,40 @@ mod tests {
         }
         // Dimensions as designed.
         let d = l.dims;
-        assert!((d.lobe_diameter - 5.28).abs() < 1e-12);
         assert!((d.slot_center - 0.5).abs() < 1e-12);
-        assert!((d.fin_width - 1.89).abs() < 1e-9);
-        assert!((d.slot_v.0 + 3.2).abs() < 1e-12);
+        assert!((d.fin_width - 2.1).abs() < 1e-9);
+        assert!((d.root_width - 0.8).abs() < 1e-12);
+        assert!(d.min_section >= 0.6, "{}", d.min_section);
+    }
+
+    #[test]
+    fn profiles_that_would_not_print_or_fit_are_refused() {
+        let with = |f: &dyn Fn(&mut StudStyle)| {
+            let mut p = StudProfile::slant_v2_experimental();
+            f(&mut p.stud_style);
+            Lobe::new(&p)
+        };
+        // A thin root leaves too little between the slot and the waist.
+        let e = with(&|s| {
+            if let StudStyle::SlantV2 { root_width, .. } = s {
+                *root_width = 0.3;
+            }
+        });
+        assert!(e.is_err_and(|e| e.to_string().contains("to the waist")));
+        // A fin that would press further than its slot lets it.
+        let e = with(&|s| {
+            if let StudStyle::SlantV2 { fin_reach, .. } = s {
+                *fin_reach = 3.2;
+            }
+        });
+        assert!(e.is_err());
+        // A blend that ends past the slot's mouth would put the cap off the stud circle.
+        let e = with(&|s| {
+            if let StudStyle::SlantV2 { blend_angle, .. } = s {
+                *blend_angle = 60.0;
+            }
+        });
+        assert!(e.is_err());
     }
 
     #[test]

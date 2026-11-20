@@ -119,8 +119,9 @@ rare part) or a shape no catalog part can make, design a printable part:
   or `{"kind":"footprint","cells":[[0,0],[1,0],[1,1]],"plates":3}`. Sizes are
   studs and plates; slopes fall toward -Y. `compliant_stud` uses the
   experimental Slant v2 stud (peanut studs with leaf-spring fins along the long
-  edges, 1.4 mm top); the standard profile has centre ribs and a 0.2 mm bottom
-  chamfer.
+  edges, 1.4 mm top), shaped to fit standard bricks; bricks pushed onto it must
+  start and end on a pair of studs, never between the two studs of a pair. The
+  standard profile has centre ribs and a 0.2 mm bottom chamfer.
 - `make_custom_part_from_commands` for anything else, written as a SolidCraft
   command batch in millimetres (8 mm pitch, 9.6 mm brick, Ø4.8 × 1.8 mm studs,
   Ø6.51/4.8 mm tubes, 1.2 mm walls, 0.1 mm side clearance) with an `expect`

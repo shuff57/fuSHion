@@ -144,10 +144,15 @@ pitch, Ø4.8 mm studs, 0.1 mm side clearance), with a centre rib through every
 second tube of 2-wide bricks and a 0.2 mm bottom chamfer against elephant's foot.
 An experimental Slant v2 stud, modelled on the design Slant 3D showed in *We Made
 a Better LEGO (For 3D Printing)*, is included for test printing: neighbouring
-studs along each long edge fuse into a peanut whose lobes (10 % wider) each carry
-a leaf-spring fin, cut free by a 0.5 mm hooked slot and a pocket under it, that
-presses on the receiving brick's wall. Print the files yourself or upload them to
-a print service.
+studs along each long edge fuse into a peanut whose lobes each carry a leaf-spring
+fin, cut free by a 0.5 mm hooked slot and a pocket under it, that presses 0.15 mm
+on the receiving brick's wall. Its outline is reshaped to fit standard bricks: each
+lobe is the Ø4.8 mm stud circle on its inner side (tangent to the tubes, like a
+normal stud), the 1.39 mm waist clears the tubes beside it by 0.05 mm, and a fin
+never touches a tube. Because the two studs are fused, a brick pushed on must not
+end, or run its side wall, between the two studs of a pair: its wall would land on
+the waist. Print the files yourself or upload them to a print
+service.
 
 ## Workspace
 

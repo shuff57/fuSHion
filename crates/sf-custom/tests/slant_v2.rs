@@ -1,6 +1,7 @@
 //! Builds Slant 3D's v2 stud through SolidCraft and checks it against hand calculations made
-//! here, independently of the crate's own geometry: the peanut in closed form, the slot and
-//! pocket areas by sampling a fine grid with inside tests written from the stud's dimensions.
+//! here, independently of the crate's own geometry: the peanut in closed form (its width
+//! integrated arc by arc), the slot and pocket areas by sampling a fine grid with inside tests
+//! written from the stud's dimensions.
 //!
 //! STLs are written to `/tmp/fushion-custom/` for inspection.
 
@@ -13,13 +14,24 @@ use std::f64::consts::PI;
 
 const OUT: &str = "/tmp/fushion-custom";
 
-/// The v2 lobe geometry, written out from the documented construction.
+/// The v2 lobe geometry, written out from the documented construction. Points are in lobe
+/// B's frame (origin at its centre, `u` toward the fin side, `v` away from the waist); each
+/// tangency is found by bisection rather than the crate's closed forms.
 struct Hand {
     r: f64,
     a: f64,
-    big_r: f64,
-    c: f64,
-    tv: f64,
+    rw: f64,
+    cf: [f64; 2],
+    rho: f64,
+    j: [f64; 2],
+    ce: [f64; 2],
+    re: f64,
+    p: [f64; 2],
+    t: [f64; 2],
+    cg: [f64; 2],
+    rg: f64,
+    g1: [f64; 2],
+    g2: [f64; 2],
     uc: f64,
     hw: f64,
     v0: f64,
@@ -32,31 +44,98 @@ struct Hand {
 
 const S45: f64 = std::f64::consts::FRAC_1_SQRT_2;
 
+fn dist(p: [f64; 2], q: [f64; 2]) -> f64 {
+    (p[0] - q[0]).hypot(p[1] - q[1])
+}
+
+/// `p + k · (q − p) / |q − p|`.
+fn toward(p: [f64; 2], q: [f64; 2], k: f64) -> [f64; 2] {
+    let l = dist(p, q);
+    [p[0] + k * (q[0] - p[0]) / l, p[1] + k * (q[1] - p[1]) / l]
+}
+
+/// The root of `f` in `[lo, hi]`, where it changes sign.
+fn bisect(f: impl Fn(f64) -> f64, mut lo: f64, mut hi: f64) -> f64 {
+    let up = f(hi) > f(lo);
+    for _ in 0..200 {
+        let m = (lo + hi) / 2.0;
+        if (f(m) > 0.0) == up {
+            hi = m;
+        } else {
+            lo = m;
+        }
+    }
+    (lo + hi) / 2.0
+}
+
+/// `∫ √(R² − (x − c)²) dx`.
+fn sq(x: f64, c: f64, r: f64) -> f64 {
+    let y = x - c;
+    0.5 * (y * (r * r - y * y).max(0.0).sqrt() + r * r * (y / r).clamp(-1.0, 1.0).asin())
+}
+
 impl Hand {
     fn new() -> Self {
         let d = slant_dims(&StudProfile::slant_v2_experimental()).unwrap();
-        let (r, a, w) = (2.64, 4.0, 1.6);
-        assert!((d.lobe_diameter - 2.0 * r).abs() < 1e-12);
-        // Concave sides of radius R about (±c, 0) tangent to both lobes.
-        let big_r = (w * w + a * a - r * r) / (2.0 * (r - w));
-        assert!((d.waist_radius - big_r).abs() < 1e-9);
-        let c = big_r + w;
-        let tv = a * big_r / (big_r + r);
-        // Slot: 0.5 wide, inner edge 0.25 outboard; root 0.8; hook radius 1.2 whose outer edge
-        // peaks 0.75 below the lobe's far edge.
+        let (r, a) = (2.4, 4.0);
+        // Waist arcs about (±4, −4), 0.05 mm clear of a Ø6.51 tube: a 1.39 mm waist.
+        let rw = 3.255 + 0.05;
+        let (tf, ti) = ([a, -a], [-a, -a]);
+        assert!((d.waist_width - 2.0 * (a - rw)).abs() < 1e-12);
+        // Fin bump: rightmost point (2.85, −0.3), touching the fin-side waist arc outside.
+        let rho = bisect(|k| dist([2.85 - k, -0.3], tf) - k - rw, 0.01, 2.8);
+        let cf = [2.85 - rho, -0.3];
+        let j = toward(cf, tf, rho);
+        // Blend: about −k·(cos 40°, sin 40°), radius r + k; touches the bump inside.
+        let dir = [40f64.to_radians().cos(), 40f64.to_radians().sin()];
+        let at = |k: f64| [-k * dir[0], -k * dir[1]];
+        let k = bisect(|k| dist(cf, at(k)) - (r + k - rho), 0.0, 1000.0);
+        let (ce, re) = (at(k), r + k);
+        let p = toward(ce, cf, re);
+        let t = [r * dir[0], r * dir[1]];
+        // Inner round: 0.5 mm, inside the stud circle, outside the inner waist arc.
+        let rg = 0.5;
+        let cg_at = |psi: f64| [(r - rg) * psi.cos(), (r - rg) * psi.sin()];
+        let psi = bisect(|psi| dist(cg_at(psi), ti) - rw - rg, PI, 1.25 * PI);
+        let cg = cg_at(psi);
+        let g1 = [r * psi.cos(), r * psi.sin()];
+        let g2 = toward(cg, ti, rg);
+        for (got, want) in [
+            (d.bump_center, cf),
+            (d.bump_start, j),
+            (d.blend_center, ce),
+            (d.blend_start, p),
+            (d.blend_end, t),
+            (d.round_center, cg),
+        ] {
+            assert!(dist(got, want) < 1e-9, "{got:?} vs {want:?}");
+        }
+        // Slot: 0.5 wide, inner edge 0.25 outboard; it starts where the fin root (from its
+        // outer edge to the waist arc) is 0.8 across. Hook radius 1.2 whose outer edge peaks
+        // 0.75 below the stud circle's far edge.
         let (uc, hw, rh) = (0.5, 0.25, 1.2);
+        let v0 = -a + (rw * rw - (a - uc - hw - 0.8_f64).powi(2)).sqrt();
         let vs = r - 0.75 - hw - rh;
         assert!((d.slot_center - uc).abs() < 1e-12);
-        assert!((d.slot_v.0 + 3.2).abs() < 1e-12 && (d.slot_v.1 - vs).abs() < 1e-12);
+        assert!((d.slot_v.0 - v0).abs() < 1e-12 && (d.slot_v.1 - vs).abs() < 1e-12);
         Self {
             r,
             a,
-            big_r,
-            c,
-            tv,
+            rw,
+            cf,
+            rho,
+            j,
+            ce,
+            re,
+            p,
+            t,
+            cg,
+            rg,
+            g1,
+            g2,
             uc,
             hw,
-            v0: -3.2,
+            v0,
             vs,
             hc: [uc + rh, vs],
             rh,
@@ -65,13 +144,38 @@ impl Hand {
         }
     }
 
-    /// Inside the peanut (lobe B's frame: origin at the lobe centre, `u` to the fin side).
+    /// The peanut's right (fin side) and left edges at `vp` (peanut frame, `0 ≤ vp ≤ a + r`).
+    fn edges(&self, vp: f64) -> (f64, f64) {
+        let (a, w) = (self.a, vp - self.a);
+        let waist = a - (self.rw * self.rw - vp * vp).max(0.0).sqrt();
+        let circle = |c: [f64; 2], r: f64| (r * r - (w - c[1]).powi(2)).max(0.0).sqrt();
+        let right = if w <= self.j[1] {
+            waist
+        } else if w <= self.p[1] {
+            self.cf[0] + circle(self.cf, self.rho)
+        } else if w <= self.t[1] {
+            self.ce[0] + circle(self.ce, self.re)
+        } else {
+            circle([0.0, 0.0], self.r)
+        };
+        let left = if w <= self.g2[1] {
+            -waist
+        } else if w <= self.g1[1] {
+            self.cg[0] - circle(self.cg, self.rg)
+        } else {
+            -circle([0.0, 0.0], self.r)
+        };
+        (right, left)
+    }
+
+    /// Inside the peanut (lobe B's frame).
     fn peanut(&self, q: [f64; 2]) -> bool {
-        let (u, v) = (q[0], q[1] + self.a); // peanut frame
-        let disk = |cv: f64| u * u + (v - cv) * (v - cv) <= self.r * self.r;
-        disk(self.a)
-            || disk(-self.a)
-            || (v.abs() <= self.tv && u.abs() <= self.c - (self.big_r.powi(2) - v * v).sqrt())
+        let vp = (q[1] + self.a).abs();
+        if vp > self.a + self.r {
+            return false;
+        }
+        let (right, left) = self.edges(vp);
+        left <= q[0] && q[0] <= right
     }
 
     /// Angle of `q` about the hook centre, degrees.
@@ -120,15 +224,24 @@ impl Hand {
         across <= 0.0 || q[1] <= e2[1]
     }
 
-    /// Peanut area, closed form: two disks, plus the waist band between the concave arcs, less
-    /// the disks' caps inside the band.
+    /// Peanut area, closed form: twice the integral of its width over lobe B's half, arc by
+    /// arc.
     fn peanut_area(&self) -> f64 {
-        let (r, br, tv) = (self.r, self.big_r, self.tv);
-        let band = 4.0 * self.c * tv
-            - 2.0 * (tv * (br * br - tv * tv).sqrt() + br * br * (tv / br).asin());
-        let d = self.a - tv;
-        let cap = r * r * (d / r).acos() - d * (r * r - d * d).sqrt();
-        2.0 * PI * r * r + band - 2.0 * cap
+        let (a, r) = (self.a, self.r);
+        let span = |f: &dyn Fn(f64) -> f64, x0: f64, x1: f64| f(x1) - f(x0);
+        let waist = |x: f64| a * x - sq(x, 0.0, self.rw);
+        let arc =
+            |c: [f64; 2], rad: f64, sign: f64| move |x: f64| sign * c[0] * x + sq(x, c[1] + a, rad);
+        let (jv, pv, tv) = (self.j[1] + a, self.p[1] + a, self.t[1] + a);
+        let (g2v, g1v, top) = (self.g2[1] + a, self.g1[1] + a, a + r);
+        let right = span(&waist, 0.0, jv)
+            + span(&arc(self.cf, self.rho, 1.0), jv, pv)
+            + span(&arc(self.ce, self.re, 1.0), pv, tv)
+            + span(&arc([0.0, 0.0], r, 0.0), tv, top);
+        let left = span(&waist, 0.0, g2v)
+            + span(&arc(self.cg, self.rg, -1.0), g2v, g1v)
+            + span(&arc([0.0, 0.0], r, 0.0), g1v, top);
+        2.0 * (right + left)
     }
 }
 
@@ -297,11 +410,11 @@ fn v2_fins_hang_only_from_their_roots() {
     .unwrap();
     let steps = batch["commands"].as_array_mut().unwrap();
     // Row 0's fins face −X from x = 4 − u, row 1's face +X from x = 12 + u; the waist is at
-    // y = 8 and the slots end 0.8 mm either side of it.
+    // y = 8 and the slots end 2.22 mm either side of it.
     for (x0, x1) in [(0.5, 3.5), (12.5, 15.5)] {
         steps.push(json!({"command": "solid.box", "params": {
-            "length": x1 - x0, "width": 2.0, "height": 3.0,
-            "corner": [x0, 7.0, 8.9], "operation": "cut"}}));
+            "length": x1 - x0, "width": 4.8, "height": 3.0,
+            "corner": [x0, 5.6, 8.9], "operation": "cut"}}));
     }
     batch["expect"] = json!({"bodies": 5});
     let part = build_from_commands(&batch).unwrap_or_else(|e| panic!("{e}"));
@@ -319,8 +432,8 @@ fn v2_fins_hang_only_from_their_roots() {
     let steps = batch["commands"].as_array_mut().unwrap();
     for (x0, x1) in [(4.25, 7.0), (9.0, 11.75)] {
         steps.push(json!({"command": "solid.box", "params": {
-            "length": x1 - x0, "width": 2.0, "height": 3.0,
-            "corner": [x0, 7.0, 8.9], "operation": "cut"}}));
+            "length": x1 - x0, "width": 4.8, "height": 3.0,
+            "corner": [x0, 5.6, 8.9], "operation": "cut"}}));
     }
     batch["expect"] = json!({"bodies": 1});
     build_from_commands(&batch).unwrap_or_else(|e| panic!("{e}"));
