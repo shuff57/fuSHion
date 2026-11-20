@@ -78,8 +78,10 @@ impl Session {
         meshes: Arc<MeshLibrary>,
     ) -> Result<Self> {
         std::fs::create_dir_all(dir.join("history")).with_context(|| format!("creating {}", dir.display()))?;
+        // Absolute, so paths stay valid for child processes run elsewhere.
+        let dir = std::fs::canonicalize(dir).with_context(|| format!("resolving {}", dir.display()))?;
         let mut s = Session {
-            dir: dir.to_path_buf(),
+            dir,
             palette,
             availability,
             catalog,
