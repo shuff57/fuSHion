@@ -9,19 +9,43 @@ use serde::{Deserialize, Serialize};
 pub enum StudStyle {
     /// A plain solid cylinder, [`StudProfile::stud_diameter`] wide.
     Solid,
-    /// **Experimental.** A hollow stud split by two vertical relief slots into two flexing
-    /// fingers. The stud is printed oversize and the fingers spring in when a brick is pressed
-    /// on, so grip depends less on the printer's exact diameter. Needs test prints before use.
-    Slotted {
-        /// Diameter of the hole down the middle of the stud, in mm.
-        inner_diameter: f64,
-        /// Width of each relief slot, in mm.
+    /// **Experimental.** Slant 3D's "LEGO v2" stud, as shown in *We Made a Better LEGO (For 3D
+    /// Printing)*: two neighbouring studs of a row along the long outside edge are fused into
+    /// one peanut (two lobes joined by a waist with concave sides), and a leaf-spring fin is
+    /// cut out of each lobe on the outer side. The fin is split from the stud by a narrow slot
+    /// that hooks out through the lobe's outer edge, and a pocket in the brick's top frees its
+    /// underside, so it hangs from its root at the waist and presses on the receiving brick's
+    /// wall with a steady force. A stud left over at the end of a row (or on an inner row)
+    /// stays a plain round [`StudProfile::stud_diameter`] stud.
+    ///
+    /// In each lobe's own frame (origin at the lobe centre, `u` toward the fin side, `v` away
+    /// from the waist), the slot's centre line runs straight along `v` at
+    /// `u = slot_offset + slot_width / 2` from `root_length` past the waist line to a hook: a
+    /// 135° turn of radius `hook_radius` toward the fin side, then a short straight tail that
+    /// leaves the lobe heading 45° back toward the waist. The hook's outer edge peaks
+    /// [`SLANT_CAP`] mm (along `v`) short of the lobe's far edge, so the stud keeps a cap there.
+    SlantV2 {
+        /// Lobe diameter as a multiple of [`StudProfile::stud_diameter`] (Slant: 10 % wider).
+        lobe_scale: f64,
+        /// Width of the waist between the two lobes, at its narrowest, in mm.
+        waist_width: f64,
+        /// Width of the slot that frees each fin, in mm (also the gap the fin flexes into).
         slot_width: f64,
-        /// How far the slots reach down from the stud top, in mm (less than the stud height,
-        /// so the fingers stay joined to the brick by a full ring at their root).
-        slot_depth: f64,
+        /// How far the slot's inner edge lies outboard of the lobe's centre line, in mm.
+        slot_offset: f64,
+        /// Length of the solid root between the waist line and the slot's end, in mm.
+        root_length: f64,
+        /// Radius of the slot's hook, on its centre line, in mm.
+        hook_radius: f64,
+        /// Depth of the pocket cut into the brick's top under each fin, in mm.
+        pocket_depth: f64,
     },
 }
+
+/// Solid cap a Slant v2 lobe keeps beyond its slot's hook, in mm.
+pub const SLANT_CAP: f64 = 0.75;
+/// Thinnest floor a Slant v2 pocket may leave above the hollow, in mm.
+pub const MIN_POCKET_FLOOR: f64 = 0.8;
 
 /// The connector dimensions of a printed brick, all in millimetres.
 ///
@@ -47,8 +71,30 @@ pub struct StudProfile {
     pub tube_outer_diameter: f64,
     /// Inside diameter of the bottom tubes.
     pub tube_inner_diameter: f64,
-    /// Solid or slotted studs.
+    /// Solid round studs, or Slant 3D's v2 peanut studs.
     pub stud_style: StudStyle,
+    /// Centre ribs under 2-wide bricks: a cross-wall between the two long walls through every
+    /// second tube, which keeps the long walls from bowing (see [`RIB_THICKNESS`]).
+    #[serde(default = "yes")]
+    pub center_ribs: bool,
+    /// Chamfer on the bottom outer edges and the tube bottoms, against elephant's foot, in mm
+    /// (0 for none).
+    #[serde(default = "default_chamfer")]
+    pub bottom_chamfer: f64,
+}
+
+/// Thickness of a centre rib, in mm.
+pub const RIB_THICKNESS: f64 = 1.0;
+/// Height of a centre rib's lower edge above the bottom of the brick, in mm: above a stud
+/// (1.8 mm) pushed in from below, with room for elephant's foot.
+pub const RIB_GAP: f64 = 2.2;
+
+fn yes() -> bool {
+    true
+}
+
+fn default_chamfer() -> f64 {
+    0.2
 }
 
 impl Default for StudProfile {
@@ -60,7 +106,8 @@ impl Default for StudProfile {
 impl StudProfile {
     /// The dimensions Slant 3D's online brick generator uses for FDM prints (read from its
     /// client-side code): pitch 8.0 mm, 0.1 mm inset per side, studs Ø4.8 × 1.8 mm, plate
-    /// 3.2 mm (brick 9.6 mm), top 1.0 mm, walls 1.2 mm, tubes Ø6.51 / Ø4.8 mm.
+    /// 3.2 mm (brick 9.6 mm), top 1.0 mm, walls 1.2 mm, tubes Ø6.51 / Ø4.8 mm. Like Slant's
+    /// v2 brick, it also has centre ribs and a 0.2 mm bottom chamfer.
     pub fn standard_fdm() -> Self {
         Self {
             pitch: 8.0,
@@ -73,24 +120,37 @@ impl StudProfile {
             tube_outer_diameter: 6.51,
             tube_inner_diameter: 4.8,
             stud_style: StudStyle::Solid,
+            center_ribs: true,
+            bottom_chamfer: default_chamfer(),
         }
     }
 
-    /// **Experimental, not yet test-printed.** Our own compliant stud, inspired by the
-    /// "v2" stud Slant 3D has described: studs 10 % wider (Ø5.28 mm) made hollow (Ø3.28 mm
-    /// bore, 1.0 mm wall) and split by two 0.5 mm relief slots, 1.5 mm deep, into two
-    /// leaf-spring fingers that flex inward to grip. Everything else is
+    /// **Experimental, not yet test-printed.** Slant 3D's "LEGO v2" peanut stud with
+    /// leaf-spring fins (see [`StudStyle::SlantV2`]): lobes Ø5.28 mm (Ø4.8 × 1.1) joined by a
+    /// 3.2 mm waist, 0.5 mm slots 0.25–0.75 mm outboard of each lobe's centre line with a
+    /// 0.8 mm root and a 1.2 mm hook, and 0.6 mm pockets under the fins. The top is 1.4 mm
+    /// thick (instead of 1.0) so 0.8 mm of floor stays under each pocket. Everything else is
     /// [`StudProfile::standard_fdm`]. Print a test pair before trusting the clutch.
-    pub fn compliant_v2_experimental() -> Self {
+    pub fn slant_v2_experimental() -> Self {
         Self {
-            stud_diameter: 5.28,
-            stud_style: StudStyle::Slotted {
-                inner_diameter: 3.28,
+            top_thickness: 1.4,
+            stud_style: StudStyle::SlantV2 {
+                lobe_scale: 1.1,
+                waist_width: 3.2,
                 slot_width: 0.5,
-                slot_depth: 1.5,
+                slot_offset: 0.25,
+                root_length: 0.8,
+                hook_radius: 1.2,
+                pocket_depth: 0.6,
             },
             ..Self::standard_fdm()
         }
+    }
+
+    /// The old name of [`StudProfile::slant_v2_experimental`].
+    #[deprecated(note = "renamed to `slant_v2_experimental`")]
+    pub fn compliant_v2_experimental() -> Self {
+        Self::slant_v2_experimental()
     }
 
     /// Height of a body `plates` plates tall (studs not included).
@@ -99,7 +159,8 @@ impl StudProfile {
     }
 
     /// Checks that the numbers make a printable brick: every size finite and positive, the
-    /// walls thinner than half a stud cell, the tubes and studs fitting inside a cell.
+    /// walls thinner than half a stud cell, the tubes and studs fitting inside a cell, and a
+    /// v2 stud's slot, hook and pocket fitting inside its lobe and the brick's top.
     pub fn validate(&self) -> Result<()> {
         let named = [
             ("pitch", self.pitch),
@@ -120,6 +181,15 @@ impl StudProfile {
             }
         }
         let bad = |why: String| Err(CustomError::InvalidProfile(why));
+        if !(self.bottom_chamfer.is_finite() && self.bottom_chamfer >= 0.0) {
+            return bad(format!(
+                "bottom_chamfer must be 0 or a positive number of mm, got {}",
+                self.bottom_chamfer
+            ));
+        }
+        if self.bottom_chamfer > self.wall / 2.0 {
+            return bad("the bottom chamfer must be at most half a wall".into());
+        }
         if self.pitch > 32.0 {
             return bad(format!("pitch {} mm is not a brick pitch", self.pitch));
         }
@@ -132,6 +202,9 @@ impl StudProfile {
         if self.tube_inner_diameter >= self.tube_outer_diameter {
             return bad("tube inner diameter must be smaller than its outer diameter".into());
         }
+        if self.bottom_chamfer > (self.tube_outer_diameter - self.tube_inner_diameter) / 4.0 {
+            return bad("the bottom chamfer must be at most half a tube wall".into());
+        }
         // A tube sits on a cell corner; it must clear the inner walls of a 2-wide brick.
         if self.tube_outer_diameter / 2.0 >= self.pitch - self.clearance - self.wall {
             return bad("bottom tubes would cut into the side walls".into());
@@ -139,32 +212,8 @@ impl StudProfile {
         if self.top_thickness >= self.plate_height {
             return bad("top thickness must be less than one plate".into());
         }
-        if let StudStyle::Slotted {
-            inner_diameter,
-            slot_width,
-            slot_depth,
-        } = self.stud_style
-        {
-            for (name, v) in [
-                ("inner_diameter", inner_diameter),
-                ("slot_width", slot_width),
-                ("slot_depth", slot_depth),
-            ] {
-                if !(v.is_finite() && v > 0.0) {
-                    return bad(format!(
-                        "slotted stud {name} must be a positive number of mm, got {v}"
-                    ));
-                }
-            }
-            if inner_diameter >= self.stud_diameter - 0.4 {
-                return bad("slotted stud bore leaves a finger wall under 0.2 mm".into());
-            }
-            if slot_width >= inner_diameter {
-                return bad("relief slots must be narrower than the stud bore".into());
-            }
-            if slot_depth >= self.stud_height {
-                return bad("relief slots must stop above the stud root".into());
-            }
+        if let StudStyle::SlantV2 { .. } = self.stud_style {
+            crate::slant::Lobe::new(self)?;
         }
         Ok(())
     }

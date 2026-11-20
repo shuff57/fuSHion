@@ -140,10 +140,14 @@ expected value at each modelling stage.
 SolidCraft adds roughly 15 minutes to the first build. To skip it:
 `cargo install --path crates/fushion --no-default-features`. The default connector uses the
 standard FDM-tuned dimensions also used by Slant 3D's free brick tool (8 mm
-pitch, Ø4.8 mm studs, 0.1 mm side clearance). An experimental compliant stud,
-inspired by the leaf-spring design Slant 3D described in *We Made a Better LEGO
-(For 3D Printing)*, is included for test printing. Print the files yourself
-or upload them to a print service.
+pitch, Ø4.8 mm studs, 0.1 mm side clearance), with a centre rib through every
+second tube of 2-wide bricks and a 0.2 mm bottom chamfer against elephant's foot.
+An experimental Slant v2 stud, modelled on the design Slant 3D showed in *We Made
+a Better LEGO (For 3D Printing)*, is included for test printing: neighbouring
+studs along each long edge fuse into a peanut whose lobes (10 % wider) each carry
+a leaf-spring fin, cut free by a 0.5 mm hooked slot and a pocket under it, that
+presses on the receiving brick's wall. Print the files yourself or upload them to
+a print service.
 
 ## Workspace
 

@@ -15,6 +15,29 @@ fn stud() -> f64 {
     PI * 2.4 * 2.4 * 1.8
 }
 
+/// The 0.2 mm bottom chamfer: on a rectangle's outer bottom edges (mitred at the 4 corners).
+fn chamfer_rect(l: f64, d: f64) -> f64 {
+    let c: f64 = 0.2;
+    c * c / 2.0 * 2.0 * (l + d) - 4.0 * c.powi(3) / 3.0
+}
+
+/// The 0.2 mm chamfer on one tube's outer and inner bottom edges (Pappus).
+fn chamfer_tube() -> f64 {
+    let c: f64 = 0.2;
+    PI * c * c * (3.255 - c / 3.0) + PI * c * c * (2.4 + c / 3.0)
+}
+
+/// One centre rib under a standard 2-wide brick of hollow height `hollow`: two 1 mm bars from
+/// the long walls' inside faces (x = 1.3) to the middle of the tube wall (r = 2.8275), from
+/// 2.2 mm up to the ceiling; the bit inside the tube's outer circle was already there.
+fn rib(hollow: f64) -> f64 {
+    let (ro, mid): (f64, f64) = (3.255, 2.8275);
+    let a = 0.5;
+    let chord = a * (ro * ro - a * a).sqrt() + ro * ro * (a / ro).asin(); // ∫|y|≤a √(ro²−y²)
+    let in_tube = chord - mid * 1.0;
+    2.0 * ((8.0 - mid - 1.3) * 1.0 - in_tube) * (hollow - 2.2)
+}
+
 /// One Ø6.51/Ø4.8 tube of height `h`.
 fn tube(h: f64) -> f64 {
     PI * (3.255f64.powi(2) - 2.4f64.powi(2)) * h
@@ -86,8 +109,11 @@ fn assert_bbox(part: &CustomPart, min: [f64; 3], max: [f64; 3]) {
 
 #[test]
 fn brick_2x4_matches_shell_plus_studs_plus_tubes() {
-    // Shell: 15.8 × 31.8 × 9.6 block less a 13.4 × 29.4 × 8.6 hollow; 8 studs; 3 tubes.
-    let hand = 15.8 * 31.8 * 9.6 - 13.4 * 29.4 * 8.6 + 8.0 * stud() + 3.0 * tube(8.6);
+    // Shell: 15.8 × 31.8 × 9.6 block less a 13.4 × 29.4 × 8.6 hollow; 8 studs; 3 tubes; a
+    // centre rib through the middle tube; the bottom chamfer.
+    let hand = 15.8 * 31.8 * 9.6 - 13.4 * 29.4 * 8.6 + 8.0 * stud() + 3.0 * tube(8.6) + rib(8.6)
+        - chamfer_rect(15.8, 31.8)
+        - 3.0 * chamfer_tube();
     let part = build_and_check(
         "box_2x4x3",
         CustomShape::Box {
@@ -106,7 +132,7 @@ fn brick_2x4_matches_shell_plus_studs_plus_tubes() {
 
 #[test]
 fn plate_1x1_and_2x2() {
-    let hand = 7.8 * 7.8 * 3.2 - 5.4 * 5.4 * 2.2 + stud();
+    let hand = 7.8 * 7.8 * 3.2 - 5.4 * 5.4 * 2.2 + stud() - chamfer_rect(7.8, 7.8);
     let part = build_and_check(
         "plate_1x1x1",
         CustomShape::Box {
@@ -118,7 +144,9 @@ fn plate_1x1_and_2x2() {
         hand,
     );
     assert_bbox(&part, [0.1, 0.1, 0.0], [7.9, 7.9, 5.0]);
-    let hand = 15.8 * 15.8 * 3.2 - 13.4 * 13.4 * 2.2 + 4.0 * stud() + tube(2.2);
+    let hand = 15.8 * 15.8 * 3.2 - 13.4 * 13.4 * 2.2 + 4.0 * stud() + tube(2.2)
+        - chamfer_rect(15.8, 15.8)
+        - chamfer_tube();
     build_and_check(
         "plate_2x2x1",
         CustomShape::Box {
@@ -139,8 +167,10 @@ fn slope45_2x2() {
     let knee = 8.6 - 1.7 + 0.1 + 1.2 * s2;
     let hollow = ((knee - 1.3) * (c0 + 8.6) / 2.0 + (14.7 - knee) * 8.6) * 13.4;
     let ceil = |y: f64| (1.7 + (y - 0.1) - 1.2 * s2).min(8.6);
-    let hand =
-        15.8 * 15.8 * 9.6 - hollow + tube_under(8.0, ceil) + 2.0 * stud() - 7.9 * 7.9 / 2.0 * 15.8;
+    let hand = 15.8 * 15.8 * 9.6 - hollow + tube_under(8.0, ceil) + 2.0 * stud()
+        - 7.9 * 7.9 / 2.0 * 15.8
+        - chamfer_rect(15.8, 15.8)
+        - chamfer_tube();
     let part = build_and_check(
         "slope45_2x2x3",
         CustomShape::Slope45 {
@@ -163,7 +193,10 @@ fn slope45_3x3() {
     let hollow = ((knee - 1.3) * (c0 + 8.6) / 2.0 + (22.7 - knee) * 8.6) * 21.4;
     let ceil = |y: f64| (1.0 + (y - 0.1) - 1.2 * s2).min(8.6);
     let tubes = 2.0 * (tube_under(8.0, ceil) + tube(8.6));
-    let hand = 23.8 * 23.8 * 9.6 - hollow + tubes + 3.0 * stud() - 8.6 * 8.6 / 2.0 * 23.8;
+    let hand = 23.8 * 23.8 * 9.6 - hollow + tubes + 3.0 * stud()
+        - 8.6 * 8.6 / 2.0 * 23.8
+        - chamfer_rect(23.8, 23.8)
+        - 4.0 * chamfer_tube();
     build_and_check(
         "slope45_3x3x3",
         CustomShape::Slope45 {
@@ -188,8 +221,10 @@ fn curve_2x3() {
         }
     };
     let tubes = tube_under(8.0, ceil) + tube(8.6);
-    let hand =
-        15.8 * 23.8 * 9.6 - hollow + tubes + 2.0 * stud() - 8.6 * 8.6 * (1.0 - PI / 4.0) * 15.8;
+    let hand = 15.8 * 23.8 * 9.6 - hollow + tubes + 2.0 * stud()
+        - 8.6 * 8.6 * (1.0 - PI / 4.0) * 15.8
+        - chamfer_rect(15.8, 23.8)
+        - 2.0 * chamfer_tube();
     let part = build_and_check(
         "curve_2x3x3",
         CustomShape::Curve {
@@ -209,7 +244,13 @@ fn footprint_l_shape() {
     let cells = vec![(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (0, 2), (1, 2)];
     let outer = 23.8 * 7.8 + 15.8 * 16.0;
     let inner = 21.4 * 5.4 + 13.4 * 16.0;
-    let hand = outer * 9.6 - inner * 8.6 + 7.0 * stud() + 2.0 * tube(8.6);
+    // The outline has 5 convex corners and 1 reflex one: the chamfer loses c²/2 per mm of
+    // perimeter less (5 − 1)·c³/3, as a rectangle does. No centre ribs on footprints.
+    let perimeter = 2.0 * (23.8 + 23.8);
+    let c: f64 = 0.2;
+    let chamfer = perimeter * c * c / 2.0 - 4.0 * c.powi(3) / 3.0;
+    let hand =
+        outer * 9.6 - inner * 8.6 + 7.0 * stud() + 2.0 * tube(8.6) - chamfer - 2.0 * chamfer_tube();
     let part = build_and_check(
         "footprint_l_x3",
         CustomShape::Footprint { cells, plates: 3 },
@@ -227,33 +268,16 @@ fn footprint_ring_with_hole() {
         .collect();
     let outer = 23.8 * 23.8 - 8.2 * 8.2;
     let inner = 21.4 * 21.4 - 10.6 * 10.6;
-    let hand = outer * 9.6 - inner * 8.6 + 8.0 * stud();
+    // Outer square and square hole: the hole's corners are reflex, so the c³ terms cancel.
+    let c: f64 = 0.2;
+    let chamfer = (4.0 * 23.8 + 4.0 * 8.2) * c * c / 2.0;
+    let hand = outer * 9.6 - inner * 8.6 + 8.0 * stud() - chamfer;
     build_and_check(
         "footprint_ring_x3",
         CustomShape::Footprint { cells, plates: 3 },
         StudProfile::standard_fdm(),
         hand,
     );
-}
-
-#[test]
-fn compliant_v2_stud_box() {
-    // Hollow Ø5.28/Ø3.28 studs, each with a 0.5 mm bar cut 1.5 mm deep across it.
-    let strip = |r: f64, a: f64| 2.0 * (a * (r * r - a * a).sqrt() + r * r * (a / r).asin());
-    let ring = PI * (2.64f64.powi(2) - 1.64f64.powi(2)) * 1.8;
-    let slot = (strip(2.64, 0.25) - strip(1.64, 0.25)) * 1.5;
-    let hand = 15.8 * 15.8 * 9.6 - 13.4 * 13.4 * 8.6 + tube(8.6) + 4.0 * (ring - slot);
-    let part = build_and_check(
-        "v2_box_2x2x3",
-        CustomShape::Box {
-            w: 2,
-            d: 2,
-            plates: 3,
-        },
-        StudProfile::compliant_v2_experimental(),
-        hand,
-    );
-    assert_bbox(&part, [0.1, 0.1, 0.0], [15.9, 15.9, 11.4]);
 }
 
 #[test]
@@ -267,7 +291,9 @@ fn commands_carry_an_expect_check() {
         &StudProfile::standard_fdm(),
     )
     .unwrap();
-    let hand = 15.8 * 31.8 * 9.6 - 13.4 * 29.4 * 8.6 + 8.0 * stud() + 3.0 * tube(8.6);
+    let hand = 15.8 * 31.8 * 9.6 - 13.4 * 29.4 * 8.6 + 8.0 * stud() + 3.0 * tube(8.6) + rib(8.6)
+        - chamfer_rect(15.8, 31.8)
+        - 3.0 * chamfer_tube();
     let v = batch["expect"]["volume_mm3"].as_f64().unwrap();
     assert!((v - hand).abs() < 1e-3, "{v} vs {hand}");
     assert_eq!(batch["expect"]["bodies"], 1);

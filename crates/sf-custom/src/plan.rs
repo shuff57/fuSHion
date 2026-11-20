@@ -6,14 +6,20 @@
 //! 2. **Hollow**: the underside cut out, leaving walls and a top (for slopes, a sloped roof).
 //! 3. **Tubes** (where there are any): rings standing in the hollow, full height; the part of a
 //!    tube that reaches above the hollow's ceiling lies in solid material and adds nothing.
-//! 4. **Studs** on top; for slotted studs, **Slots** cut into them.
-//! 5. **Roof** (slopes and curves only): the wedge above the slope cut away.
+//! 4. **Ribs** (2-wide boxes): a cross-wall through every second tube.
+//! 5. **Chamfer**: the bottom outer edges and tube bottoms.
+//! 6. **Pockets** (Slant v2 studs): a pocket in the top under each fin.
+//! 7. **Studs** on top; for Slant v2 studs, then **Slots** that cut the fins free.
+//! 8. **Roof** (slopes and curves only): the wedge above the slope cut away.
 
-use crate::profile::{StudProfile, StudStyle};
+use crate::geom::{Loop, Seg};
+use crate::profile::{RIB_GAP, RIB_THICKNESS, StudProfile, StudStyle};
 use crate::shape::{CustomShape, Footprint, P2, signed_area};
+use crate::slant::{self, Lobe};
 use crate::{CustomError, MAX_PART_MM, Result};
 use serde::Serialize;
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 use std::f64::consts::{FRAC_PI_2, PI, SQRT_2};
 
 /// Relative volume tolerance used for every stage check (0.2 %, as SolidCraft's MCP `expect`).
@@ -33,7 +39,8 @@ type Extent2 = ([f64; 2], [f64; 2]);
 /// One stage of a build: its commands and the total volume the part must have after them.
 #[derive(Clone, Debug, Serialize)]
 pub struct Stage {
-    /// What the stage makes ("Block", "Hollow", "Tubes", "Studs", "Slots", "Roof").
+    /// What the stage makes ("Block", "Hollow", "Tubes", "Ribs", "Chamfer", "Pockets",
+    /// "Studs", "Slots", "Roof").
     pub name: String,
     /// SolidCraft commands, each `{"command": id, "params": {...}}`.
     pub commands: Vec<Value>,
@@ -205,7 +212,11 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
         volume: 0.0,
     };
 
-    // Cells with studs, tube points (grid units), and the plan's footprint extents.
+    // Cells with studs, tube points (grid units), the plan's footprint extents, every cell of
+    // the part, the outline loops (mm, material on the left) and the centre ribs.
+    let mut cells: BTreeSet<(i32, i32)> = BTreeSet::new();
+    let mut outline: Vec<Vec<P2>> = Vec::new();
+    let mut ribs: Option<Ribs> = None;
     let (studs, tubes, bbox_xy, roof): (Cells, Cells, Extent2, Option<Roof>) = match shape {
         CustomShape::Box { w, d, .. } => {
             let (w, d) = dims(*w, *d, 1)?;
@@ -213,6 +224,14 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
             let studs = grid(0..w, 0..d);
             let tubes = grid(1..w, 1..d);
             let ext = rect_extent(p, w, d);
+            cells.extend(studs.iter().copied());
+            outline.push(rect_loop(ext));
+            if p.center_ribs && w.min(d) == 2 && w.max(d) >= 3 && hollow_h - RIB_GAP >= 0.4 {
+                ribs = Some(Ribs {
+                    along_y: d > w,
+                    long: w.max(d),
+                });
+            }
             (studs, tubes, ext, None)
         }
         CustomShape::Slope45 { w, d, .. } | CustomShape::Curve { w, d, .. } => {
@@ -240,10 +259,13 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
                 .into_iter()
                 .filter(|&(_, j)| f64::from(j) * p.pitch >= roof.y_top - 1e-9)
                 .collect();
-            (studs, tubes, rect_extent(p, w, d), Some(roof))
+            cells.extend(grid(0..w, 0..d));
+            let ext = rect_extent(p, w, d);
+            outline.push(rect_loop(ext));
+            (studs, tubes, ext, Some(roof))
         }
-        CustomShape::Footprint { cells, .. } => {
-            let f = Footprint::new(cells)?;
+        CustomShape::Footprint { cells: list, .. } => {
+            let f = Footprint::new(list)?;
             let outer = f.offset_loops(p.pitch, p.clearance);
             let inner = f.offset_loops(p.pitch, p.clearance + p.wall);
             let area: f64 = outer.iter().map(|l| signed_area(l)).sum();
@@ -266,6 +288,8 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
                 }
             }
             let studs: Vec<(i32, i32)> = f.cells.iter().copied().collect();
+            cells.clone_from(&f.cells);
+            outline = outer;
             (studs, f.full_corners(), (lo, hi), None)
         }
     };
@@ -286,12 +310,15 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
     }
 
     // Tubes: rings from the floor to the underside of the top.
+    let (ro, ri) = (p.tube_outer_diameter / 2.0, p.tube_inner_diameter / 2.0);
+    let tube_centres: Vec<P2> = tubes
+        .iter()
+        .map(|&(i, j)| [f64::from(i) * p.pitch, f64::from(j) * p.pitch])
+        .collect();
     if !tubes.is_empty() {
-        let (ro, ri) = (p.tube_outer_diameter / 2.0, p.tube_inner_diameter / 2.0);
         let mut c = vec![sketch("TubeSketch", "XY", 0.0)];
         let mut added = 0.0;
-        for &(i, j) in &tubes {
-            let at = [f64::from(i) * p.pitch, f64::from(j) * p.pitch];
+        for &at in &tube_centres {
             c.push(circle(at, p.tube_outer_diameter));
             c.push(circle(at, p.tube_inner_diameter));
             added += match &roof {
@@ -308,56 +335,119 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
         b.stage("Tubes", c, added);
     }
 
-    // Studs.
-    let centres: Vec<P2> = studs
-        .iter()
-        .map(|&(i, j)| {
-            [
-                (f64::from(i) + 0.5) * p.pitch,
-                (f64::from(j) + 0.5) * p.pitch,
-            ]
-        })
-        .collect();
-    let rs = p.stud_diameter / 2.0;
-    let mut c = vec![sketch("StudSketch", "XY", h)];
-    let per_stud = match p.stud_style {
-        StudStyle::Solid => {
-            c.extend(centres.iter().map(|&q| circle(q, p.stud_diameter)));
-            PI * rs * rs * p.stud_height
-        }
-        StudStyle::Slotted { inner_diameter, .. } => {
-            for &q in &centres {
-                c.push(circle(q, p.stud_diameter));
-                c.push(circle(q, inner_diameter));
-            }
-            PI * (rs * rs - (inner_diameter / 2.0).powi(2)) * p.stud_height
-        }
-    };
-    c.push(finish());
-    c.push(extrude("StudSketch", "Studs", p.stud_height, "join"));
-    b.stage("Studs", c, per_stud * centres.len() as f64);
+    if let Some(ribs) = ribs {
+        ribs.stage(&mut b, p, hollow_h);
+    }
 
-    if let StudStyle::Slotted {
-        inner_diameter,
-        slot_width,
-        slot_depth,
-    } = p.stud_style
-    {
-        // One bar across each stud's diameter (along X) cuts both slots.
-        let half = slot_width / 2.0;
-        let reach = rs + 0.5;
-        let mut c = vec![sketch("SlotSketch", "XY", h + p.stud_height - slot_depth)];
-        for q in &centres {
-            c.push(cmd(
-                "sketch.rectangle.two_point",
-                json!({"p0": [round6(q[0] - reach), round6(q[1] - half)], "p1": [round6(q[0] + reach), round6(q[1] + half)]}),
-            ));
+    if p.bottom_chamfer > 0.0 {
+        let c = p.bottom_chamfer;
+        let mut picks = Vec::new();
+        let mut removed = 0.0;
+        for l in &outline {
+            let n = l.len();
+            for k in 0..n {
+                let (a, q) = (l[k], l[(k + 1) % n]);
+                picks.push(json!([
+                    round6((a[0] + q[0]) / 2.0),
+                    round6((a[1] + q[1]) / 2.0),
+                    0.0
+                ]));
+            }
+            removed += chamfer_loop_volume(l, c);
         }
-        c.push(finish());
-        c.push(extrude("SlotSketch", "Slots", slot_depth + OVERRUN, "cut"));
-        let per =
-            (disk_in_strip(rs, half) - disk_in_strip(inner_diameter / 2.0, half)) * slot_depth;
-        b.stage("Slots", c, -per * centres.len() as f64);
+        for at in &tube_centres {
+            picks.push(json!([round6(at[0] + ro), round6(at[1]), 0.0]));
+            picks.push(json!([round6(at[0] + ri), round6(at[1]), 0.0]));
+            // Pappus: a c × c triangle turned about the tube axis.
+            removed += PI * c * c * (ro - c / 3.0) + PI * c * c * (ri + c / 3.0);
+        }
+        b.stage(
+            "Chamfer",
+            vec![cmd(
+                "solid.chamfer",
+                json!({"edges": picks, "distance": round6(c), "name": "BottomChamfer"}),
+            )],
+            -removed,
+        );
+    }
+
+    let rs = p.stud_diameter / 2.0;
+    let centre = |&(i, j): &(i32, i32)| {
+        [
+            (f64::from(i) + 0.5) * p.pitch,
+            (f64::from(j) + 0.5) * p.pitch,
+        ]
+    };
+    match p.stud_style {
+        StudStyle::Solid => {
+            let mut c = vec![sketch("StudSketch", "XY", h)];
+            c.extend(studs.iter().map(|q| circle(centre(q), p.stud_diameter)));
+            c.push(finish());
+            c.push(extrude("StudSketch", "Studs", p.stud_height, "join"));
+            b.stage(
+                "Studs",
+                c,
+                PI * rs * rs * p.stud_height * studs.len() as f64,
+            );
+        }
+        StudStyle::SlantV2 { .. } => {
+            let lobe = Lobe::new(p)?;
+            let (peanuts, round) = slant::layout(&cells, &studs);
+            let lobes: Vec<_> = peanuts
+                .iter()
+                .flat_map(|q| q.lobe_frames(p.pitch))
+                .collect();
+            if !lobes.is_empty() {
+                // Pockets first, into the bare top, so nothing above them is cut.
+                let mut c = vec![sketch("PocketSketch", "XY", h - lobe.pocket_depth)];
+                for f in &lobes {
+                    c.extend(loop_commands(&f.map_loop(&lobe.pocket)));
+                }
+                c.push(finish());
+                c.push(extrude(
+                    "PocketSketch",
+                    "Pockets",
+                    lobe.pocket_depth + OVERRUN,
+                    "cut",
+                ));
+                b.stage(
+                    "Pockets",
+                    c,
+                    -lobe.pocket_area() * lobe.pocket_depth * lobes.len() as f64,
+                );
+            }
+            let mut c = vec![sketch("StudSketch", "XY", h)];
+            for q in &peanuts {
+                c.extend(loop_commands(&q.frame(p.pitch).map_loop(&lobe.peanut)));
+            }
+            c.extend(round.iter().map(|q| circle(centre(q), p.stud_diameter)));
+            c.push(finish());
+            c.push(extrude("StudSketch", "Studs", p.stud_height, "join"));
+            b.stage(
+                "Studs",
+                c,
+                (lobe.peanut_area() * peanuts.len() as f64 + PI * rs * rs * round.len() as f64)
+                    * p.stud_height,
+            );
+            if !lobes.is_empty() {
+                let mut c = vec![sketch("SlotSketch", "XY", h - lobe.groove)];
+                for f in &lobes {
+                    c.extend(loop_commands(&f.map_loop(&lobe.slot)));
+                }
+                c.push(finish());
+                c.push(extrude(
+                    "SlotSketch",
+                    "Slots",
+                    lobe.groove + p.stud_height + OVERRUN,
+                    "cut",
+                ));
+                b.stage(
+                    "Slots",
+                    c,
+                    -lobe.slot_volume(p.stud_height) * lobes.len() as f64,
+                );
+            }
+        }
     }
 
     if let (Some(roof), CustomShape::Slope45 { w, .. } | CustomShape::Curve { w, .. }) =
@@ -381,6 +471,95 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
         volume_mm3: volume,
         bbox_mm: bbox,
     })
+}
+
+/// The commands drawing a closed outline of lines and arcs.
+fn loop_commands(l: &Loop) -> Vec<Value> {
+    l.iter()
+        .map(|s| match *s {
+            Seg::Line { a, b } => open_polyline(&[a, b]),
+            Seg::Arc { a, b, .. } => {
+                let m = s.at(0.5);
+                cmd(
+                    "sketch.arc.three_point",
+                    json!({"start": [round6(a[0]), round6(a[1])], "end": [round6(b[0]), round6(b[1])], "through": [round6(m[0]), round6(m[1])]}),
+                )
+            }
+        })
+        .collect()
+}
+
+/// A rectangle's outline, counter-clockwise.
+fn rect_loop((lo, hi): Extent2) -> Vec<P2> {
+    vec![lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]]
+}
+
+/// Volume an equal-distance chamfer `c` takes off the bottom edges of a prism with this
+/// outline (material on the left, no collinear points). At height `z < c` the section is
+/// the outline moved `δ = c − z` into the material, mitred at the corners, which loses
+/// `perimeter·δ − (convex − reflex corners)·δ²`; integrated over `z`.
+fn chamfer_loop_volume(l: &[P2], c: f64) -> f64 {
+    let n = l.len();
+    let mut perimeter = 0.0;
+    let mut turns = 0.0;
+    for k in 0..n {
+        let (a, q, r) = (l[k], l[(k + 1) % n], l[(k + 2) % n]);
+        perimeter += (q[0] - a[0]).hypot(q[1] - a[1]);
+        let cross = (q[0] - a[0]) * (r[1] - q[1]) - (q[1] - a[1]) * (r[0] - q[0]);
+        turns += cross.signum();
+    }
+    perimeter * c * c / 2.0 - turns * c * c * c / 3.0
+}
+
+/// Centre ribs under a 2-wide box: one through every second tube along the long side.
+#[derive(Clone, Copy, Debug)]
+struct Ribs {
+    /// The long side runs along Y (the ribs run along X).
+    along_y: bool,
+    /// Length of the long side, in studs.
+    long: i32,
+}
+
+impl Ribs {
+    /// Each rib is two bars, from inside each long wall to the middle of the tube wall, from
+    /// [`RIB_GAP`] above the floor into the top.
+    fn stage(&self, b: &mut Builder, p: &StudProfile, hollow_h: f64) {
+        let t = RIB_THICKNESS;
+        let (ro, ri) = (p.tube_outer_diameter / 2.0, p.tube_inner_diameter / 2.0);
+        let mid = (ro + ri) / 2.0;
+        let wall_in = p.clearance + p.wall;
+        let x0 = p.clearance + p.wall / 2.0;
+        let x1 = 2.0 * p.pitch - x0;
+        let mut c = vec![sketch("RibSketch", "XY", RIB_GAP)];
+        let mut bars = 0;
+        for k in (2..self.long).step_by(2) {
+            let y = f64::from(k) * p.pitch;
+            for (s0, s1) in [(x0, p.pitch - mid), (p.pitch + mid, x1)] {
+                let (p0, p1) = if self.along_y {
+                    ([s0, y - t / 2.0], [s1, y + t / 2.0])
+                } else {
+                    ([y - t / 2.0, s0], [y + t / 2.0, s1])
+                };
+                c.push(cmd(
+                    "sketch.rectangle.two_point",
+                    json!({"p0": [round6(p0[0]), round6(p0[1])], "p1": [round6(p1[0]), round6(p1[1])]}),
+                ));
+                bars += 1;
+            }
+        }
+        c.push(finish());
+        c.push(extrude(
+            "RibSketch",
+            "Ribs",
+            hollow_h - RIB_GAP + p.top_thickness / 2.0,
+            "join",
+        ));
+        // New material: from the wall's inside face to the tube, less the bit inside the
+        // tube's outer circle, up to the hollow's ceiling.
+        let in_tube = disk_in_strip(ro, t / 2.0) / 2.0 - mid * t;
+        let per_bar = ((p.pitch - mid - wall_in) * t - in_tube) * (hollow_h - RIB_GAP);
+        b.stage("Ribs", c, per_bar * f64::from(bars));
+    }
 }
 
 /// Checks a `w × d` size: at least 1 (or `min_d` deep), at most 64 studs.

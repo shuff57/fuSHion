@@ -117,7 +117,10 @@ rare part) or a shape no catalog part can make, design a printable part:
 - `make_custom_part` with a template: `{"kind":"box","w":2,"d":4,"plates":3}`,
   `{"kind":"slope45","w":2,"d":3,"plates":3}`, `{"kind":"curve","w":1,"d":3,"plates":3}`
   or `{"kind":"footprint","cells":[[0,0],[1,0],[1,1]],"plates":3}`. Sizes are
-  studs and plates; slopes fall toward -Y.
+  studs and plates; slopes fall toward -Y. `compliant_stud` uses the
+  experimental Slant v2 stud (peanut studs with leaf-spring fins along the long
+  edges, 1.4 mm top); the standard profile has centre ribs and a 0.2 mm bottom
+  chamfer.
 - `make_custom_part_from_commands` for anything else, written as a SolidCraft
   command batch in millimetres (8 mm pitch, 9.6 mm brick, Ø4.8 × 1.8 mm studs,
   Ø6.51/4.8 mm tubes, 1.2 mm walls, 0.1 mm side clearance) with an `expect`

@@ -5,8 +5,8 @@
 //! [SolidCraft](https://github.com/tangency-labs/solidcraft) B-rep engine, in process, by
 //! sending it the same JSON command batches its MCP server accepts.
 //!
-//! * [`StudProfile`]: the connector dimensions (Slant 3D's FDM numbers by default, or an
-//!   experimental compliant stud).
+//! * [`StudProfile`]: the connector dimensions (Slant 3D's FDM numbers by default, or the
+//!   experimental Slant 3D "v2" peanut stud with leaf-spring fins).
 //! * [`CustomShape`]: a brick or plate, a 45° slope, a curved slope or any footprint of cells.
 //! * [`commands`]: the SolidCraft batch for a shape, with an `expect` check computed by hand.
 //! * [`build`]: runs that batch, checks every stage's volume against its closed form, and
@@ -17,17 +17,26 @@
 
 #![warn(missing_docs)]
 
+mod geom;
 mod mesh;
 mod plan;
 mod profile;
 mod run;
 mod shape;
+mod slant;
 
 pub use mesh::{MeshReport, analyze_stl};
 pub use plan::{BBOX_TOL_MM, Plan, Stage, VOLUME_TOL, plan};
-pub use profile::{StudProfile, StudStyle};
+pub use profile::{MIN_POCKET_FLOOR, RIB_GAP, RIB_THICKNESS, SLANT_CAP, StudProfile, StudStyle};
 pub use run::{MAX_COMMANDS, build, build_from_commands, build_plan};
 pub use shape::CustomShape;
+pub use slant::SlantDims;
+
+/// The derived dimensions of `profile`'s Slant v2 stud (an error if it has none, or its
+/// numbers don't make one).
+pub fn slant_dims(profile: &StudProfile) -> Result<SlantDims> {
+    Ok(slant::Lobe::new(profile)?.dims)
+}
 
 /// Longest side of any custom part, in mm.
 pub const MAX_PART_MM: f64 = 64.0;
@@ -86,6 +95,9 @@ pub struct CustomPart {
     pub volume_mm3: f64,
     /// Exact bounding box `(min, max)`, mm.
     pub bbox_mm: ([f64; 3], [f64; 3]),
+    /// Each stage's name and the part's measured volume after it, mm³ (empty for freeform
+    /// batches).
+    pub stage_volumes_mm3: Vec<(String, f64)>,
 }
 
 /// The SolidCraft command batch for `shape`: `{"commands": [...], "expect": {...}}`, the

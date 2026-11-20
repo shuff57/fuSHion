@@ -61,7 +61,7 @@ mod imp {
     use sf_custom::{CustomShape, StudProfile};
 
     pub(super) fn profile(v2: bool) -> StudProfile {
-        if v2 { StudProfile::compliant_v2_experimental() } else { StudProfile::standard_fdm() }
+        if v2 { StudProfile::slant_v2_experimental() } else { StudProfile::standard_fdm() }
     }
 
     /// The printable equivalent of a catalog part, if there is one.

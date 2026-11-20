@@ -14,6 +14,10 @@ const MAX_LITERAL: f64 = 1000.0;
 const MAX_COUNT: f64 = 64.0;
 /// How far the exported mesh's volume may stray from the exact one (chordal error).
 const MESH_VOLUME_TOL: f64 = 0.01;
+/// How far a stage's own volume change may stray from the expected change: relative, plus
+/// an absolute allowance for the 1 µm rounding of sketch coordinates, mm³.
+const DELTA_TOL: f64 = 0.002;
+const DELTA_ABS_MM3: f64 = 0.01;
 
 /// Builds `shape` with `profile`: runs [`plan`]'s batch, checks each stage's volume and the
 /// finished bounding box against their closed forms, and exports a checked STL and 3MF.
@@ -21,10 +25,15 @@ pub fn build(shape: &CustomShape, profile: &StudProfile) -> Result<CustomPart> {
     build_plan(&plan(shape, profile)?)
 }
 
-/// Runs a [`Plan`] (see [`build`]).
+/// Runs a [`Plan`] (see [`build`]). After every stage the part must be one body whose
+/// volume is within [`VOLUME_TOL`] of the stage's total, and the stage's own change in volume
+/// must match the expected change within 0.2 % (+0.01 mm³), so a small feature built wrong
+/// (a slot, a pocket) is caught even when the whole part's volume hardly moves.
 pub fn build_plan(plan: &Plan) -> Result<CustomPart> {
     let mut s = Session::default();
     let mut index = 0;
+    let (mut before, mut expected_before) = (0.0, 0.0);
+    let mut volumes = Vec::new();
     for stage in &plan.stages {
         for c in &stage.commands {
             run_step(&mut s, &stage.name, index, c)?;
@@ -37,9 +46,21 @@ pub fn build_plan(plan: &Plan) -> Result<CustomPart> {
         if let Some(why) = volume_off(m.volume, stage.volume_mm3) {
             return mismatch(&stage.name, why);
         }
+        let (got, want) = (m.volume - before, stage.volume_mm3 - expected_before);
+        if (got - want).abs() > DELTA_TOL * want.abs() + DELTA_ABS_MM3 {
+            return mismatch(
+                &stage.name,
+                format!("the stage changed the volume by {got:+.4} mm³, expected {want:+.4} mm³"),
+            );
+        }
+        before = m.volume;
+        expected_before = stage.volume_mm3;
+        volumes.push((stage.name.clone(), m.volume));
     }
     let last = plan.stages.last().map_or("(empty)", |s| s.name.as_str());
-    finish(&mut s, last, Some(plan.volume_mm3), Some(plan.bbox_mm))
+    let mut part = finish(&mut s, last, Some(plan.volume_mm3), Some(plan.bbox_mm))?;
+    part.stage_volumes_mm3 = volumes;
+    Ok(part)
 }
 
 /// Builds a freeform part from a SolidCraft batch Claude (or anyone) wrote: `{"commands":
@@ -459,5 +480,6 @@ fn finish(
         three_mf,
         volume_mm3: m.volume,
         bbox_mm: m.bbox,
+        stage_volumes_mm3: Vec::new(),
     })
 }

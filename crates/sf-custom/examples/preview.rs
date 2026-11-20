@@ -2,7 +2,10 @@
 //!
 //! `cargo run -p sf-custom --example preview [out_dir]` (default `/tmp/fushion-custom`).
 //! Each PNG has three orthographic panels: from front-left above (studs, slope direction),
-//! from below (hollow, tubes) and from the right side (profile).
+//! from below (hollow, tubes) and from the right side (profile). The Slant v2 bricks and the
+//! standard 2×4 also get `<name>_views.png`: straight down, from above, from below, and a
+//! close-up of one peanut (or, for the standard brick, of the centre rib from below).
+//! Faces nearer the viewer are drawn lighter, so slots and pockets show in the top view.
 
 use sf_custom::{CustomShape, StudProfile, analyze_stl, build};
 use std::path::PathBuf;
@@ -15,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     std::fs::create_dir_all(&out)?;
     let std = StudProfile::standard_fdm();
-    let v2 = StudProfile::compliant_v2_experimental();
+    let v2 = StudProfile::slant_v2_experimental();
     let parts: Vec<(&str, CustomShape, StudProfile)> = vec![
         (
             "box_2x4x3",
@@ -79,6 +82,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
             v2,
         ),
+        (
+            "v2_box_2x4x3",
+            CustomShape::Box {
+                w: 2,
+                d: 4,
+                plates: 3,
+            },
+            v2,
+        ),
     ];
     for (name, shape, profile) in parts {
         let t = std::time::Instant::now();
@@ -88,6 +100,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::write(out.join(format!("{name}.3mf")), &part.three_mf)?;
         let png = out.join(format!("{name}.png"));
         render(&part.stl, &png)?;
+        if name.starts_with("v2_") || name == "box_2x4x3" {
+            let tris = triangles(&part.stl);
+            let v = |eye: V3, focus: Option<(V3, V3)>| View { eye, focus };
+            let views: Vec<View> = if name.starts_with("v2_") {
+                // Row 0's lower peanut: its fins face −X.
+                let peanut = ([0.2, -0.2, 9.0], [7.8, 16.2, 11.4]);
+                vec![
+                    v([0.0, 0.0, 1.0], None),
+                    v([-1.0, -1.6, 1.2], None),
+                    v([-1.0, -1.6, -1.2], None),
+                    v([0.0, 0.0, 1.0], Some(peanut)),
+                    v([-1.0, -0.8, 1.6], Some(peanut)),
+                    v(
+                        [-1.0, -0.25, 0.3],
+                        Some(([0.0, 0.0, 8.6], [8.0, 16.0, 11.4])),
+                    ),
+                ]
+            } else {
+                vec![
+                    v([0.0, 0.0, 1.0], None),
+                    v([-1.0, -1.6, 1.2], None),
+                    v([-1.0, -1.6, -1.2], None),
+                    v(
+                        [-0.6, -0.5, -1.0],
+                        Some(([0.0, 10.0, 0.0], [16.0, 22.0, 9.6])),
+                    ),
+                ]
+            };
+            let png = out.join(format!("{name}_views.png"));
+            render_views(&tris, &views, 520, &png)?;
+            println!("  -> {}", png.display());
+        }
         println!(
             "{name}: {:.2} mm³, bbox {:?}, {} triangles, watertight {}, {:.1} s -> {}",
             part.volume_mm3,
@@ -141,7 +185,15 @@ fn triangles(stl: &[u8]) -> Vec<[V3; 3]> {
 
 /// One orthographic panel: the camera looks along `-eye` (eye is the direction toward the
 /// viewer), with world +Z (or +Y when looking straight down) as screen up.
-fn panel(tris: &[[V3; 3]], eye: V3, size: usize, pixels: &mut [u8], stride: usize, x0: usize) {
+fn panel(
+    tris: &[[V3; 3]],
+    eye: V3,
+    focus: Option<(V3, V3)>,
+    size: usize,
+    pixels: &mut [u8],
+    stride: usize,
+    x0: usize,
+) {
     let fwd = norm(eye);
     let up0 = if fwd[2].abs() > 0.99 {
         [0.0, 1.0, 0.0]
@@ -155,11 +207,28 @@ fn panel(tris: &[[V3; 3]], eye: V3, size: usize, pixels: &mut [u8], stride: usiz
         .map(|t| t.map(|p| [dot(p, right), dot(p, up), dot(p, fwd)]))
         .collect();
     let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
-    for p in pts.iter().flatten() {
+    let (mut zlo, mut zhi) = (f64::MAX, f64::MIN);
+    let fit: Vec<V3> = match focus {
+        // The eight corners of the box to frame.
+        Some((a, b)) => (0..8)
+            .map(|k| {
+                let c = [
+                    if k & 1 == 0 { a[0] } else { b[0] },
+                    if k & 2 == 0 { a[1] } else { b[1] },
+                    if k & 4 == 0 { a[2] } else { b[2] },
+                ];
+                [dot(c, right), dot(c, up), dot(c, fwd)]
+            })
+            .collect(),
+        None => pts.iter().flatten().copied().collect(),
+    };
+    for p in &fit {
         for k in 0..2 {
             lo[k] = lo[k].min(p[k]);
             hi[k] = hi[k].max(p[k]);
         }
+        zlo = zlo.min(p[2]);
+        zhi = zhi.max(p[2]);
     }
     let scale = (size as f64 * 0.9) / (hi[0] - lo[0]).max(hi[1] - lo[1]);
     let cx = (lo[0] + hi[0]) / 2.0;
@@ -174,7 +243,10 @@ fn panel(tris: &[[V3; 3]], eye: V3, size: usize, pixels: &mut [u8], stride: usiz
         }
         // Light fixed to the camera, so every panel is lit the same way.
         let nv = [dot(n, right), dot(n, up), facing];
-        let shade = 0.25 + 0.75 * dot(nv, light).max(0.0);
+        // Nearer faces lighter, so steps show even where faces are parallel.
+        let mid = (t[0][2] + t[1][2] + t[2][2]) / 3.0;
+        let depth = ((mid - zlo) / (zhi - zlo).max(1e-9)).clamp(0.0, 1.0);
+        let shade = (0.25 + 0.75 * dot(nv, light).max(0.0)) * (0.45 + 0.55 * depth);
         let s = t.map(|p| {
             [
                 (p[0] - cx) * scale + size as f64 / 2.0,
@@ -232,10 +304,44 @@ fn render(stl: &[u8], path: &std::path::Path) -> Result<(), Box<dyn std::error::
     let width = size * views.len();
     let mut pixels = vec![245u8; width * size * 3];
     for (k, eye) in views.iter().enumerate() {
-        panel(&tris, *eye, size, &mut pixels, width * 3, k * size);
+        panel(&tris, *eye, None, size, &mut pixels, width * 3, k * size);
     }
     let file = std::fs::File::create(path)?;
     let mut enc = png::Encoder::new(std::io::BufWriter::new(file), width as u32, size as u32);
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    enc.write_header()?.write_image_data(&pixels)?;
+    Ok(())
+}
+
+/// A panel: the direction toward the viewer, and optionally the box (mm) to frame.
+struct View {
+    eye: V3,
+    focus: Option<(V3, V3)>,
+}
+
+/// Panels in a 2 × 2 grid.
+fn render_views(
+    tris: &[[V3; 3]],
+    views: &[View],
+    size: usize,
+    path: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (cols, rows) = (2, views.len().div_ceil(2));
+    let (width, height) = (cols * size, rows * size);
+    let mut pixels = vec![245u8; width * height * 3];
+    for (k, v) in views.iter().enumerate() {
+        let (col, row) = (k % cols, k / cols);
+        let mut tile = vec![245u8; size * size * 3];
+        panel(tris, v.eye, v.focus, size, &mut tile, size * 3, 0);
+        for y in 0..size {
+            let src = &tile[y * size * 3..(y + 1) * size * 3];
+            let o = ((row * size + y) * width + col * size) * 3;
+            pixels[o..o + size * 3].copy_from_slice(src);
+        }
+    }
+    let file = std::fs::File::create(path)?;
+    let mut enc = png::Encoder::new(std::io::BufWriter::new(file), width as u32, height as u32);
     enc.set_color(png::ColorType::Rgb);
     enc.set_depth(png::BitDepth::Eight);
     enc.write_header()?.write_image_data(&pixels)?;
