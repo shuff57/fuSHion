@@ -1,0 +1,32 @@
+[package]
+name = "studforge"
+description = "Turn a picture into a buildable LEGO-compatible brick model."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sf-core.workspace = true
+sf-spec.workspace = true
+sf-engine.workspace = true
+sf-ldraw.workspace = true
+sf-render.workspace = true
+sf-export.workspace = true
+sf-catalog.workspace = true
+sf-agent.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+image.workspace = true
+base64.workspace = true
+dirs.workspace = true
+tokio.workspace = true
+rmcp.workspace = true
+eframe.workspace = true
+egui.workspace = true
+egui-wgpu.workspace = true
+wgpu.workspace = true
+bytemuck.workspace = true
+rfd.workspace = true

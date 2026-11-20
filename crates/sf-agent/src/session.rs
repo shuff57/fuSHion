@@ -34,6 +34,7 @@ pub struct Session {
     pub report: Option<Report>,
     /// Part budget the user chose (overrides the spec's).
     pub budget: Option<u32>,
+    source_mtime: Option<std::time::SystemTime>,
 }
 
 /// Views in the render sheet, in order.
@@ -88,6 +89,7 @@ impl Session {
             model: None,
             report: None,
             budget: None,
+            source_mtime: None,
         };
         s.reload()?;
         Ok(s)
@@ -96,22 +98,30 @@ impl Session {
     /// Re-read state files written by another process.
     pub fn reload(&mut self) -> Result<()> {
         let src = self.dir.join("source.png");
-        if src.exists() {
+        let mtime = std::fs::metadata(&src).and_then(|m| m.modified()).ok();
+        if mtime.is_some() && (mtime != self.source_mtime || self.image.is_none()) {
             self.image = Some(image::open(&src)?.to_rgba8());
+            self.source_mtime = mtime;
         }
         if let Ok(t) = std::fs::read_to_string(self.dir.join("spec.json")) {
             self.spec = serde_json::from_str(&t).ok();
         }
+        if let Ok(t) = std::fs::read_to_string(self.dir.join("budget.txt")) {
+            self.budget = t.trim().parse().ok();
+        }
         if let Ok(t) = std::fs::read_to_string(self.dir.join("model.json")) {
             self.model = serde_json::from_str(&t).ok();
         }
-        self.report = None;
         if let Some(m) = &mut self.model {
-            let (_, r) = sf_engine::reanalyze(m, &self.palette, self.availability.as_ref());
-            self.report = Some(r);
+            // Saved models may use old part ids.
+            for p in &mut m.placements {
+                p.part = sf_core::parts::canonical(&p.part).to_string();
+            }
         }
-        if let Ok(t) = std::fs::read_to_string(self.dir.join("budget.txt")) {
-            self.budget = t.trim().parse().ok();
+        self.report = None;
+        if let Some(mut m) = self.model.take() {
+            self.report = Some(self.analyze(&mut m));
+            self.model = Some(m);
         }
         Ok(())
     }
@@ -183,8 +193,15 @@ impl Session {
     }
 
     /// Replace the model after manual edits; recompute steps and report.
+    /// Steps and report for a model, with the session's budget filled in.
+    fn analyze(&self, model: &mut Model) -> Report {
+        let (_, mut r) = sf_engine::reanalyze(model, &self.palette, self.availability.as_ref());
+        r.budget = self.budget.or(self.spec.as_ref().and_then(|s| s.budget));
+        r
+    }
+
     pub fn set_model(&mut self, mut model: Model) -> Result<Report> {
-        let (_, r) = sf_engine::reanalyze(&mut model, &self.palette, self.availability.as_ref());
+        let r = self.analyze(&mut model);
         self.model = Some(model);
         self.report = Some(r.clone());
         self.save()?;

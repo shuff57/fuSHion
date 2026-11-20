@@ -148,7 +148,16 @@ pub static CATALOG: &[PartDef] = &[
     pf("85984", "Slope 30 1 x 2 x 2/3", 1, 2, 2, Shape::Slope { high: 0 }, 3, [0, 16, 0]),
 ];
 
-/// Look up a catalog part by LDraw id.
+/// Old ids still found in saved models, mapped to the catalog id.
+pub const ALIASES: &[(&str, &str)] = &[("3665", "3665b"), ("3660", "3660b"), ("3040", "3040b"), ("3070", "3070b"), ("3069", "3069b"), ("3068", "3068b")];
+
+/// The catalog id for `id`, following [`ALIASES`].
+pub fn canonical(id: &str) -> &str {
+    ALIASES.iter().find(|(old, _)| *old == id).map(|(_, new)| *new).unwrap_or(id)
+}
+
+/// Look up a catalog part by LDraw id (old ids in [`ALIASES`] work too).
 pub fn part(id: &str) -> Option<&'static PartDef> {
+    let id = canonical(id);
     CATALOG.iter().find(|p| p.id == id)
 }
