@@ -556,6 +556,8 @@ pub struct SlantOutline {
     pub slots: [Vec<P2>; 2],
     /// Lobe B's pocket then lobe A's, closed.
     pub pockets: [Vec<P2>; 2],
+    /// Lobe B's fin footprint then lobe A's, closed: what each pocket grows from.
+    pub fins: [Vec<P2>; 2],
     /// The stud's top outline (peanut less slots), and whether each point is on a fin.
     pub edge: Vec<(P2, bool)>,
 }
@@ -589,6 +591,7 @@ pub fn slant_outline(profile: &StudProfile) -> Result<SlantOutline> {
     };
     let slots = lobes.map(|f| f.map_loop(&lobe.slot));
     let pockets = lobes.map(|f| f.map_loop(&lobe.pocket));
+    let fins = lobes.map(|f| f.map_loop(&lobe.fin));
     let peanut = slant::Unit {
         first: (0, 0),
         step: (0, 1),
@@ -608,6 +611,7 @@ pub fn slant_outline(profile: &StudProfile) -> Result<SlantOutline> {
         peanut: poly(&lobe.peanut),
         slots: [poly(&slots[0]), poly(&slots[1])],
         pockets: [poly(&pockets[0]), poly(&pockets[1])],
+        fins: [poly(&fins[0]), poly(&fins[1])],
         edge,
     })
 }

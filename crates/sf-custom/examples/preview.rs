@@ -219,7 +219,7 @@ fn fit_overlay(p: &StudProfile) -> Result<String, Box<dyn std::error::Error>> {
     let (sc, pw, ph) = (44.0, 640.0, 860.0);
     let mut svg = String::new();
     let width = 2.0 * pw + 40.0;
-    let height = ph + 230.0;
+    let height = ph + 256.0;
     writeln!(
         svg,
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" font-family="DejaVu Sans, sans-serif">
@@ -312,11 +312,12 @@ fn fit_overlay(p: &StudProfile) -> Result<String, Box<dyn std::error::Error>> {
             y(0.0),
             dims.waist_radius * sc
         )?;
-        // Pockets (dashed), the peanut, its slots.
+        // Pockets (shaded: past the stud they show as the gap round each fin), the peanut,
+        // its slots.
         for pk in &o.pockets {
             writeln!(
                 svg,
-                r##"<path d="{}" fill="none" stroke="#8a6d3b" stroke-dasharray="5 3"/>"##,
+                r##"<path d="{}" fill="#5a3a1a" fill-opacity="0.75" stroke="#5a3a1a" stroke-width="0.8"/>"##,
                 path(pk, &x, &y)
             )?;
         }
@@ -470,8 +471,18 @@ fn fit_overlay(p: &StudProfile) -> Result<String, Box<dyn std::error::Error>> {
             d.cap_angle
         ),
         format!(
-            "Fin {:.2} wide at most, root {:.2} across at the slot's end, least section to the waist {:.3}. Pocket out to u {:.3}. Lobe frame: u to the fin side, v away from the waist (mm).",
-            d.fin_width, d.root_width, d.min_section, d.pocket_out
+            "Fin {:.2} wide at most, root {:.2} across at the slot's end, least section to the waist {:.3}. Lobe frame: u to the fin side, v away from the waist (mm).",
+            d.fin_width, d.root_width, d.min_section
+        ),
+        format!(
+            "Pocket: the fin grown {:.2} all round, {:.2} deep ({:.3} mm², {:.3} mm³ per fin); root cap r {:.3} leaves the root square to the waist; out to u {:.3}, rim {:.2}.",
+            d.pocket_margin,
+            d.pocket_depth,
+            d.pocket_area,
+            d.pocket_area * d.pocket_depth,
+            d.root_cap_radius,
+            d.pocket_out,
+            d.pocket_rim
         ),
     ];
     for (i, n) in notes.iter().enumerate() {
@@ -483,7 +494,7 @@ fn fit_overlay(p: &StudProfile) -> Result<String, Box<dyn std::error::Error>> {
     }
     writeln!(
         svg,
-        r##"<text x="24" y="{}" font-size="15" fill="#333">Green: fin edges (may press up to 0.45 mm). Blue: walls and tubes of the brick on top; dashed circle: waist clearance (r {:.3}). Brown dashed: pockets.</text>"##,
+        r##"<text x="24" y="{}" font-size="15" fill="#333">Green: fin edges (may press up to 0.45 mm). Blue: walls and tubes of the brick on top; dashed circle: waist clearance (r {:.3}). Dark brown: pockets (the gap round each fin).</text>"##,
         ph + 70.0 + 26.0 * notes.len() as f64,
         dims.waist_radius
     )?;

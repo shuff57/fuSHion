@@ -2,7 +2,8 @@
 //! hand calculations made here, independently of the crate's own geometry: the peanut, a
 //! triple's middle lobe and finless units in closed form (their width
 //! integrated arc by arc), the slot and pocket areas by sampling a fine grid with inside tests
-//! written from the stud's dimensions.
+//! written from the stud's dimensions (the pocket as every point within its margin of the
+//! fin's free edges that is not under the rest of the stud, with its root cap).
 //!
 //! STLs are written to `/tmp/fushion-custom/` for inspection.
 
@@ -40,7 +41,16 @@ struct Hand {
     hc: [f64; 2],
     rh: f64,
     tail: f64,
-    pocket_out: f64,
+    /// The fin's root corner (the slot's end meets the fin-side waist arc) and its tip (the
+    /// hook's inner edge leaves the blend arc).
+    root: [f64; 2],
+    tip: [f64; 2],
+    /// Pocket margin.
+    m: f64,
+    /// The pocket's root cap: centre, radius and where it meets the offset waist arc.
+    cap_c: [f64; 2],
+    cap_r: f64,
+    cap_t: [f64; 2],
 }
 
 const S45: f64 = std::f64::consts::FRAC_1_SQRT_2;
@@ -119,6 +129,31 @@ impl Hand {
         let vs = r - 0.75 - hw - rh;
         assert!((d.slot_center - uc).abs() < 1e-12);
         assert!((d.slot_v.0 - v0).abs() < 1e-12 && (d.slot_v.1 - vs).abs() < 1e-12);
+        // The fin's tip: the hook's inner edge (radius 0.95 about the hook centre) meets the
+        // blend circle between 45° and 90° about the hook centre (the hook's 45° end is
+        // already outside the lobe, so the tail never touches the fin).
+        let hc = [uc + rh, vs];
+        let on_hook = |t: f64| [hc[0] + (rh - hw) * t.cos(), hc[1] + (rh - hw) * t.sin()];
+        assert!(dist(on_hook(PI / 4.0), ce) > re);
+        let th = bisect(|th| dist(on_hook(th), ce) - re, PI / 4.0, PI / 2.0);
+        let tip = on_hook(th);
+        let root = [uc + hw + 0.8, v0];
+        assert!(dist(d.tip_corner, tip) < 1e-9 && dist(d.root_corner, root) < 1e-12);
+        // The root cap: a circle through the root's corner, square there to the waist arc
+        // (its centre along the waist's tangent from the corner), touching the waist arc's
+        // 0.25 mm offset from outside.
+        let m = 0.25;
+        let n = toward(root, tf, 1.0);
+        let t_dir = [-(n[1] - root[1]), n[0] - root[0]];
+        let cap_at = |k: f64| [root[0] + k * t_dir[0], root[1] + k * t_dir[1]];
+        let cap_r = bisect(|k| dist(cap_at(k), tf) - (rw - m + k), 0.01, 2.0);
+        let cap_c = cap_at(cap_r);
+        let cap_t = toward(tf, cap_c, rw - m);
+        assert!(
+            dist(d.root_cap_center, cap_c) < 1e-9,
+            "{:?} vs {cap_c:?}",
+            d.root_cap_center
+        );
         Self {
             r,
             a,
@@ -138,10 +173,15 @@ impl Hand {
             hw,
             v0,
             vs,
-            hc: [uc + rh, vs],
+            hc,
             rh,
             tail: d.tail,
-            pocket_out: d.pocket_out,
+            root,
+            tip,
+            m,
+            cap_c,
+            cap_r,
+            cap_t,
         }
     }
 
@@ -202,27 +242,78 @@ impl Hand {
         straight || hook || tail
     }
 
-    /// Inside the pocket: on the fin side of the slot's centre line, from 0.2 mm before the
-    /// slot's end to the hook, out to `pocket_out`.
+    /// On the fin: past the slot's end, inside the peanut and not in the slot, beside the
+    /// slot's straight part, or above it inside the hook's inner edge or short of the hook's
+    /// 45° end (where the lobe runs on past the hook's inner circle, with no slot).
+    fn fin(&self, q: [f64; 2]) -> bool {
+        q[1] >= self.v0
+            && self.peanut(q)
+            && !self.slot(q)
+            && if q[1] <= self.vs {
+                q[0] >= self.uc + self.hw
+            } else {
+                dist(q, self.hc) <= self.rh - self.hw || self.hook_angle(q) < 45.0
+            }
+    }
+
+    /// Distance from `q` to the fin's free edges: the waist arc from the root's corner, the
+    /// bump, the blend to the tip, the hook's inner edge and the slot's straight edge (each
+    /// arc turns by under 180°).
+    fn to_free_edges(&self, q: [f64; 2]) -> f64 {
+        let arc = |c: [f64; 2], r: f64, from: [f64; 2], to: [f64; 2]| {
+            let cross = |p: [f64; 2], s: [f64; 2]| {
+                (p[0] - c[0]) * (s[1] - c[1]) - (p[1] - c[1]) * (s[0] - c[0])
+            };
+            let turn = cross(from, to).signum();
+            if cross(from, q) * turn >= 0.0 && cross(q, to) * turn >= 0.0 {
+                (dist(q, c) - r).abs()
+            } else {
+                dist(q, from).min(dist(q, to))
+            }
+        };
+        let (a, p3) = (self.a, [self.uc + self.hw, self.vs]);
+        let straight = if q[1] < self.v0 {
+            dist(q, [p3[0], self.v0])
+        } else if q[1] > self.vs {
+            dist(q, p3)
+        } else {
+            (q[0] - p3[0]).abs()
+        };
+        [
+            arc([a, -a], self.rw, self.root, self.j),
+            arc(self.cf, self.rho, self.j, self.p),
+            arc(self.ce, self.re, self.p, self.tip),
+            arc(self.hc, self.rh - self.hw, self.tip, p3),
+            straight,
+        ]
+        .into_iter()
+        .fold(f64::INFINITY, f64::min)
+    }
+
+    /// Inside the pocket: on the fin, or where the rest of the stud does not stand (in the
+    /// slot or beside the stud) and either inside the root cap's circle, in the wedge about
+    /// the waist arc's centre between the root's corner and where the cap meets the offset
+    /// arc, or elsewhere at or above the slot's end within the margin of the fin's free edges.
     fn pocket(&self, q: [f64; 2]) -> bool {
-        if q[0] < self.uc || q[0] > self.pocket_out || q[1] < self.v0 - 0.2 {
-            return false;
-        }
-        if q[1] <= self.vs {
+        if self.fin(q) {
             return true;
         }
-        let t = self.hook_angle(q);
-        if t >= 45.0 {
-            return (q[0] - self.hc[0]).hypot(q[1] - self.hc[1]) <= self.rh;
+        if self.peanut(q) && !self.slot(q) {
+            return false;
         }
-        let m = self.m_end();
-        let e2 = [
-            m[0] + (self.tail + 0.2) * S45,
-            m[1] - (self.tail + 0.2) * S45,
-        ];
-        // Below the tail's centre line (the hook centre's side), or below its end.
-        let across = (q[0] - m[0]) * S45 + (q[1] - m[1]) * S45;
-        across <= 0.0 || q[1] <= e2[1]
+        let tf = [self.a, -self.a];
+        let cross = |p: [f64; 2], s: [f64; 2]| {
+            (p[0] - tf[0]) * (s[1] - tf[1]) - (p[1] - tf[1]) * (s[0] - tf[0])
+        };
+        let turn = cross(self.root, self.cap_t).signum();
+        let in_wedge = cross(self.root, q) * turn >= 0.0
+            && cross(q, self.cap_t) * turn >= 0.0
+            && dist(q, tf) <= self.rw;
+        if in_wedge {
+            dist(q, self.cap_c) <= self.cap_r
+        } else {
+            q[1] >= self.v0 && self.to_free_edges(q) <= self.m
+        }
     }
 
     /// Twice the integral of the peanut's fin-side (`right`) and inner-side (`left`) half
@@ -382,7 +473,7 @@ fn check_v2(w: u32, d: u32, u: Units, ribs: usize) -> CustomPart {
         shell + tubes * tube(8.2) + ribs as f64 * rib(8.2) - chamfer - pockets + studs - slots;
     close("Studs", delta(&part, "Studs"), studs, 1e-6);
     if lobes > 0.0 {
-        close("Pockets", -delta(&part, "Pockets"), pockets, 2e-3);
+        close("Pockets", -delta(&part, "Pockets"), pockets, 5e-4);
         close("Slots", -delta(&part, "Slots"), slots, 3e-3);
     }
     close("Chamfer", -delta(&part, "Chamfer"), chamfer, 1e-6);

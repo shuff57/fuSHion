@@ -14,7 +14,8 @@ pub enum StudStyle {
     /// the long outside edge are fused into one peanut (two lobes joined by a narrow waist),
     /// and a leaf-spring fin is cut out of each lobe on the outer side. The fin is split from
     /// the stud by a narrow slot that hooks out through the lobe's outer edge, and a pocket in
-    /// the brick's top frees its underside, so it hangs from its root near the waist and
+    /// the brick's top (the fin's outline grown by `pocket_margin`) frees its underside, so it
+    /// hangs from its root near the waist and
     /// presses on the receiving brick's wall with a steady force. Every stud is fused: an
     /// odd run of three or more studs gets one **triple** (three lobes, two waists, fins on
     /// the two end lobes; the middle lobe is the plain stud circle on both sides), placed as
@@ -65,6 +66,15 @@ pub enum StudStyle {
         hook_radius: f64,
         /// Depth of the pocket cut into the brick's top under each fin, in mm.
         pocket_depth: f64,
+        /// How far the pocket reaches past the fin all round, in mm: the pocket is the fin's
+        /// footprint grown by this margin (lines moved out parallel, arcs to concentric arcs,
+        /// convex corners rounded), so it shows as an even gap around the fin. On the slot
+        /// side it ends inside the slot (it must be under `slot_width`); at the root it stops
+        /// where the fin attaches, with a round of this radius about the root's outer corner
+        /// beside the waist. The default, half the slot, puts the pocket's edge on the slot's
+        /// centre line.
+        #[serde(default = "default_pocket_margin")]
+        pocket_margin: f64,
     },
 }
 
@@ -157,6 +167,10 @@ fn default_chamfer() -> f64 {
     0.2
 }
 
+fn default_pocket_margin() -> f64 {
+    0.25
+}
+
 fn default_rib_interference() -> f64 {
     0.05
 }
@@ -201,9 +215,9 @@ impl StudProfile {
     /// fin side (0.15 mm into the wall of a brick pushed on), the waist is cut 0.05 mm clear
     /// of the tubes beside it (1.39 mm wide), and 0.5 mm slots 0.25–0.75 mm outboard of each
     /// lobe's centre line leave a 0.8 mm fin root and hook out with a 1.2 mm hook, over
-    /// 0.6 mm pockets. The top is 1.4 mm thick (instead of 1.0) so 0.8 mm of floor stays under
-    /// each pocket. Everything else is [`StudProfile::standard_fdm`]. Print a test pair before
-    /// trusting the clutch.
+    /// 0.6 mm pockets that follow each fin's outline 0.25 mm out. The top is 1.4 mm thick
+    /// (instead of 1.0) so 0.8 mm of floor stays under each pocket. Everything else is
+    /// [`StudProfile::standard_fdm`]. Print a test pair before trusting the clutch.
     pub fn slant_v2_experimental() -> Self {
         Self {
             top_thickness: 1.4,
@@ -218,6 +232,7 @@ impl StudProfile {
                 root_width: 0.8,
                 hook_radius: 1.2,
                 pocket_depth: 0.6,
+                pocket_margin: default_pocket_margin(),
             },
             ..Self::standard_fdm()
         }

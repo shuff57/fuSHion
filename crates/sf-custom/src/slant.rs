@@ -50,17 +50,16 @@ use crate::{CustomError, Result};
 use std::collections::BTreeSet;
 use std::f64::consts::{FRAC_PI_4, PI};
 
-/// How far a pocket reaches past its slot's end, toward the waist, in mm (so the pocket's
-/// end wall and the slot's end wall are never the same face).
-const POCKET_LEAD: f64 = 0.2;
 /// How far a slot's tail runs past the point where the fin's tip leaves the lobe, in mm.
 const TAIL_PAST: f64 = 0.3;
-/// How far the pocket's outline runs on past the slot's tail, in mm.
-const POCKET_TAIL: f64 = 0.2;
-/// How far the pocket reaches outboard of the slot tail and the fin, in mm.
-const POCKET_OUT: f64 = 0.15;
 /// The thinnest rim a pocket may leave to the brick's outside face, in mm.
-const MIN_RIM: f64 = 0.5;
+const MIN_RIM: f64 = 0.6;
+/// The least room a pocket's edge leaves to the slot's far wall, in mm (so the pocket never
+/// reaches under the stud across the slot).
+const POCKET_SLOT_ROOM: f64 = 0.1;
+/// How far the pocket outline used for the slot's area runs on below the slot's end, in mm
+/// (see [`Lobe::slot_outside_pocket`]).
+const PROBE_DROP: f64 = 0.1;
 
 /// One lobe's slot and pocket, and the outlines of the units it belongs to, worked out from a
 /// profile.
@@ -78,8 +77,14 @@ pub(crate) struct Lobe {
     pub triple_plain: Loop,
     /// The slot, in lobe B's frame.
     pub slot: Loop,
-    /// The pocket under the fin, in lobe B's frame.
+    /// The fin's footprint, in lobe B's frame: from the root (the slot's end) to the tip,
+    /// between the slot and the lobe's outline.
+    pub fin: Loop,
+    /// The pocket under the fin, in lobe B's frame: the fin grown by `pocket_margin`.
     pub pocket: Loop,
+    /// The pocket's outline with its root end run on [`PROBE_DROP`] below the slot's end,
+    /// where the slot has nothing, so it crosses the slot's outline cleanly.
+    pocket_probe: Loop,
     /// Pocket depth into the brick's top.
     pub pocket_depth: f64,
     /// How deep the slot cuts into the brick's top (beside the pocket).
@@ -145,8 +150,26 @@ pub struct SlantDims {
     pub min_section: f64,
     /// Pocket depth.
     pub pocket_depth: f64,
+    /// How far the pocket reaches past the fin all round.
+    pub pocket_margin: f64,
     /// Pocket reach outboard of the lobe centre.
     pub pocket_out: f64,
+    /// The top's rim between the pocket and the brick's outside face, across the row.
+    pub pocket_rim: f64,
+    /// Where the fin's free outline starts at its root: the slot's end meets the fin-side
+    /// waist arc here. The pocket's root cap leaves it square to the waist arc.
+    pub root_corner: P2,
+    /// Centre of the pocket's root cap: it turns from the root's corner into the offset
+    /// waist arc, tangent to it.
+    pub root_cap_center: P2,
+    /// Radius of the pocket's root cap.
+    pub root_cap_radius: f64,
+    /// Where the fin's tip leaves the lobe: the slot tail's fin-side edge meets the blend arc.
+    pub tip_corner: P2,
+    /// Area of one fin's footprint.
+    pub fin_area: f64,
+    /// Area of one pocket.
+    pub pocket_area: f64,
     /// Area of a finned pair (peanut), before its slots are cut.
     pub pair_area: f64,
     /// Area of a finned triple, before its slots are cut.
@@ -303,6 +326,7 @@ impl Lobe {
             root_width,
             hook_radius,
             pocket_depth,
+            pocket_margin,
         } = p.stud_style
         else {
             return Err(CustomError::InvalidProfile(
@@ -319,6 +343,7 @@ impl Lobe {
             ("root_width", root_width),
             ("hook_radius", hook_radius),
             ("pocket_depth", pocket_depth),
+            ("pocket_margin", pocket_margin),
         ] {
             if !(v.is_finite() && v > 0.0) {
                 return bad(format!("{name} must be a positive number, got {v}"));
@@ -589,30 +614,171 @@ impl Lobe {
             line(p8, p1),
         ];
 
-        // Pocket: everything on the fin side of the slot's centre line, out past the fin.
-        let m_start = [uc, v_s];
-        let m_end = [hc[0] + hook_radius * ct, hc[1] + hook_radius * st];
-        let e2 = add(m_end, dir, tail + POCKET_TAIL);
-        let u_out = e2[0].max(fin_reach) + POCKET_OUT;
-        let vp0 = v0 - POCKET_LEAD;
-        if u_out > a - p.clearance - MIN_RIM {
-            return bad(format!(
-                "the pocket reaches {u_out:.2} mm outboard, leaving under {MIN_RIM} mm to the brick's side"
-            ));
+        // The fin: from the slot's end (the root, p2 to the waist arc at `root`) round the
+        // lobe's outline to where the slot's fin-side edge leaves the blend arc (`tip`), back
+        // along the slot. Its free outline is everything but the root line. The slot's edge
+        // leaves the lobe on the hook's inner arc (the default numbers: its 45° end `p4` is
+        // already outside the blend circle) or, for a hook further in, on the tail.
+        let root = [fin_edge + root_width, v0];
+        let ri = hook_radius - hw;
+        let on_tail = leave(p4, dir, ce, re) > 0.0;
+        let tip = if on_tail {
+            add(p4, dir, leave(p4, dir, ce, re))
+        } else {
+            // The hook's inner circle meets the blend circle twice; the tip is the crossing on
+            // the hook's arc (45° to 180° about its centre), where the fin side goes outward.
+            let (dv, l) = (sub(ce, hc), norm(sub(ce, hc)));
+            let x = (l * l + ri * ri - re * re) / (2.0 * l);
+            let y = (ri * ri - x * x).max(0.0).sqrt();
+            let e = unit(dv);
+            let at = |sgn: f64| {
+                [
+                    hc[0] + x * e[0] - sgn * y * e[1],
+                    hc[1] + x * e[1] + sgn * y * e[0],
+                ]
+            };
+            let angle = |q: P2| (q[1] - hc[1]).atan2(q[0] - hc[0]);
+            let on_hook = |q: P2| (FRAC_PI_4..=PI).contains(&angle(q));
+            match [at(1.0), at(-1.0)].into_iter().find(|&q| on_hook(q)) {
+                Some(q) => q,
+                None => return bad("the slot's hook misses the fin's blend arc".into()),
+            }
+        };
+        let on_blend = {
+            let at = |q: P2| (q[1] - ce[1]).atan2(q[0] - ce[0]);
+            at(pp) < at(tip) && at(tip) < at(tt)
+        };
+        if !on_blend {
+            return bad("the slot leaves the lobe off the fin's blend arc".into());
         }
-        let pocket = geom::ccw(vec![
-            line([uc, vp0], [u_out, vp0]),
-            line([u_out, vp0], [u_out, e2[1]]),
-            line([u_out, e2[1]], e2),
-            line(e2, m_end),
+        // The slot side of the fin, from the tip back to the slot's straight part.
+        let hook_from = |q: P2| Seg::Arc {
+            a: q,
+            b: p3,
+            c: hc,
+            ccw: true,
+        };
+        let mut fin = vec![
+            line(p2, root),
             Seg::Arc {
-                a: m_end,
-                b: m_start,
-                c: hc,
+                a: root,
+                b: j,
+                c: tf,
+                ccw: false,
+            },
+            Seg::Arc {
+                a: j,
+                b: pp,
+                c: cf,
                 ccw: true,
             },
-            line(m_start, [uc, vp0]),
-        ]);
+            Seg::Arc {
+                a: pp,
+                b: tip,
+                c: ce,
+                ccw: true,
+            },
+        ];
+        if on_tail {
+            fin.extend([line(tip, p4), hook_from(p4)]);
+        } else {
+            fin.push(hook_from(tip));
+        }
+        fin.push(line(p3, p2));
+
+        // Pocket: the fin grown by `m`. Each edge of the free outline moves out by `m`
+        // (lines parallel, arcs to concentric arcs: the waist arc, concave, to radius
+        // `rw − m`), and the one convex corner, at the tip, is rounded with radius `m`; every
+        // other junction is tangent. On the slot side the offset edges lie inside the slot
+        // (`m < slot_width`). At the root the pocket stops on the root line (the slot's end
+        // line), so nothing under the stud's root is cut. Its root cap starts at the root's
+        // outer corner square to the stud's waist arc (a pocket edge running along the stud's
+        // own edge, or touching it, is what the CAD kernel can't join the studs onto) and turns
+        // on radius `rho_cap` into the offset waist arc, tangent to it at `t_cap`: the cap's
+        // circle touches the corner's normal at the corner and the offset arc from outside,
+        // `|root + rho_cap·t − tf| = rw − m + rho_cap` with `t ⊥ n_root`, so
+        // `rho_cap = (2·rw·m − m²) / (2·(rw − m))` (0.260 mm for m = 0.25). It dips below the
+        // root line only beside the stud, never under it.
+        let m = pocket_margin;
+        if m >= slot_width - POCKET_SLOT_ROOM {
+            return bad(format!(
+                "pocket_margin {m} mm would carry the pocket across the {slot_width} mm slot (keep it under {:.2})",
+                slot_width - POCKET_SLOT_ROOM
+            ));
+        }
+        let out_of = |q: P2, n: P2| add(q, n, m);
+        let n_root = unit(sub(tf, root));
+        let n_j = unit(sub(tf, j));
+        let n_pp = unit(sub(pp, cf));
+        let n_tip = unit(sub(tip, ce));
+        // Where the round at the tip turns to: square to the tail, or out from the hook.
+        let n_slot = if on_tail { out_n } else { unit(sub(tip, hc)) };
+        let t_dir = [-n_root[1], n_root[0]];
+        let rho_cap = (2.0 * rw * m - m * m) / (2.0 * (rw - m));
+        let c_cap = add(root, t_dir, rho_cap);
+        let t_cap = add(tf, unit(sub(c_cap, tf)), rw - m);
+        let slot_side = |v: f64| [fin_edge - m, v];
+        let pocket_from = |start: P2| {
+            let mut l = vec![
+                line(start, root),
+                Seg::Arc {
+                    a: root,
+                    b: t_cap,
+                    c: c_cap,
+                    ccw: true,
+                },
+                Seg::Arc {
+                    a: t_cap,
+                    b: out_of(j, n_j),
+                    c: tf,
+                    ccw: false,
+                },
+                Seg::Arc {
+                    a: out_of(j, n_j),
+                    b: out_of(pp, n_pp),
+                    c: cf,
+                    ccw: true,
+                },
+                Seg::Arc {
+                    a: out_of(pp, n_pp),
+                    b: out_of(tip, n_tip),
+                    c: ce,
+                    ccw: true,
+                },
+                Seg::Arc {
+                    a: out_of(tip, n_tip),
+                    b: out_of(tip, n_slot),
+                    c: tip,
+                    ccw: true,
+                },
+            ];
+            let hook_start = if on_tail {
+                l.push(line(out_of(tip, out_n), out_of(p4, out_n)));
+                out_of(p4, out_n)
+            } else {
+                out_of(tip, n_slot)
+            };
+            l.extend([
+                Seg::Arc {
+                    a: hook_start,
+                    b: slot_side(v_s),
+                    c: hc,
+                    ccw: true,
+                },
+                line(slot_side(v_s), start),
+            ]);
+            l
+        };
+        let pocket = pocket_from(slot_side(v0));
+        let pocket_probe = pocket_from(slot_side(v0 - PROBE_DROP));
+        let (_, hi) = geom::bbox(&pocket);
+        let u_out = hi[0];
+        let rim = a - p.clearance - u_out;
+        if rim < MIN_RIM - 1e-9 {
+            return bad(format!(
+                "the pocket reaches {u_out:.2} mm outboard, leaving {rim:.2} mm (under {MIN_RIM}) to the brick's side"
+            ));
+        }
 
         let dims = SlantDims {
             stud_radius: r,
@@ -641,7 +807,15 @@ impl Lobe {
             root_width,
             min_section,
             pocket_depth,
+            pocket_margin: m,
             pocket_out: u_out,
+            pocket_rim: rim,
+            root_corner: root,
+            root_cap_center: c_cap,
+            root_cap_radius: rho_cap,
+            tip_corner: tip,
+            fin_area: geom::area(&fin),
+            pocket_area: geom::area(&pocket),
             pair_area: geom::area(&peanut),
             triple_area: geom::area(&triple),
             pair_plain_area: geom::area(&pair_plain),
@@ -654,7 +828,9 @@ impl Lobe {
             pair_plain,
             triple_plain,
             slot,
+            fin,
             pocket,
+            pocket_probe,
             pocket_depth,
             groove: pocket_depth / 2.0,
             dims,
@@ -691,8 +867,13 @@ impl Lobe {
     }
 
     /// Area of a slot outside its pocket (where the slot grooves the brick's top).
+    ///
+    /// The pocket's root line runs along the slot's end, so their outlines share a stretch
+    /// there, which [`geom::intersection_area`] can't take. The probe outline is the pocket's
+    /// with that end run on below the slot's end, where the slot has nothing: it shares the
+    /// same area with the slot and crosses its outline cleanly.
     pub fn slot_outside_pocket(&self) -> f64 {
-        geom::area(&self.slot) - geom::intersection_area(&self.slot, &self.pocket)
+        geom::area(&self.slot) - geom::intersection_area(&self.slot, &self.pocket_probe)
     }
 
     /// Volume one lobe's slot removes: through the stud, and a groove into the top beside
@@ -1121,6 +1302,191 @@ mod tests {
     }
 
     #[test]
+    fn the_pocket_is_the_fin_grown_by_an_even_margin() {
+        let l = lobe();
+        let d = l.dims;
+        let m = d.pocket_margin;
+        assert!((m - 0.25).abs() < 1e-12);
+        // The fin's free outline: everything but its root line.
+        let free = &l.fin[1..];
+        let gap = |q: P2| {
+            free.iter()
+                .map(|s| geom::distance(s, q))
+                .fold(f64::INFINITY, f64::min)
+        };
+        // Root line, root cap, offset waist, bump, blend, tip round, (tail,) hook, slot side.
+        let n = l.pocket.len();
+        assert_eq!(n, l.fin.len() + 2);
+        // Every edge from the root's cap to the slot is exactly `m` from the fin.
+        for (k, s) in l.pocket.iter().enumerate().skip(2) {
+            for i in 0..=200 {
+                let q = s.at(f64::from(i) / 200.0);
+                assert!(
+                    (gap(q) - m).abs() < 1e-9,
+                    "pocket edge {k} at {q:?} is {} from the fin",
+                    gap(q)
+                );
+            }
+        }
+        // The root's cap stays within `m` of the fin, and ends `m` from it.
+        for i in 0..=200 {
+            let q = l.pocket[1].at(f64::from(i) / 200.0);
+            assert!(gap(q) <= m + 1e-9, "{q:?}");
+        }
+        assert!((gap(l.pocket[1].at(1.0)) - m).abs() < 1e-12);
+        // Closed, and tangent everywhere but at the two ends of the root line: the slot side,
+        // and the root's corner, where the cap leaves square to the stud's waist arc.
+        let mut corners = Vec::new();
+        for k in 0..n {
+            let (s, t) = (&l.pocket[k], &l.pocket[(k + 1) % n]);
+            let end = match *s {
+                Seg::Line { b, .. } | Seg::Arc { b, .. } => b,
+            };
+            let start = match *t {
+                Seg::Line { a, .. } | Seg::Arc { a, .. } => a,
+            };
+            assert!(norm(sub(end, start)) < 1e-12, "gap after pocket edge {k}");
+            if norm(sub(tangent(s, true), tangent(t, false))) > 1e-9 {
+                corners.push(k);
+            }
+        }
+        assert_eq!(corners, vec![0, n - 1]);
+        if let Seg::Arc { c, .. } = l.pocket[1] {
+            let n_root = unit(sub([l.a, -l.a], d.root_corner));
+            let r_cap = unit(sub(d.root_corner, c));
+            assert!(
+                dot(n_root, r_cap).abs() < 1e-12,
+                "the cap leaves the waist arc square"
+            );
+        }
+
+        // Area: the fin, a band `m` wide along each free edge (an arc of radius `r` turning
+        // by `θ` gives `θ·(r·m ± m²/2)`, + convex, − concave), the round at the tip, and the
+        // root's round less what the stud keeps.
+        let turn = |c: P2, p: P2, q: P2| {
+            let (a0, a1) = (
+                (p[1] - c[1]).atan2(p[0] - c[0]),
+                (q[1] - c[1]).atan2(q[0] - c[0]),
+            );
+            (a1 - a0)
+                .rem_euclid(2.0 * PI)
+                .min((a0 - a1).rem_euclid(2.0 * PI))
+        };
+        let (rw, a) = (d.waist_radius, l.a);
+        let tf = [a, -a];
+        let root = d.root_corner;
+        let tip = d.tip_corner;
+        let hc = d.hook_center;
+        let rh_in = d.hook_radius - d.slot_width / 2.0;
+        let p4 = [
+            hc[0] + rh_in * FRAC_PI_4.cos(),
+            hc[1] + rh_in * FRAC_PI_4.sin(),
+        ];
+        // The tip is on the hook's inner arc here (its 45° end is outside the lobe), so the
+        // band along the slot's tail is empty.
+        let on_tail = (norm(sub(tip, hc)) - rh_in).abs() > 1e-9;
+        assert!(!on_tail && norm(sub(p4, d.blend_center)) > d.blend_radius);
+        let tip_angle = (tip[1] - hc[1]).atan2(tip[0] - hc[0]);
+        assert!(tip_angle > FRAC_PI_4 && tip_angle < PI / 2.0, "{tip_angle}");
+        // The cap: from the root's corner, square to the waist arc, round to `t_cap` on the
+        // offset waist arc. Between the radii through the corner and through `t_cap` (`dt`
+        // apart) the pocket is the stud's sector less the triangle (tf, root, t_cap) plus the
+        // cap's circular segment on the chord root–t_cap (the arc bulges toward tf).
+        let (cc, rc) = (d.root_cap_center, d.root_cap_radius);
+        assert!((norm(sub(cc, tf)) - (rw - m + rc)).abs() < 1e-12);
+        let t_cap = add(tf, unit(sub(cc, tf)), rw - m);
+        let dt = turn(tf, root, t_cap);
+        let phi = turn(cc, root, t_cap);
+        let root_cap =
+            rw * rw * dt / 2.0 - rw * (rw - m) * dt.sin() / 2.0 + rc * rc * (phi - phi.sin()) / 2.0;
+        let waist = turn(tf, t_cap, d.bump_start) * (rw * m - m * m / 2.0);
+        let bump =
+            turn(d.bump_center, d.bump_start, d.blend_start) * (d.bump_radius * m + m * m / 2.0);
+        let blend = turn(d.blend_center, d.blend_start, tip) * (d.blend_radius * m + m * m / 2.0);
+        let hook = (PI - tip_angle) * (rh_in * m + m * m / 2.0);
+        let straight = (d.slot_v.1 - d.slot_v.0) * m;
+        let (n_tip, n_hook) = (unit(sub(tip, d.blend_center)), unit(sub(tip, hc)));
+        let tip_round = dot(n_tip, n_hook).acos() * m * m / 2.0;
+        let hand = d.fin_area + waist + bump + blend + hook + straight + tip_round + root_cap;
+        assert!(
+            (d.pocket_area - hand).abs() < 1e-12,
+            "{} vs {hand}",
+            d.pocket_area
+        );
+        println!(
+            "fin {:.4} mm², pocket {:.4} mm² (margin {m}): bands waist {waist:.4}, bump {bump:.4}, \
+             blend {blend:.4}, hook {hook:.4}, slot {straight:.4}; tip round \
+             {tip_round:.5}, root cap {root_cap:.5}; pocket {:.4} mm³ per fin; out to u {:.3} \
+             (rim {:.3}); root corner {root:?}, tip {tip:?}; least section {:.3}",
+            d.fin_area,
+            d.pocket_area,
+            d.pocket_area * d.pocket_depth,
+            d.pocket_out,
+            d.pocket_rim,
+            d.min_section
+        );
+    }
+
+    #[test]
+    fn the_pocket_frees_the_whole_fin_and_nothing_else() {
+        let l = lobe();
+        let d = l.dims;
+        let p = StudProfile::fused();
+        let to_peanut = |q: P2| [q[0], q[1] + l.a];
+        let (lo, hi) = geom::bbox(&l.pocket);
+        // An odd step and offset, so no sample lands on the root line or the slot's edges.
+        let step = 0.003_917;
+        let (mut in_fin, mut out) = (0, 0);
+        let nx = ((hi[0] - lo[0] + 0.4) / step) as i32;
+        let ny = ((hi[1] - lo[1] + 0.4) / step) as i32;
+        for i in 0..nx {
+            for j in 0..ny {
+                let q = [
+                    lo[0] - 0.2 + (f64::from(i) + 0.3141) * step,
+                    lo[1] - 0.2 + (f64::from(j) + 0.2718) * step,
+                ];
+                let pocket = geom::contains(&l.pocket, q);
+                if geom::contains(&l.fin, q) {
+                    // No ledge: every point of the fin, root to tip, is over the pocket.
+                    assert!(pocket, "fin point {q:?} is not over the pocket");
+                    in_fin += 1;
+                } else if pocket {
+                    // Nothing else of the stud stands over it: past the fin it is the slot
+                    // or the top beside the stud, never the root or the stud across the slot.
+                    assert!(
+                        geom::contains(&l.slot, q) || !geom::contains(&l.peanut, to_peanut(q)),
+                        "pocket point {q:?} undercuts the stud"
+                    );
+                    out += 1;
+                }
+            }
+        }
+        assert!(in_fin > 100_000 && out > 50_000, "{in_fin} {out}");
+        // Below the slot's end the pocket is only the root's cap, beside the stud: never
+        // under it.
+        let mut below = 0;
+        for (k, s) in l.pocket.iter().enumerate() {
+            for i in 1..100 {
+                let q = s.at(f64::from(i) / 100.0);
+                if q[1] < d.slot_v.0 - 1e-9 {
+                    assert_eq!(k, 1, "{q:?}");
+                    assert!(!geom::contains(&l.peanut, to_peanut(q)), "{q:?}");
+                    below += 1;
+                }
+            }
+        }
+        assert!(below > 50);
+        // The root keeps its section, and the top keeps a rim to the brick's side, clear of
+        // the rounded corners; the pocket stays short of an end wall's ribs.
+        assert!(d.min_section >= 0.6, "{}", d.min_section);
+        assert!(d.pocket_rim >= 0.6, "{}", d.pocket_rim);
+        assert!((d.pocket_out - (d.fin_reach + d.pocket_margin)).abs() < 1e-12);
+        let end_wall = l.a - p.clearance - p.wall;
+        assert!(hi[1] < end_wall - p.wall_rib_protrusion() - 0.3, "{hi:?}");
+        assert!(hi[0] < l.a - p.clearance - p.edge_radius - 0.3, "{hi:?}");
+    }
+
+    #[test]
     fn profiles_that_would_not_print_or_fit_are_refused() {
         let with = |f: &dyn Fn(&mut StudStyle)| {
             let mut p = StudProfile::slant_v2_experimental();
@@ -1148,6 +1514,13 @@ mod tests {
             }
         });
         assert!(e.is_err());
+        // A pocket wider than the slot would reach under the stud across it.
+        let e = with(&|s| {
+            if let StudStyle::SlantV2 { pocket_margin, .. } = s {
+                *pocket_margin = 0.45;
+            }
+        });
+        assert!(e.is_err_and(|e| e.to_string().contains("across")));
     }
 
     /// Closed, all arcs, tangent at every junction, each arc's ends on its circle.

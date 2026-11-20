@@ -149,8 +149,10 @@ pitch, Ø4.8 mm studs, 0.1 mm side clearance). Each row's studs are joined in
 pairs. An odd run of three or more gets one triple (three lobes and two waists)
 as near the middle of the row as its parity allows: 3 is T, 5 is P+T, 7 is
 P+T+P, 9 is P+P+T+P. Each end lobe carries a leaf-spring fin, cut free by a
-0.5 mm hooked slot and a pocket under it, which presses 0.15 mm on the receiving
-brick's wall. A triple's middle lobe has no fin: on both sides it is the plain
+0.5 mm hooked slot and a 0.6 mm pocket under it, which presses 0.15 mm on the
+receiving brick's wall. The pocket is the fin's outline grown 0.25 mm all round,
+so it shows only as an even gap around the fin; it stops at the fin's root. A
+triple's middle lobe has no fin: on both sides it is the plain
 Ø4.8 mm stud circle, joined to the waists by 0.5 mm rounds. Each lobe is the stud
 circle on its inner side, tangent to the tubes like a normal stud. The 1.39 mm
 waists clear the tubes beside them by 0.05 mm, and a fin never touches a tube.

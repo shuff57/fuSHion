@@ -76,6 +76,29 @@ impl Seg {
         }
     }
 
+    /// The exact extent `(min, max)` of the segment: its ends, and for an arc the points
+    /// where it passes due east, north, west or south of its centre.
+    pub fn bbox(&self) -> (P2, P2) {
+        let (a, b) = match *self {
+            Self::Line { a, b } | Self::Arc { a, b, .. } => (a, b),
+        };
+        let mut lo = [a[0].min(b[0]), a[1].min(b[1])];
+        let mut hi = [a[0].max(b[0]), a[1].max(b[1])];
+        if let Some((c, r, ..)) = self.arc_params() {
+            for k in 0..4 {
+                let t = f64::from(k) * TAU / 4.0;
+                if self.arc_fraction(t).is_some_and(|s| s > 0.0 && s < 1.0) {
+                    let p = [c[0] + r * t.cos(), c[1] + r * t.sin()];
+                    for i in 0..2 {
+                        lo[i] = lo[i].min(p[i]);
+                        hi[i] = hi[i].max(p[i]);
+                    }
+                }
+            }
+        }
+        (lo, hi)
+    }
+
     /// The same segment run the other way.
     pub fn reversed(&self) -> Self {
         match *self {
@@ -222,6 +245,42 @@ fn line_arc(l: &Seg, c: &Seg) -> Vec<(f64, f64)> {
 /// Signed area of a loop (positive counter-clockwise).
 pub(crate) fn area(l: &[Seg]) -> f64 {
     l.iter().map(Seg::green).sum()
+}
+
+/// The exact extent `(min, max)` of a loop.
+pub(crate) fn bbox(l: &[Seg]) -> (P2, P2) {
+    l.iter().map(Seg::bbox).fold(
+        ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]),
+        |(lo, hi), (a, b)| {
+            (
+                [lo[0].min(a[0]), lo[1].min(a[1])],
+                [hi[0].max(b[0]), hi[1].max(b[1])],
+            )
+        },
+    )
+}
+
+/// The distance from `p` to the nearest point of a segment.
+#[cfg(test)]
+pub(crate) fn distance(s: &Seg, p: P2) -> f64 {
+    match *s {
+        Seg::Line { a, b } => {
+            let d = sub(b, a);
+            let t = ((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1]) / (d[0] * d[0] + d[1] * d[1]);
+            let t = t.clamp(0.0, 1.0);
+            len(sub(p, [a[0] + t * d[0], a[1] + t * d[1]]))
+        }
+        Seg::Arc { a, b, .. } => {
+            let Some((c, r, ..)) = s.arc_params() else {
+                return len(sub(p, a));
+            };
+            if s.arc_fraction(ang(p, c)).is_some() {
+                (len(sub(p, c)) - r).abs()
+            } else {
+                len(sub(p, a)).min(len(sub(p, b)))
+            }
+        }
+    }
 }
 
 /// The loop run the other way.

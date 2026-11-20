@@ -121,7 +121,9 @@ rare part) or a shape no catalog part can make, design a printable part:
   3D's v2 stud reshaped to fit standard bricks): each row's studs are joined in
   pairs, and an odd run of 3 or more gets one triple as near its middle as it
   can go (3 = T, 5 = P+T, 7 = P+T+P, 9 = P+P+T+P), with a leaf-spring fin on
-  each end lobe that presses the wall of the brick on top by 0.15 mm. A stud
+  each end lobe that presses the wall of the brick on top by 0.15 mm (it is
+  freed by a hooked slot and a pocket in the top that follows the fin 0.25 mm
+  out, showing as a thin even gap around it). A stud
   can't stand alone in its row, so a 1×1 (or a 1-wide slope, or a footprint
   that leaves a lone stud whichever way its rows run) is refused: use a real
   part. Bricks pushed onto a custom part must start and end on a pair or triple,
