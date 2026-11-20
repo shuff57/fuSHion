@@ -141,21 +141,33 @@ studs pushed in from below (`wall_ribs`), and rounded vertical outside edges
 (`edge_radius`).
 
 SolidCraft adds roughly 15 minutes to the first build. To skip it:
-`cargo install --path crates/fushion --no-default-features`. The default connector uses the
-standard FDM-tuned dimensions also used by Slant 3D's free brick tool (8 mm
-pitch, Ø4.8 mm studs, 0.1 mm side clearance), with a centre rib through every
-second tube of 2-wide bricks and a 0.2 mm bottom chamfer against elephant's foot.
-An experimental Slant v2 stud, modelled on the design Slant 3D showed in *We Made
-a Better LEGO (For 3D Printing)*, is included for test printing: neighbouring
-studs along each long edge fuse into a peanut whose lobes each carry a leaf-spring
-fin, cut free by a 0.5 mm hooked slot and a pocket under it, that presses 0.15 mm
-on the receiving brick's wall. Its outline is reshaped to fit standard bricks: each
-lobe is the Ø4.8 mm stud circle on its inner side (tangent to the tubes, like a
-normal stud), the 1.39 mm waist clears the tubes beside it by 0.05 mm, and a fin
-never touches a tube. Because the two studs are fused, a brick pushed on must not
-end, or run its side wall, between the two studs of a pair: its wall would land on
-the waist. Print the files yourself or upload them to a print
-service.
+`cargo install --path crates/fushion --no-default-features`.
+
+Every custom brick has fused studs, after the "v2" stud Slant 3D showed in *We
+Made a Better LEGO (For 3D Printing)*, reshaped to fit standard bricks (8 mm
+pitch, Ø4.8 mm studs, 0.1 mm side clearance). Each row's studs are joined in
+pairs. An odd run of three or more gets one triple (three lobes and two waists)
+as near the middle of the row as its parity allows: 3 is T, 5 is P+T, 7 is
+P+T+P, 9 is P+P+T+P. Each end lobe carries a leaf-spring fin, cut free by a
+0.5 mm hooked slot and a pocket under it, which presses 0.15 mm on the receiving
+brick's wall. A triple's middle lobe has no fin: on both sides it is the plain
+Ø4.8 mm stud circle, joined to the waists by 0.5 mm rounds. Each lobe is the stud
+circle on its inner side, tangent to the tubes like a normal stud. The 1.39 mm
+waists clear the tubes beside them by 0.05 mm, and a fin never touches a tube.
+A middle row with neighbours on both sides (a 3-wide brick) is fused the same
+way, without fins. A stud can't stand alone, so a 1×1 or a 1-wide slope is
+refused rather than given a round stud.
+
+Because studs are fused, a brick pushed on must not end, or run its side wall,
+between the studs of a pair or triple: its wall would land on a waist. 1-wide
+parts have no pins; the fins of the brick below grip their walls. The profile has
+a 1.4 mm top, a centre rib through every second tube of 2-wide bricks, a 0.2 mm
+bottom chamfer against elephant's foot, and 0.4 mm rounded vertical edges. With
+`wall_ribs` on, ribs go only on the end walls: two per stud, centred 1.7 mm
+either side of it. The long walls are left to the fins. Off-centre, a rib meets a
+turned brick's fin about as a round stud would, at most 0.06 mm against a
+0.45 mm flex; a centred rib would take 0.50 mm.
+Print the files yourself or upload them to a print service.
 
 ## Workspace
 

@@ -11,16 +11,20 @@
 //!    tube that reaches above the hollow's ceiling lies in solid material and adds nothing.
 //! 5. **Ribs** (2-wide boxes): a cross-wall through every second tube.
 //! 6. **Chamfer**: the bottom outer edges (straight and rounded) and tube bottoms.
-//! 7. **WallRibs** and **RibLeadIns** (with [`wall_ribs`](StudProfile::wall_ribs)): a thin rib
-//!    on the inner face of every wall at each stud position, then a lead-in chamfer on each
-//!    rib's lower inner edge.
-//! 8. **Pockets** (Slant v2 studs): a pocket in the top under each fin.
-//! 9. **Studs** on top; for Slant v2 studs, then **Slots** that cut the fins free.
+//! 7. **WallRibs** and **RibLeadIns** (with [`wall_ribs`](StudProfile::wall_ribs)): thin ribs
+//!    on the inner faces of the walls (every wall at each stud for round studs, the end walls
+//!    either side of each stud for fused ones), then a lead-in chamfer on each rib's lower
+//!    inner edge.
+//! 8. **Pockets** (fused studs): a pocket in the top under each fin.
+//! 9. **Studs** on top (fused studs: pairs and triples); then **Slots** that cut the fins
+//!    free.
 //! 10. **Roof** (slopes and curves only): the wedge above the slope cut away (less the bits of
 //!     it the rounded front corners had already taken).
 
-use crate::geom::{Loop, Seg};
-use crate::profile::{RIB_GAP, RIB_THICKNESS, StudProfile, StudStyle, WALL_RIB_WIDTH};
+use crate::geom::{self, Loop, Seg};
+use crate::profile::{
+    FUSED_RIB_OFFSET, RIB_GAP, RIB_THICKNESS, StudProfile, StudStyle, WALL_RIB_WIDTH,
+};
 use crate::shape::{CustomShape, Footprint, P2, signed_area};
 use crate::slant::{self, Lobe};
 use crate::{CustomError, MAX_PART_MM, Result};
@@ -478,7 +482,7 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
     }
 
     if p.wall_ribs {
-        wall_ribs(&mut b, p, &cells, hollow_h, roof.as_ref());
+        wall_ribs(&mut b, p, &cells, &studs, hollow_h, roof.as_ref())?;
     }
 
     let rs = p.stud_diameter / 2.0;
@@ -502,11 +506,8 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
         }
         StudStyle::SlantV2 { .. } => {
             let lobe = Lobe::new(p)?;
-            let (peanuts, round) = slant::layout(&cells, &studs);
-            let lobes: Vec<_> = peanuts
-                .iter()
-                .flat_map(|q| q.lobe_frames(p.pitch))
-                .collect();
+            let units = slant::layout(&cells, &studs)?;
+            let lobes: Vec<_> = units.iter().flat_map(|q| q.lobe_frames(p.pitch)).collect();
             if !lobes.is_empty() {
                 // Pockets first, into the bare top, so nothing above them is cut.
                 let mut c = vec![sketch("PocketSketch", "XY", h - lobe.pocket_depth)];
@@ -527,18 +528,15 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
                 );
             }
             let mut c = vec![sketch("StudSketch", "XY", h)];
-            for q in &peanuts {
-                c.extend(loop_commands(&q.frame(p.pitch).map_loop(&lobe.peanut)));
+            let mut area = 0.0;
+            for q in &units {
+                let outline = lobe.outline(q.n, q.fin.is_some());
+                c.extend(loop_commands(&q.frame(p.pitch).map_loop(outline)));
+                area += geom::area(outline);
             }
-            c.extend(round.iter().map(|q| circle(centre(q), p.stud_diameter)));
             c.push(finish());
             c.push(extrude("StudSketch", "Studs", p.stud_height, "join"));
-            b.stage(
-                "Studs",
-                c,
-                (lobe.peanut_area() * peanuts.len() as f64 + PI * rs * rs * round.len() as f64)
-                    * p.stud_height,
-            );
+            b.stage("Studs", c, area * p.stud_height);
             if !lobes.is_empty() {
                 let mut c = vec![sketch("SlotSketch", "XY", h - lobe.groove)];
                 for f in &lobes {
@@ -638,96 +636,171 @@ fn chamfer_loop_volume(l: &[P2], c: f64, r: f64) -> f64 {
     perimeter * c * c / 2.0 - k_sum * c * c * c / 3.0
 }
 
-/// Wall ribs: on the inner face of the wall along every edge of a cell that has no
-/// neighbour, a rib [`WALL_RIB_WIDTH`] wide centred on the cell's stud, so a stud pushed in
-/// from below meets it square on. Each rib stands [`StudProfile::wall_rib_protrusion`] proud
-/// of the face, from the floor into the top (embedded half a wall deep in the wall and
-/// [`WALL_RIB_TOP_EMBED`] into the top). Every rib lies on a straight run of wall: a cell
-/// edge's middle is at least `pitch/2 − clearance − wall` from any corner of the hollow, so
-/// on footprints ribs keep clear of convex and concave corners alike. Under a slope's roof a
-/// rib is left out where the hollow's ceiling over it is lower than a stud, which could not
-/// reach it.
-fn wall_ribs(
-    b: &mut Builder,
+/// One wall rib: the rectangle it stands on (from half-way into the wall to its face), the
+/// unit normal of its face (into the hollow), the middle of its lower inner edge, and how
+/// far it stands proud of the wall.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RibSite {
+    pub lo: P2,
+    pub hi: P2,
+    pub n: P2,
+    pub edge: P2,
+    pub proud: f64,
+}
+
+impl RibSite {
+    /// The protruding part's extent along Y (the only direction a roof's ceiling varies).
+    fn y_span(&self) -> (f64, f64) {
+        if self.n[1] > 0.0 {
+            (self.edge[1] - self.proud, self.edge[1])
+        } else if self.n[1] < 0.0 {
+            (self.edge[1], self.edge[1] + self.proud)
+        } else {
+            (self.lo[1], self.hi[1])
+        }
+    }
+
+    /// The protruding part's width across Y.
+    fn x_width(&self) -> f64 {
+        if self.n[1] == 0.0 {
+            self.proud
+        } else {
+            WALL_RIB_WIDTH
+        }
+    }
+}
+
+/// Where the wall ribs of a part made of `cells` go, by its stud style.
+///
+/// * **Round studs** (LEGO's layout): on the inner face of the wall along every edge of a
+///   cell that has no neighbour, one rib centred on the cell's stud, so a stud pushed in
+///   from below meets it square on.
+/// * **Fused studs**: only on the **end walls**, the cell edges whose normal runs along the
+///   rows (see [`slant::layout`]), so no rib stands on the long walls the fins of a brick
+///   below press. A fused brick below turned 90° puts its fins against the end walls, so the
+///   ribs keep off the stud centre line, where the fins reach past the stud circle: two per
+///   cell edge, centred [`FUSED_RIB_OFFSET`] either side of it, where the fin side of a lobe
+///   is within about 0.01 mm of the stud circle. See
+///   [`StudProfile::wall_rib_protrusion`] for how proud they stand.
+///
+/// Every rib lies on a straight run of wall: a cell edge's middle is at least
+/// `pitch/2 − clearance − wall` (2.7 mm) from any corner of the hollow, more than a rib
+/// reaches from it, so on footprints ribs keep clear of convex and concave corners alike.
+pub(crate) fn wall_rib_sites(
     p: &StudProfile,
     cells: &BTreeSet<(i32, i32)>,
-    hollow_h: f64,
-    roof: Option<&Roof>,
-) {
+    studs: &[(i32, i32)],
+) -> Result<Vec<RibSite>> {
     let t = p.wall_rib_protrusion();
-    let lead = p.wall_rib_lead_in();
     let hw = WALL_RIB_WIDTH / 2.0;
     let face = p.clearance + p.wall;
     let back = p.clearance + p.wall / 2.0;
-    let ceil = |y: f64| roof.map_or(hollow_h, |r| r.ceiling(p, y).clamp(0.0, hollow_h));
-    let mut sk = vec![sketch("WallRibSketch", "XY", 0.0)];
-    let mut picks = Vec::new();
-    let (mut added, mut count) = (0.0, 0usize);
+    // Offsets of the ribs along each cell edge, and which edges get them (normal along X,
+    // along Y).
+    let (offsets, edges): (Vec<f64>, [bool; 2]) = match p.stud_style {
+        StudStyle::Solid => (vec![0.0], [true, true]),
+        StudStyle::SlantV2 { .. } => {
+            let along_y = slant::layout(cells, studs)?
+                .first()
+                .is_none_or(|u| u.step == (0, 1));
+            (
+                vec![-FUSED_RIB_OFFSET, FUSED_RIB_OFFSET],
+                [!along_y, along_y],
+            )
+        }
+    };
+    let mut out = Vec::new();
     for &(i, j) in cells {
         let (x0, y0) = (f64::from(i) * p.pitch, f64::from(j) * p.pitch);
         let (xc, yc) = (x0 + p.pitch / 2.0, y0 + p.pitch / 2.0);
         let (x1, y1) = (x0 + p.pitch, y0 + p.pitch);
-        // (neighbour, rib rectangle, middle of its lower inner edge, protrusion along Y?)
-        let sides = [
-            (
-                (i - 1, j),
-                [x0 + back, yc - hw],
-                [x0 + face + t, yc + hw],
-                [x0 + face + t, yc],
-                false,
-            ),
-            (
-                (i + 1, j),
-                [x1 - face - t, yc - hw],
-                [x1 - back, yc + hw],
-                [x1 - face - t, yc],
-                false,
-            ),
-            (
-                (i, j - 1),
-                [xc - hw, y0 + back],
-                [xc + hw, y0 + face + t],
-                [xc, y0 + face + t],
-                true,
-            ),
-            (
-                (i, j + 1),
-                [xc - hw, y1 - face - t],
-                [xc + hw, y1 - back],
-                [xc, y1 - face - t],
-                true,
-            ),
-        ];
-        for (n, lo, hi, edge, along_y) in sides {
-            if cells.contains(&n) {
-                continue;
-            }
-            // The protruding part's footprint in Y (the ceiling only varies along Y).
-            let (ya, yb) = if along_y {
-                if n.1 < j {
-                    (y0 + face, y0 + face + t)
-                } else {
-                    (y1 - face - t, y1 - face)
+        for o in &offsets {
+            let (xo, yo) = (xc + o, yc + o);
+            // (neighbour, rib rectangle, unit normal, middle of its lower inner edge, normal
+            // along Y?)
+            let sides = [
+                (
+                    (i - 1, j),
+                    [x0 + back, yo - hw],
+                    [x0 + face + t, yo + hw],
+                    [1.0, 0.0],
+                    [x0 + face + t, yo],
+                ),
+                (
+                    (i + 1, j),
+                    [x1 - face - t, yo - hw],
+                    [x1 - back, yo + hw],
+                    [-1.0, 0.0],
+                    [x1 - face - t, yo],
+                ),
+                (
+                    (i, j - 1),
+                    [xo - hw, y0 + back],
+                    [xo + hw, y0 + face + t],
+                    [0.0, 1.0],
+                    [xo, y0 + face + t],
+                ),
+                (
+                    (i, j + 1),
+                    [xo - hw, y1 - face - t],
+                    [xo + hw, y1 - back],
+                    [0.0, -1.0],
+                    [xo, y1 - face - t],
+                ),
+            ];
+            for (nb, lo, hi, n, edge) in sides {
+                let along_y = n[1] != 0.0;
+                if cells.contains(&nb) || !edges[usize::from(along_y)] {
+                    continue;
                 }
-            } else {
-                (yc - hw, yc + hw)
-            };
-            let across = if along_y { WALL_RIB_WIDTH } else { t };
-            let low = ceil(ya).min(ceil(yb)).min(ceil((ya + yb) / 2.0));
-            if low < p.stud_height {
-                continue;
+                out.push(RibSite {
+                    lo,
+                    hi,
+                    n,
+                    edge,
+                    proud: t,
+                });
             }
-            sk.push(cmd(
-                "sketch.rectangle.two_point",
-                json!({"p0": [round6(lo[0]), round6(lo[1])], "p1": [round6(hi[0]), round6(hi[1])]}),
-            ));
-            picks.push(json!([round6(edge[0]), round6(edge[1]), 0.0]));
-            added += across * simpson(&ceil, ya, yb, 2000);
-            count += 1;
         }
     }
+    Ok(out)
+}
+
+/// Wall ribs (see [`wall_rib_sites`] for where): each stands
+/// [`StudProfile::wall_rib_protrusion`] proud of the face, [`WALL_RIB_WIDTH`] wide, from the
+/// floor into the top (embedded half a wall deep in the wall and [`WALL_RIB_TOP_EMBED`] into
+/// the top), with a lead-in chamfer on its lower inner edge. Under a slope's roof a rib is
+/// left out where the hollow's ceiling over it is lower than a stud, which could not reach
+/// it.
+fn wall_ribs(
+    b: &mut Builder,
+    p: &StudProfile,
+    cells: &BTreeSet<(i32, i32)>,
+    studs: &[(i32, i32)],
+    hollow_h: f64,
+    roof: Option<&Roof>,
+) -> Result<()> {
+    let lead = p.wall_rib_lead_in();
+    let ceil = |y: f64| roof.map_or(hollow_h, |r| r.ceiling(p, y).clamp(0.0, hollow_h));
+    let mut sk = vec![sketch("WallRibSketch", "XY", 0.0)];
+    let mut picks = Vec::new();
+    let (mut added, mut count) = (0.0, 0usize);
+    for site in wall_rib_sites(p, cells, studs)? {
+        let (ya, yb) = site.y_span();
+        let low = ceil(ya).min(ceil(yb)).min(ceil((ya + yb) / 2.0));
+        if low < p.stud_height {
+            continue;
+        }
+        sk.push(cmd(
+            "sketch.rectangle.two_point",
+            json!({"p0": [round6(site.lo[0]), round6(site.lo[1])], "p1": [round6(site.hi[0]), round6(site.hi[1])]}),
+        ));
+        picks.push(json!([round6(site.edge[0]), round6(site.edge[1]), 0.0]));
+        added += site.x_width() * simpson(&ceil, ya, yb, 2000);
+        count += 1;
+    }
     if count == 0 {
-        return;
+        return Ok(());
     }
     sk.push(finish());
     sk.push(extrude(
@@ -745,6 +818,7 @@ fn wall_ribs(
         )],
         -(lead * lead / 2.0) * WALL_RIB_WIDTH * count as f64,
     );
+    Ok(())
 }
 
 /// Centre ribs under a 2-wide box: one through every second tube along the long side.

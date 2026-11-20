@@ -75,7 +75,7 @@ enum Cmd {
         #[arg(long)]
         session: Option<PathBuf>,
     },
-    /// Make a custom 3D-printable part (STL + 3MF), e.g.
+    /// Make a custom 3D-printable part (STL + 3MF) with fused studs, e.g.
     /// `fushion custom '{"kind":"slope45","w":2,"d":3,"plates":3}' --out parts`.
     Custom {
         /// The part as JSON: kind box | slope45 | curve | footprint (see `fushion guide`).
@@ -84,8 +84,8 @@ enum Cmd {
         out: PathBuf,
         #[arg(long, default_value = "custom-part")]
         name: String,
-        /// Use the experimental compliant stud.
-        #[arg(long)]
+        /// Accepted and ignored: every custom part now has fused studs.
+        #[arg(long, hide = true)]
         compliant_stud: bool,
     },
     /// Print the spec guide.
@@ -102,6 +102,9 @@ fn main() -> Result<()> {
     match cli.cmd.unwrap_or(Cmd::Gui { session: None, screenshot: None }) {
         Cmd::Gui { session, screenshot } => gui::run_with(gui::GuiOptions { session, screenshot }),
         Cmd::Custom { shape, out, name, compliant_stud } => {
+            if compliant_stud {
+                eprintln!("note: --compliant-stud is no longer needed; every custom part has fused studs");
+            }
             let shape: serde_json::Value = serde_json::from_str(&shape).context("the shape must be JSON")?;
             let made = sf_agent::custom::make_part(&shape, compliant_stud, &out, &name)?;
             println!("{} ({:.0} mm³)\n{}", made.stl.display(), made.volume_mm3, made.three_mf.display());

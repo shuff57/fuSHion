@@ -15,8 +15,12 @@ pub enum StudStyle {
     /// and a leaf-spring fin is cut out of each lobe on the outer side. The fin is split from
     /// the stud by a narrow slot that hooks out through the lobe's outer edge, and a pocket in
     /// the brick's top frees its underside, so it hangs from its root near the waist and
-    /// presses on the receiving brick's wall with a steady force. A stud left over at the end
-    /// of a row (or on an inner row) stays a plain round [`StudProfile::stud_diameter`] stud.
+    /// presses on the receiving brick's wall with a steady force. Every stud is fused: an
+    /// odd run of three or more studs gets one **triple** (three lobes, two waists, fins on
+    /// the two end lobes; the middle lobe is the plain stud circle on both sides), placed as
+    /// near the middle of the run as its parity allows. A row with neighbours on both sides
+    /// (the middle row of a 3-wide brick) is fused the same way but has no fins. A stud that
+    /// would stand alone in its row (a 1×1) cannot be made: the part is refused.
     ///
     /// The outline is made of tangent arcs only. In each lobe's own frame (origin at the lobe
     /// centre, `u` toward the fin side, `v` away from the waist):
@@ -106,13 +110,16 @@ pub struct StudProfile {
     /// (0 for none).
     #[serde(default = "default_chamfer")]
     pub bottom_chamfer: f64,
-    /// Thin vertical ribs on the inner faces of the walls, one at each stud position along
-    /// every wall (centred where a stud of a brick pushed in from below meets the wall), as on
-    /// LEGO's own bricks. Each stands [`StudProfile::wall_rib_protrusion`] proud of the wall,
-    /// [`WALL_RIB_WIDTH`] wide, from the bottom edge (with a [`StudProfile::wall_rib_lead_in`]
-    /// lead-in) up into the top. Off by default: Slant 3D dropped them as too fine a
-    /// tolerance for FDM. They are sized for standard round studs: the fins of a Slant v2
-    /// stud pushed in under them would press about 0.5 mm into a rib, past their slot's flex.
+    /// Thin vertical ribs on the inner faces of the walls that grip the studs of a brick
+    /// pushed in from below. With round studs, one at each stud position along every wall
+    /// (centred where a stud meets the wall), as on LEGO's own bricks. With fused studs, only
+    /// on the end walls (whose normal runs along the rows), two per stud position centred
+    /// [`FUSED_RIB_OFFSET`] either side of it: the long walls are left to the fins of the
+    /// brick below, and a fin turned toward an end wall (a fused brick below turned 90°)
+    /// meets an off-centre rib as a round stud would. Each stands
+    /// [`StudProfile::wall_rib_protrusion`] proud of the wall, [`WALL_RIB_WIDTH`] wide, from
+    /// the bottom edge (with a [`StudProfile::wall_rib_lead_in`] lead-in) up into the top.
+    /// Off by default: Slant 3D dropped them as too fine a tolerance for FDM.
     #[serde(default)]
     pub wall_ribs: bool,
     /// How far each wall rib presses into a standard stud pushed in from below, in mm.
@@ -136,6 +143,11 @@ pub const WALL_RIB_WIDTH: f64 = 0.6;
 /// Largest lead-in chamfer on a wall rib's lower inner edge, in mm (it is at most ⅔ of the
 /// rib's protrusion).
 pub const WALL_RIB_LEAD_IN: f64 = 0.2;
+/// How far a fused-stud brick's end-wall ribs are centred either side of a stud's centre
+/// line, in mm. Over a rib there (1.4–2.0 mm off the centre line) the fin side of a lobe is
+/// within about 0.01 mm of the stud circle, so a fin turned toward the rib meets it as a
+/// round stud would; at the centre line a fin reaches 0.45 mm past the circle.
+pub const FUSED_RIB_OFFSET: f64 = 1.7;
 
 fn yes() -> bool {
     true
@@ -150,16 +162,19 @@ fn default_rib_interference() -> f64 {
 }
 
 impl Default for StudProfile {
+    /// The fused profile, [`StudProfile::fused`]: the one every user-facing path builds.
     fn default() -> Self {
-        Self::standard_fdm()
+        Self::fused()
     }
 }
 
 impl StudProfile {
-    /// The dimensions Slant 3D's online brick generator uses for FDM prints (read from its
-    /// client-side code): pitch 8.0 mm, 0.1 mm inset per side, studs Ø4.8 × 1.8 mm, plate
+    /// A standard brick with plain round studs: the dimensions Slant 3D's online brick
+    /// generator uses for FDM prints (read from its client-side code): pitch 8.0 mm, 0.1 mm inset per side, studs Ø4.8 × 1.8 mm, plate
     /// 3.2 mm (brick 9.6 mm), top 1.0 mm, walls 1.2 mm, tubes Ø6.51 / Ø4.8 mm. Like Slant's
-    /// v2 brick, it also has centre ribs and a 0.2 mm bottom chamfer.
+    /// v2 brick, it also has centre ribs and a 0.2 mm bottom chamfer. fuSHion no longer makes
+    /// these (it makes [`StudProfile::fused`] bricks); the fit checks use this profile as the
+    /// model of a standard brick pushed onto or under a fused one.
     pub fn standard_fdm() -> Self {
         Self {
             pitch: 8.0,
@@ -208,6 +223,16 @@ impl StudProfile {
         }
     }
 
+    /// **The profile fuSHion builds its custom bricks with.** Fused studs only (pairs and
+    /// triples, see [`StudStyle::SlantV2`]), as [`StudProfile::slant_v2_experimental`], with
+    /// the vertical outside edges rounded to 0.4 mm. Centre ribs are on; wall ribs are off.
+    pub fn fused() -> Self {
+        Self {
+            edge_radius: 0.4,
+            ..Self::slant_v2_experimental()
+        }
+    }
+
     /// The old name of [`StudProfile::slant_v2_experimental`].
     #[deprecated(note = "renamed to `slant_v2_experimental`")]
     pub fn compliant_v2_experimental() -> Self {
@@ -215,11 +240,22 @@ impl StudProfile {
     }
 
     /// How far a wall rib stands proud of the wall's inner face, in mm: from the inner face
-    /// (`pitch / 2 − clearance − wall` from a stud centre) to the surface of a standard
-    /// `stud_diameter` stud, plus [`StudProfile::wall_rib_interference`].
+    /// (`pitch / 2 − clearance − wall` from a stud centre) to the surface of a
+    /// `stud_diameter` stud pushed in from below, plus
+    /// [`StudProfile::wall_rib_interference`]. With round studs the rib is centred on the
+    /// stud (0.35 mm for the standard numbers); with fused studs it is centred
+    /// [`FUSED_RIB_OFFSET`] off it, so it meets the stud circle at its inner edge,
+    /// `FUSED_RIB_OFFSET − WALL_RIB_WIDTH / 2` off the centre line (0.801 mm).
     pub fn wall_rib_protrusion(&self) -> f64 {
-        self.pitch / 2.0 - self.clearance - self.wall - self.stud_diameter / 2.0
-            + self.wall_rib_interference
+        let r = self.stud_diameter / 2.0;
+        let reach = match self.stud_style {
+            StudStyle::Solid => r,
+            StudStyle::SlantV2 { .. } => {
+                let s = FUSED_RIB_OFFSET - WALL_RIB_WIDTH / 2.0;
+                (r * r - s * s).max(0.0).sqrt()
+            }
+        };
+        self.pitch / 2.0 - self.clearance - self.wall - reach + self.wall_rib_interference
     }
 
     /// The lead-in chamfer on a wall rib's lower inner edge, in mm.

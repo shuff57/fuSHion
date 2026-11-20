@@ -50,7 +50,8 @@ pub struct CustomParams {
     pub shape: serde_json::Value,
     /// File name for the part (without extension).
     pub name: String,
-    /// Use the experimental compliant stud instead of the standard FDM stud.
+    /// Deprecated and ignored: every custom part has fused studs. Accepted so older calls
+    /// still work.
     #[serde(default)]
     pub compliant_stud: bool,
 }
@@ -148,7 +149,7 @@ impl Fushion {
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
-    #[tool(description = "Design a custom 3D-printable LEGO-compatible part from a template (box, 45° slope, curved slope, or any footprint of studs). Writes STL and 3MF (mm) into the session's custom folder. Use it for parts the report lists as custom part candidates.")]
+    #[tool(description = "Design a custom 3D-printable LEGO-compatible part from a template (box, 45° slope, curved slope, or any footprint of studs). Every part has fused studs: each row's studs are joined in pairs, plus one triple for an odd run, with leaf-spring fins that grip, so a part can't have a stud alone in its row (no 1x1; a 1-wide slope is refused). Bricks pushed onto it must start and end on a pair or triple, never between its studs. Writes STL and 3MF (mm) into the session's custom folder. Use it for parts the report lists as custom part candidates.")]
     async fn make_custom_part(&self, Parameters(p): Parameters<CustomParams>) -> Result<CallToolResult, McpError> {
         match self.with_session(move |s| s.make_custom_part(&p.shape, p.compliant_stud, &p.name)).await {
             Ok(m) => Ok(CallToolResult::success(vec![ContentBlock::text(format!(

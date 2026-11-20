@@ -66,6 +66,16 @@ impl Seg {
         }
     }
 
+    /// Length of the segment.
+    pub fn length(&self) -> f64 {
+        match *self {
+            Self::Line { a, b } => len(sub(b, a)),
+            Self::Arc { .. } => self
+                .arc_params()
+                .map_or(0.0, |(_, r, _, sweep)| r * sweep.abs()),
+        }
+    }
+
     /// The same segment run the other way.
     pub fn reversed(&self) -> Self {
         match *self {

@@ -60,8 +60,10 @@ mod imp {
     use sf_core::Shape;
     use sf_custom::{CustomShape, StudProfile};
 
-    pub(super) fn profile(v2: bool) -> StudProfile {
-        if v2 { StudProfile::slant_v2_experimental() } else { StudProfile::standard_fdm() }
+    /// Every custom part is made with the fused-stud profile (pairs and triples with
+    /// leaf-spring fins, r 0.4 mm vertical edges); plain round studs are not offered.
+    pub(super) fn profile() -> StudProfile {
+        StudProfile::fused()
     }
 
     /// The printable equivalent of a catalog part, if there is one.
@@ -87,10 +89,10 @@ mod imp {
         Ok(MadePart { stl, three_mf, volume_mm3: part.volume_mm3 })
     }
 
-    pub(super) fn make(shape: &Value, v2: bool, out: &Path, name: &str) -> Result<MadePart> {
+    pub(super) fn make(shape: &Value, out: &Path, name: &str) -> Result<MadePart> {
         let shape: CustomShape = serde_json::from_value(shape.clone())
             .context("`shape` must be {\"kind\": \"box\"|\"slope45\"|\"curve\"|\"footprint\", ...}")?;
-        let part = sf_custom::build(&shape, &profile(v2)).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let part = sf_custom::build(&shape, &profile()).map_err(|e| anyhow::anyhow!("{e}"))?;
         write(&part, out, name)
     }
 
@@ -110,7 +112,15 @@ mod imp {
                 continue;
             };
             let name = format!("{}-{}", n.part, slug(&colour));
-            let part = sf_custom::build(&shape, &profile(false)).map_err(|e| anyhow::anyhow!("{} in {colour}: {e}", n.part))?;
+            // A part whose studs can't all be fused (a 1×1, say) is noted, not made round.
+            let part = match sf_custom::build(&shape, &profile()) {
+                Ok(part) => part,
+                Err(sf_custom::CustomError::InvalidShape(why)) => {
+                    notes.push(format!("{} in {colour}: can't be printed with fused studs ({why}); order it or change the colour", n.part));
+                    continue;
+                }
+                Err(e) => anyhow::bail!("{} in {colour}: {e}", n.part),
+            };
             let made = write(&part, out, &name)?;
             csv.push_str(&format!(
                 "{},{},{},{},{},{:.1}\n",
@@ -141,7 +151,7 @@ mod imp {
 mod imp {
     use super::*;
     const OFF: &str = "this fushion was built without custom bricks (the `custom-bricks` feature)";
-    pub(super) fn make(_: &Value, _: bool, _: &Path, _: &str) -> Result<MadePart> {
+    pub(super) fn make(_: &Value, _: &Path, _: &str) -> Result<MadePart> {
         anyhow::bail!(OFF)
     }
     pub(super) fn from_commands(_: &Value, _: &Path, _: &str) -> Result<MadePart> {
@@ -153,10 +163,12 @@ mod imp {
 }
 
 /// Generate a parametric custom part. `shape` is an `sf_custom::CustomShape`
-/// as JSON, e.g. `{"kind":"slope45","w":2,"d":3,"plates":3}`. `v2` selects
-/// the experimental compliant stud.
-pub fn make_part(shape: &Value, v2: bool, out: &Path, name: &str) -> Result<MadePart> {
-    imp::make(shape, v2, out, &slug(name))
+/// as JSON, e.g. `{"kind":"slope45","w":2,"d":3,"plates":3}`. Every part gets
+/// fused studs (`sf_custom::StudProfile::fused`); `_compliant_stud` is
+/// accepted for old callers and ignored. A part with a stud that can't be
+/// fused (a 1×1) is an error.
+pub fn make_part(shape: &Value, _compliant_stud: bool, out: &Path, name: &str) -> Result<MadePart> {
+    imp::make(shape, out, &slug(name))
 }
 
 /// Generate a freeform part from a SolidCraft command batch.

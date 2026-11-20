@@ -5,16 +5,19 @@
 //! [SolidCraft](https://github.com/tangency-labs/solidcraft) B-rep engine, in process, by
 //! sending it the same JSON command batches its MCP server accepts.
 //!
-//! * [`StudProfile`]: the connector dimensions (Slant 3D's FDM numbers by default, or the
-//!   experimental Slant 3D "v2" peanut stud with leaf-spring fins).
+//! * [`StudProfile`]: the connector dimensions. fuSHion builds [`StudProfile::fused`]: Slant
+//!   3D's "v2" stud reshaped to fit standard bricks, every stud fused into a pair or a triple
+//!   with leaf-spring fins, and 0.4 mm rounded vertical edges. [`StudProfile::standard_fdm`]
+//!   (Slant 3D's plain FDM brick) stays as the model of a standard brick for fit checks.
 //! * [`CustomShape`]: a brick or plate, a 45° slope, a curved slope or any footprint of cells.
 //! * [`commands`]: the SolidCraft batch for a shape, with an `expect` check computed by hand.
 //! * [`build`]: runs that batch, checks every stage's volume against its closed form, and
 //!   exports STL and 3MF.
 //! * [`build_from_commands`]: the same safety for a freeform batch (one Claude wrote).
 //! * [`fit`]: where a brick pushed onto a box part meets its studs, in plane geometry (no
-//!   SolidCraft): clearances, and how far Slant v2 fins press; [`fit_below`] the same for the
-//!   part pushed onto a brick below, where its wall ribs grip that brick's studs.
+//!   SolidCraft): clearances, and how far fins press; [`fit_under`] the same with the brick
+//!   on top made with a profile of its own (wall ribs and all); [`fit_below`] the part pushed
+//!   onto a brick below, where its walls and wall ribs meet that brick's studs and fins.
 //!
 //! All lengths are millimetres; the part stands on `z = 0` with its studs pointing up (+Z).
 
@@ -29,12 +32,12 @@ mod run;
 mod shape;
 mod slant;
 
-pub use fit::{FitReport, SlantOutline, TopBrick, fit, fit_below, slant_outline};
+pub use fit::{FitReport, SlantOutline, TopBrick, fit, fit_below, fit_under, slant_outline};
 pub use mesh::{MeshReport, analyze_stl};
 pub use plan::{BBOX_TOL_MM, Plan, Stage, VOLUME_TOL, plan};
 pub use profile::{
-    MIN_FIN_SECTION, MIN_POCKET_FLOOR, RIB_GAP, RIB_THICKNESS, SLANT_CAP, StudProfile, StudStyle,
-    WALL_RIB_LEAD_IN, WALL_RIB_WIDTH,
+    FUSED_RIB_OFFSET, MIN_FIN_SECTION, MIN_POCKET_FLOOR, RIB_GAP, RIB_THICKNESS, SLANT_CAP,
+    StudProfile, StudStyle, WALL_RIB_LEAD_IN, WALL_RIB_WIDTH,
 };
 pub use run::{MAX_COMMANDS, build, build_from_commands, build_plan};
 pub use shape::CustomShape;

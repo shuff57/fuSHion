@@ -3,27 +3,32 @@
 //! A brick pushed on reaches the studs with its walls (a ring between its outline, pulled in
 //! by the clearance, and the hollow) and its tubes (rings at the inner corners of its stud
 //! grid). Its centre ribs start [`RIB_GAP`](crate::RIB_GAP) above its floor, above the studs,
-//! so they never meet them. Each stud's top outline (a peanut less its slots, or a circle) is
-//! sampled every few microns and every sample's signed distance to that material is taken:
-//! positive is clearance, negative is overlap. Samples on a Slant v2 fin (over its pocket,
+//! so they never meet them. Each stud's top outline (a fused pair or triple less its slots, or a
+//! circle) is sampled every few microns and every sample's signed distance to that material
+//! is taken: positive is clearance, negative is overlap. Samples on a fin (over its pocket,
 //! past the slot's end) are counted apart from the rest: a fin may press into a wall or a
 //! tube, the rest may not. The deepest line of every wall and tube is also tested for lying
 //! inside a stud, which catches a wall that crosses a stud outright.
 //!
-//! [`fit`] checks a plain brick (no wall ribs) pushed onto the part's studs. [`fit_below`]
-//! turns it round: the part, with its wall ribs when its profile has them, pushed onto a box
-//! brick below, whose studs meet the part's walls, tubes and ribs.
+//! [`fit`] checks a plain brick (no wall ribs) pushed onto the part's studs, [`fit_under`] a
+//! brick with a profile of its own (a fused brick with wall ribs, say). [`fit_below`] turns
+//! it round: the part, with its wall ribs when its profile has them, pushed onto a box brick
+//! below, whose studs (round, or fused with fins) meet the part's walls, tubes and ribs.
+//! Every stud is fused or every stud is round: a fused brick has no round studs.
 
 use crate::geom::{self, Frame, Loop, Seg};
-use crate::profile::{StudProfile, StudStyle, WALL_RIB_WIDTH};
+use crate::plan;
+use crate::profile::{StudProfile, StudStyle};
 use crate::shape::{CustomShape, P2};
 use crate::slant::{self, Lobe};
 use crate::{CustomError, Result};
 use std::collections::BTreeSet;
 use std::f64::consts::TAU;
 
-/// Samples per outline segment.
-const SAMPLES: usize = 6000;
+/// Samples around a round stud.
+const SAMPLES: usize = 24000;
+/// Spacing of the samples along a fused stud's outline, in mm.
+const SPACING: f64 = 0.001;
 
 /// A brick pushed onto a part: `w × d` studs, its stud cell `(0, 0)` over the part's cell
 /// `at`.
@@ -81,10 +86,12 @@ enum Region {
         c: P2,
         r: f64,
     },
-    Peanut {
-        peanut: Loop,
-        slots: [Loop; 2],
-        lobes: [Frame; 2],
+    /// A unit of fused studs: its outline, and the slots and frames of its finned lobes
+    /// (none for a finless unit).
+    Fused {
+        outline: Loop,
+        slots: Vec<Loop>,
+        lobes: Vec<Frame>,
     },
 }
 
@@ -96,8 +103,9 @@ fn local(f: &Frame, p: P2) -> P2 {
 
 fn sample(l: &[Seg], keep: impl Fn(P2) -> bool, out: &mut Vec<P2>) {
     for s in l {
-        for k in 0..SAMPLES {
-            let p = s.at(k as f64 / SAMPLES as f64);
+        let n = ((s.length() / SPACING).ceil() as usize).max(64);
+        for k in 0..n {
+            let p = s.at(k as f64 / n as f64);
             if keep(p) {
                 out.push(p);
             }
@@ -107,7 +115,7 @@ fn sample(l: &[Seg], keep: impl Fn(P2) -> bool, out: &mut Vec<P2>) {
 
 impl Stud {
     fn round(c: P2, r: f64) -> Self {
-        let n = 4 * SAMPLES;
+        let n = SAMPLES;
         let samples = (0..n)
             .map(|k| {
                 let t = TAU * k as f64 / n as f64;
@@ -120,22 +128,28 @@ impl Stud {
         }
     }
 
-    fn peanut(lobe: &Lobe, q: &slant::Peanut, pitch: f64) -> Self {
-        let peanut = q.frame(pitch).map_loop(&lobe.peanut);
+    fn fused(lobe: &Lobe, q: &slant::Unit, pitch: f64) -> Self {
+        let outline = q.frame(pitch).map_loop(lobe.outline(q.n, q.fin.is_some()));
         let lobes = q.lobe_frames(pitch);
-        let slots = [lobes[0].map_loop(&lobe.slot), lobes[1].map_loop(&lobe.slot)];
+        let slots: Vec<Loop> = lobes.iter().map(|f| f.map_loop(&lobe.slot)).collect();
         let in_slot = |p: P2| slots.iter().any(|s| geom::contains(s, p));
         let mut pts = Vec::new();
-        sample(&peanut, |p| !in_slot(p), &mut pts);
+        sample(&outline, |p| !in_slot(p), &mut pts);
         for (k, s) in slots.iter().enumerate() {
             sample(
                 s,
-                |p| geom::contains(&peanut, p) && !geom::contains(&slots[1 - k], p),
+                |p| {
+                    geom::contains(&outline, p)
+                        && !slots
+                            .iter()
+                            .enumerate()
+                            .any(|(i, o)| i != k && geom::contains(o, p))
+                },
                 &mut pts,
             );
         }
-        let region = Region::Peanut {
-            peanut,
+        let region = Region::Fused {
+            outline,
             slots,
             lobes,
         };
@@ -151,8 +165,8 @@ impl Region {
     fn contains(&self, p: P2) -> bool {
         match self {
             Self::Round { c, r } => (p[0] - c[0]).hypot(p[1] - c[1]) < *r,
-            Self::Peanut { peanut, slots, .. } => {
-                geom::contains(peanut, p) && !slots.iter().any(|s| geom::contains(s, p))
+            Self::Fused { outline, slots, .. } => {
+                geom::contains(outline, p) && !slots.iter().any(|s| geom::contains(s, p))
             }
         }
     }
@@ -160,7 +174,7 @@ impl Region {
     fn on_fin(&self, lobe: &Lobe, p: P2) -> bool {
         match self {
             Self::Round { .. } => false,
-            Self::Peanut { lobes, .. } => lobes.iter().any(|f| lobe.on_fin(local(f, p))),
+            Self::Fused { lobes, .. } => lobes.iter().any(|f| lobe.on_fin(local(f, p))),
         }
     }
 }
@@ -286,14 +300,14 @@ impl Stud {
         };
         let region = match self.region {
             Region::Round { c, r } => Region::Round { c: mv(c), r },
-            Region::Peanut {
-                peanut,
+            Region::Fused {
+                outline,
                 slots,
                 lobes,
-            } => Region::Peanut {
-                peanut: frame.map_loop(&peanut),
-                slots: slots.map(|s| frame.map_loop(&s)),
-                lobes: lobes.map(|f| Frame { o: mv(f.o), ..f }),
+            } => Region::Fused {
+                outline: frame.map_loop(&outline),
+                slots: slots.iter().map(|s| frame.map_loop(s)).collect(),
+                lobes: lobes.iter().map(|f| Frame { o: mv(f.o), ..*f }).collect(),
             },
         };
         Self {
@@ -328,19 +342,17 @@ fn studs(shape: &CustomShape, p: &StudProfile) -> Result<Vec<Stud>> {
         StudStyle::Solid => all.iter().map(|&c| Stud::round(centre(c), rs)).collect(),
         StudStyle::SlantV2 { .. } => {
             let lobe = Lobe::new(p)?;
-            let (peanuts, round) = slant::layout(&cells, &all);
-            peanuts
+            slant::layout(&cells, &all)?
                 .iter()
-                .map(|q| Stud::peanut(&lobe, q, p.pitch))
-                .chain(round.iter().map(|&c| Stud::round(centre(c), rs)))
+                .map(|q| Stud::fused(&lobe, q, p.pitch))
                 .collect()
         }
     })
 }
 
-/// The walls and tubes of `top` over the part's stud grid, and its wall ribs when `ribs`
-/// (laid out as the build lays them out: one on each wall at each stud position).
-fn features(p: &StudProfile, top: &TopBrick, ribs: bool) -> Vec<Feature> {
+/// The walls and tubes of `top` over the part's stud grid (made with `p`), and its wall ribs
+/// when `ribs`, laid out as the build lays them out.
+fn features(p: &StudProfile, top: &TopBrick, ribs: bool) -> Result<Vec<Feature>> {
     let (x0, y0) = (f64::from(top.at.0) * p.pitch, f64::from(top.at.1) * p.pitch);
     let (x1, y1) = (
         x0 + f64::from(top.w) * p.pitch,
@@ -361,40 +373,44 @@ fn features(p: &StudProfile, top: &TopBrick, ribs: bool) -> Vec<Feature> {
         }
     }
     if ribs {
-        let (face, back) = (p.clearance + p.wall, p.clearance + p.wall / 2.0);
-        let (t, hw) = (p.wall_rib_protrusion(), WALL_RIB_WIDTH / 2.0);
-        for i in 0..top.w {
-            let xc = x0 + (f64::from(i) + 0.5) * p.pitch;
+        let (w, d) = (top.w as i32, top.d as i32);
+        let cells: BTreeSet<(i32, i32)> = (0..w)
+            .flat_map(|i| (0..d).map(move |j| (top.at.0 + i, top.at.1 + j)))
+            .collect();
+        let all: Vec<(i32, i32)> = cells.iter().copied().collect();
+        for site in plan::wall_rib_sites(p, &cells, &all)? {
             out.push(Feature::Rib {
-                at: ([xc - hw, y0 + back], [xc + hw, y0 + face + t]),
-                n: [0.0, 1.0],
-            });
-            out.push(Feature::Rib {
-                at: ([xc - hw, y1 - face - t], [xc + hw, y1 - back]),
-                n: [0.0, -1.0],
-            });
-        }
-        for j in 0..top.d {
-            let yc = y0 + (f64::from(j) + 0.5) * p.pitch;
-            out.push(Feature::Rib {
-                at: ([x0 + back, yc - hw], [x0 + face + t, yc + hw]),
-                n: [1.0, 0.0],
-            });
-            out.push(Feature::Rib {
-                at: ([x1 - face - t, yc - hw], [x1 - back, yc + hw]),
-                n: [-1.0, 0.0],
+                at: (site.lo, site.hi),
+                n: site.n,
             });
         }
     }
-    out
+    Ok(out)
 }
 
 /// Where `top`, pushed onto the box `shape` built with `profile`, meets its studs. The brick
 /// on top is a plain one with `profile`'s walls and tubes (no wall ribs).
 pub fn fit(shape: &CustomShape, profile: &StudProfile, top: &TopBrick) -> Result<FitReport> {
+    let plain = StudProfile {
+        wall_ribs: false,
+        ..*profile
+    };
+    fit_under(shape, profile, top, &plain)
+}
+
+/// Where `top`, a box brick built with `top_profile` (its walls, tubes and, when it has
+/// them, its wall ribs, laid out for its own studs), pushed onto the box `shape` built with
+/// `profile`, meets that part's studs.
+pub fn fit_under(
+    shape: &CustomShape,
+    profile: &StudProfile,
+    top: &TopBrick,
+    top_profile: &StudProfile,
+) -> Result<FitReport> {
+    top_profile.validate()?;
     let studs = studs(shape, profile)?;
-    let feats = features(profile, top, false);
-    Ok(report(&studs, &feats, profile, profile))
+    let feats = features(top_profile, top, top_profile.wall_ribs)?;
+    Ok(report(&studs, &feats, profile, top_profile))
 }
 
 /// Where the box `part` built with `profile` (with its wall ribs, if it has them), pushed onto
@@ -426,7 +442,7 @@ pub fn fit_below(
         .map(|s| s.shifted(shift))
         .collect();
     let me = TopBrick { w, d, at: (0, 0) };
-    let feats = features(profile, &me, profile.wall_ribs);
+    let feats = features(profile, &me, profile.wall_ribs)?;
     Ok(report(&studs, &feats, below_profile, profile))
 }
 
@@ -491,9 +507,17 @@ fn report(
             }
         }
         // A wall or tube whose middle lies in the stud: the stud is through it.
+        let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+        for (q, _) in &s.samples {
+            for k in 0..2 {
+                lo[k] = lo[k].min(q[k]);
+                hi[k] = hi[k].max(q[k]);
+            }
+        }
+        let near = |q: P2| (0..2).all(|k| q[k] >= lo[k] && q[k] <= hi[k]);
         for f in feats {
             for q in f.core() {
-                if s.region.contains(q) {
+                if near(q) && s.region.contains(q) {
                     let fin = lobe.as_ref().is_some_and(|l| s.region.on_fin(l, q));
                     let depth = -f.half_thickness(profile);
                     if fin {
@@ -565,13 +589,14 @@ pub fn slant_outline(profile: &StudProfile) -> Result<SlantOutline> {
     };
     let slots = lobes.map(|f| f.map_loop(&lobe.slot));
     let pockets = lobes.map(|f| f.map_loop(&lobe.pocket));
-    let peanut = slant::Peanut {
-        a: (0, 0),
-        b: (0, 1),
-        fin: (1, 0),
+    let peanut = slant::Unit {
+        first: (0, 0),
+        step: (0, 1),
+        n: 2,
+        fin: Some((1, 0)),
     };
     // That peanut's frame is the peanut frame moved to (pitch/2, pitch); undo the move.
-    let stud = Stud::peanut(&lobe, &peanut, profile.pitch);
+    let stud = Stud::fused(&lobe, &peanut, profile.pitch);
     let o = peanut.frame(profile.pitch).o;
     let edge = stud
         .samples

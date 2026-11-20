@@ -1,5 +1,6 @@
-//! Builds Slant 3D's v2 stud through SolidCraft and checks it against hand calculations made
-//! here, independently of the crate's own geometry: the peanut in closed form (its width
+//! Builds Slant 3D's v2 stud (fused pairs and triples) through SolidCraft and checks it against
+//! hand calculations made here, independently of the crate's own geometry: the peanut, a
+//! triple's middle lobe and finless units in closed form (their width
 //! integrated arc by arc), the slot and pocket areas by sampling a fine grid with inside tests
 //! written from the stud's dimensions.
 //!
@@ -224,9 +225,10 @@ impl Hand {
         across <= 0.0 || q[1] <= e2[1]
     }
 
-    /// Peanut area, closed form: twice the integral of its width over lobe B's half, arc by
-    /// arc.
-    fn peanut_area(&self) -> f64 {
+    /// Twice the integral of the peanut's fin-side (`right`) and inner-side (`left`) half
+    /// widths over lobe B's half, `0 ≤ vp ≤ a + r`, closed form arc by arc; and the inner
+    /// side's integral over `0 ≤ vp ≤ a` only (`left_to_centre`).
+    fn halves(&self) -> (f64, f64, f64) {
         let (a, r) = (self.a, self.r);
         let span = |f: &dyn Fn(f64) -> f64, x0: f64, x1: f64| f(x1) - f(x0);
         let waist = |x: f64| a * x - sq(x, 0.0, self.rw);
@@ -238,10 +240,27 @@ impl Hand {
             + span(&arc(self.cf, self.rho, 1.0), jv, pv)
             + span(&arc(self.ce, self.re, 1.0), pv, tv)
             + span(&arc([0.0, 0.0], r, 0.0), tv, top);
-        let left = span(&waist, 0.0, g2v)
-            + span(&arc(self.cg, self.rg, -1.0), g2v, g1v)
-            + span(&arc([0.0, 0.0], r, 0.0), g1v, top);
+        let near = span(&waist, 0.0, g2v) + span(&arc(self.cg, self.rg, -1.0), g2v, g1v);
+        let left = near + span(&arc([0.0, 0.0], r, 0.0), g1v, top);
+        let left_to_centre = near + span(&arc([0.0, 0.0], r, 0.0), g1v, a);
+        (right, left, left_to_centre)
+    }
+
+    /// Peanut (finned pair) area.
+    fn peanut_area(&self) -> f64 {
+        let (right, left, _) = self.halves();
         2.0 * (right + left)
+    }
+
+    /// The area a triple adds to a pair: its middle lobe from waist line to waist line, the
+    /// inner side's shape on both sides of it, mirrored about its centre.
+    fn middle_area(&self) -> f64 {
+        4.0 * self.halves().2
+    }
+
+    /// A finless pair: the inner side's shape on both sides.
+    fn plain_pair_area(&self) -> f64 {
+        4.0 * self.halves().1
     }
 }
 
@@ -326,9 +345,18 @@ fn close(name: &str, got: f64, want: f64, rel: f64) {
     assert!(e.abs() < rel, "{name}: {got} vs {want}");
 }
 
-/// Builds a v2 `w × d` brick and checks it stage by stage. `peanuts` and `round` are how
-/// many of each the brick should get.
-fn check_v2(w: u32, d: u32, peanuts: usize, round: usize, ribs: usize) -> CustomPart {
+/// How many units of each kind a brick gets.
+#[derive(Clone, Copy)]
+struct Units {
+    pairs: usize,
+    triples: usize,
+    plain_pairs: usize,
+    plain_triples: usize,
+}
+
+/// Builds a fused `w × d` brick (sharp corners) and checks it stage by stage against
+/// `units`, with `ribs` centre ribs.
+fn check_v2(w: u32, d: u32, u: Units, ribs: usize) -> CustomPart {
     let h = Hand::new();
     let (slot_peanut, slot_out, pocket) = sampled_areas(&h);
     let shape = CustomShape::Box { w, d, plates: 3 };
@@ -336,20 +364,27 @@ fn check_v2(w: u32, d: u32, peanuts: usize, round: usize, ribs: usize) -> Custom
         .unwrap_or_else(|e| panic!("v2 {w}x{d}: {e}"));
     let name = format!("v2_box_{w}x{d}x3");
     println!("{name}: {:?}", part.stage_volumes_mm3);
-    let lobes = 2.0 * peanuts as f64;
+    let lobes = 2.0 * (u.pairs + u.triples) as f64;
     let (l, dd) = (f64::from(w) * 8.0 - 0.2, f64::from(d) * 8.0 - 0.2);
     let tubes = f64::from((w - 1) * (d - 1));
     // Top 1.4 mm: the hollow is 8.2 mm tall.
     let shell = l * dd * 9.6 - (l - 2.4) * (dd - 2.4) * 8.2;
     let pockets = pocket * 0.6 * lobes;
-    let studs = (h.peanut_area() * peanuts as f64 + PI * 2.4 * 2.4 * round as f64) * 1.8;
+    let (pair, mid, plain) = (h.peanut_area(), h.middle_area(), h.plain_pair_area());
+    let studs = (pair * u.pairs as f64
+        + (pair + mid) * u.triples as f64
+        + plain * u.plain_pairs as f64
+        + (plain + mid) * u.plain_triples as f64)
+        * 1.8;
     let slots = (slot_peanut * 1.8 + slot_out * 0.3) * lobes;
     let chamfer = chamfer_rect(l, dd) + tubes * chamfer_tube();
     let hand =
         shell + tubes * tube(8.2) + ribs as f64 * rib(8.2) - chamfer - pockets + studs - slots;
     close("Studs", delta(&part, "Studs"), studs, 1e-6);
-    close("Pockets", -delta(&part, "Pockets"), pockets, 2e-3);
-    close("Slots", -delta(&part, "Slots"), slots, 3e-3);
+    if lobes > 0.0 {
+        close("Pockets", -delta(&part, "Pockets"), pockets, 2e-3);
+        close("Slots", -delta(&part, "Slots"), slots, 3e-3);
+    }
     close("Chamfer", -delta(&part, "Chamfer"), chamfer, 1e-6);
     if ribs > 0 {
         close("Ribs", delta(&part, "Ribs"), ribs as f64 * rib(8.2), 1e-6);
@@ -380,19 +415,77 @@ fn check_v2(w: u32, d: u32, peanuts: usize, round: usize, ribs: usize) -> Custom
     part
 }
 
+fn units(pairs: usize, triples: usize, plain_pairs: usize, plain_triples: usize) -> Units {
+    Units {
+        pairs,
+        triples,
+        plain_pairs,
+        plain_triples,
+    }
+}
+
 #[test]
 fn v2_2x4_two_peanut_rows_with_centre_rib() {
-    check_v2(2, 4, 4, 0, 1);
+    check_v2(2, 4, units(4, 0, 0, 0), 1);
 }
 
 #[test]
 fn v2_2x2_one_peanut_per_row() {
-    check_v2(2, 2, 2, 0, 0);
+    check_v2(2, 2, units(2, 0, 0, 0), 0);
 }
 
 #[test]
-fn v2_2x3_leaves_the_odd_studs_round() {
-    check_v2(2, 3, 2, 2, 1);
+fn v2_2x3_one_triple_per_row() {
+    check_v2(2, 3, units(0, 2, 0, 0), 1);
+}
+
+#[test]
+fn v2_1x5_a_pair_and_a_triple() {
+    check_v2(1, 5, units(1, 1, 0, 0), 0);
+}
+
+#[test]
+fn v2_3x5_middle_row_fused_without_fins() {
+    // Rows along Y: the outer rows get a finned pair and triple each, the middle row a
+    // finless pair and triple.
+    check_v2(3, 5, units(2, 2, 1, 1), 0);
+}
+
+#[test]
+fn lone_studs_are_refused_not_made_round() {
+    for shape in [
+        CustomShape::Box {
+            w: 1,
+            d: 1,
+            plates: 3,
+        },
+        CustomShape::Box {
+            w: 1,
+            d: 1,
+            plates: 1,
+        },
+        // A T: a lone stud whichever way the rows run.
+        CustomShape::Footprint {
+            cells: vec![(0, 0), (1, 0), (2, 0), (1, 1)],
+            plates: 3,
+        },
+    ] {
+        let e = build(&shape, &StudProfile::fused())
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("alone"), "{}: {e}", shape.label());
+    }
+    // A 1-wide slope keeps one stud on its back row: refused too.
+    let e = build(
+        &CustomShape::Slope45 {
+            w: 1,
+            d: 2,
+            plates: 3,
+        },
+        &StudProfile::fused(),
+    )
+    .unwrap_err();
+    assert!(e.to_string().contains("alone"));
 }
 
 #[test]
@@ -504,8 +597,23 @@ fn standard_bricks_get_a_rib_every_second_tube() {
 
 #[test]
 fn v2_on_slopes_footprints_and_single_rows() {
-    let v2 = StudProfile::slant_v2_experimental();
+    let v2 = StudProfile::fused();
     for shape in [
+        CustomShape::Box {
+            w: 1,
+            d: 3,
+            plates: 3,
+        },
+        CustomShape::Box {
+            w: 3,
+            d: 3,
+            plates: 3,
+        },
+        CustomShape::Curve {
+            w: 3,
+            d: 3,
+            plates: 3,
+        },
         CustomShape::Box {
             w: 1,
             d: 4,

@@ -164,19 +164,110 @@ fn ribs_sit_on_the_stud_centres() {
     assert!(tube > 4.0 && centre_rib > 3.0);
 }
 
+/// A fused brick's end-wall rib: centred 1.7 mm off the stud, it meets a Ø4.8 stud at its
+/// inner edge, 1.4 mm off the centre line, so it stands 2.7 − √(2.4² − 1.4²) + 0.05 proud.
+fn fused_rib(hollow: f64) -> f64 {
+    let t = 2.7 - (2.4f64 * 2.4 - 1.4 * 1.4).sqrt() + 0.05;
+    t * RW * hollow - LEAD * LEAD / 2.0 * RW
+}
+
 #[test]
-fn v2_2x4_with_both_options() {
+fn fused_2x4_with_both_options() {
     let v2 = StudProfile::slant_v2_experimental();
     let s = box2x4();
     let a = vol("v2", &s, &v2);
     let d = vol("v2 both", &s, &both(v2));
-    // The v2 top is 1.4 mm thick: an 8.2 mm hollow.
+    // The v2 top is 1.4 mm thick: an 8.2 mm hollow. Ribs only on the two end walls, two
+    // either side of each of their two studs.
     check_delta(
-        "v2 2x4 both",
+        "fused 2x4 both",
         &a,
         &d,
-        12.0 * rib(8.2) + rounding(4.0, 0.0, 9.6),
+        8.0 * fused_rib(8.2) + rounding(4.0, 0.0, 9.6),
     );
+    // The default fused profile is this one with r 0.4 rounds.
+    let f = StudProfile::fused();
+    assert_eq!(f.edge_radius, 0.4);
+    assert_eq!(StudProfile::default(), f);
+    let r = vol("fused", &s, &f);
+    let sliver = (1.0 - PI / 4.0) * 0.16;
+    let round4 = -4.0 * sliver * 9.6 + 4.0 * (2.0 - PI / 2.0) * 0.4 * C * C / 2.0
+        - (1.0 - PI / 4.0) * 4.0 * C * C * C / 3.0;
+    check_delta("fused default (r 0.4) vs sharp", &a, &r, round4);
+}
+
+#[test]
+fn fused_ribs_sit_off_centre_on_the_end_walls_only() {
+    let p = ribbed(StudProfile::fused());
+    let t = 2.7 - (2.4f64 * 2.4 - 1.4 * 1.4).sqrt() + 0.05;
+    assert!((p.wall_rib_protrusion() - t).abs() < 1e-12);
+    // (shape, ribs, rows along Y)
+    for (s, n, along_y) in [
+        (box2x4(), 8, true),
+        (
+            CustomShape::Box {
+                w: 1,
+                d: 5,
+                plates: 3,
+            },
+            4,
+            true,
+        ),
+        (
+            CustomShape::Box {
+                w: 4,
+                d: 2,
+                plates: 3,
+            },
+            8,
+            false,
+        ),
+        // The L fuses along X (along Y it would leave a lone stud): end walls face ±X.
+        (
+            CustomShape::Footprint {
+                cells: vec![(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (0, 2), (1, 2)],
+                plates: 3,
+            },
+            12,
+            false,
+        ),
+    ] {
+        let plan = plan(&s, &p).unwrap();
+        let stage = plan.stages.iter().find(|s| s.name == "WallRibs").unwrap();
+        let rects: Vec<_> = stage
+            .commands
+            .iter()
+            .filter(|c| c["command"] == "sketch.rectangle.two_point")
+            .collect();
+        assert_eq!(rects.len(), n, "{}", s.label());
+        for c in rects {
+            let q = |k: &str, i: usize| c["params"][k][i].as_f64().unwrap();
+            let (lo, hi) = ([q("p0", 0), q("p0", 1)], [q("p1", 0), q("p1", 1)]);
+            let (wx, wy) = (hi[0] - lo[0], hi[1] - lo[1]);
+            // Narrow along the wall, which runs across the rows; 1.7 mm off a stud centre.
+            let (along, across, mid) = if along_y {
+                (wx, wy, (lo[0] + hi[0]) / 2.0)
+            } else {
+                (wy, wx, (lo[1] + hi[1]) / 2.0)
+            };
+            assert!((along - RW).abs() < 1e-6, "{}: {c}", s.label());
+            assert!((across - (0.6 + t)).abs() < 1e-6, "{}: {c}", s.label());
+            let off = (mid - 4.0).rem_euclid(8.0);
+            assert!(
+                (off - 1.7).abs() < 1e-6 || (off - 6.3).abs() < 1e-6,
+                "{}: {mid}",
+                s.label()
+            );
+        }
+        let with = vol("ribbed", &s, &p);
+        let without = vol("plain", &s, &StudProfile::fused());
+        check_delta(
+            &format!("{} fused ribs", s.label()),
+            &without,
+            &with,
+            n as f64 * fused_rib(8.2),
+        );
+    }
 }
 
 #[test]

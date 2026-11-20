@@ -1,11 +1,15 @@
-//! Slant 3D's v2 stud: peanuts of two fused studs, each lobe with a leaf-spring fin.
+//! Slant 3D's v2 stud: fused studs (pairs and triples), each end lobe with a leaf-spring fin.
+//!
+//! Every stud is fused: a row's studs are split into **units** of two (a pair, "peanut") or
+//! three (a triple) neighbouring studs, joined by narrow waists. See [`layout`] for how a
+//! row is split.
 //!
 //! Frames used here:
-//! * **peanut frame**: origin at the waist centre (midway between the two stud centres), `v`
-//!   along the row toward lobe B, `u` toward the fin side;
-//! * **lobe frame**: origin at a lobe's centre, `u` toward the fin side, `v` away from the
-//!   waist. Lobe B's frame is the peanut frame moved by `+pitch/2` along `v`; lobe A's is its
-//!   mirror image about the waist line.
+//! * **unit frame**: origin at the unit's centre (a pair's waist centre, a triple's middle
+//!   stud centre), `v` along the row toward lobe B, `u` toward the fin side;
+//! * **lobe frame**: origin at an end lobe's centre, `u` toward the fin side, `v` away from
+//!   the waist next to it. Lobe B's frame is the unit frame moved by `+(n − 1)·pitch/2` along
+//!   `v` (`n` studs); lobe A's is its mirror image about the unit's centre line `v = 0`.
 //!
 //! # The outline (lobe B's frame; `a = pitch / 2`, `r = stud_diameter / 2`)
 //!
@@ -26,7 +30,18 @@
 //! 5. **Inner round** `G`, radius `waist_round`, inside the stud circle and touching it, and
 //!    touching the inner waist arc from outside.
 //!
-//! Lobe A is lobe B mirrored about the waist line.
+//! Lobe A is lobe B mirrored about the unit's centre line.
+//!
+//! A **triple's middle lobe** has a waist on each side and no fin. Its outline is the stud
+//! circle joined to each of the four waist arcs around it by the round `G` (mirrored in `u`,
+//! `v` or both): the inner side's construction on both sides, so it is symmetric, tangent at
+//! every junction and, like any stud circle, tangent to the tubes and 0.3 mm clear of a wall.
+//! The waist on its fin side runs from the end lobe's bump to the middle lobe's round, with
+//! the same tube-clearance arc as a pair's.
+//!
+//! A unit with **no fin side** (a row with neighbours on both sides, such as a 3-wide brick's
+//! middle row) has no fins, slots or pockets: every lobe is the stud circle on both sides,
+//! joined to the waists by `G` as above.
 
 use crate::geom::{self, Frame, Loop, Seg};
 use crate::profile::{MIN_FIN_SECTION, MIN_POCKET_FLOOR, SLANT_CAP, StudProfile, StudStyle};
@@ -47,13 +62,20 @@ const POCKET_OUT: f64 = 0.15;
 /// The thinnest rim a pocket may leave to the brick's outside face, in mm.
 const MIN_RIM: f64 = 0.5;
 
-/// One lobe's slot and pocket, and the peanut it belongs to, worked out from a profile.
+/// One lobe's slot and pocket, and the outlines of the units it belongs to, worked out from a
+/// profile.
 #[derive(Clone, Debug)]
 pub(crate) struct Lobe {
     /// Distance from a lobe centre to the waist line (half the pitch).
     pub a: f64,
-    /// The peanut outline, in the peanut frame.
+    /// The finned pair's outline, in the unit frame.
     pub peanut: Loop,
+    /// The finned triple's outline, in the unit frame.
+    pub triple: Loop,
+    /// A finless pair's outline, in the unit frame.
+    pub pair_plain: Loop,
+    /// A finless triple's outline, in the unit frame.
+    pub triple_plain: Loop,
     /// The slot, in lobe B's frame.
     pub slot: Loop,
     /// The pocket under the fin, in lobe B's frame.
@@ -125,6 +147,14 @@ pub struct SlantDims {
     pub pocket_depth: f64,
     /// Pocket reach outboard of the lobe centre.
     pub pocket_out: f64,
+    /// Area of a finned pair (peanut), before its slots are cut.
+    pub pair_area: f64,
+    /// Area of a finned triple, before its slots are cut.
+    pub triple_area: f64,
+    /// Area of a finless pair.
+    pub pair_plain_area: f64,
+    /// Area of a finless triple.
+    pub triple_plain_area: f64,
 }
 
 fn line(a: P2, b: P2) -> Seg {
@@ -182,6 +212,81 @@ fn leave(p: P2, dir: P2, c: P2, r: f64) -> f64 {
     } else {
         -b + (b * b - cc).sqrt()
     }
+}
+
+/// A unit's outline (unit frame, counter-clockwise) from lobe B's chain `end` (lobe frame,
+/// from the fin-side waist arc round the far end to the inner waist arc) and, for a triple,
+/// the middle lobe's fin side `mid_right` (lower waist to upper) and inner side `mid_left`
+/// (upper waist to lower). Lobe A is lobe B mirrored about `v = 0`; neighbouring lobes are
+/// joined by the waist arcs about `(±a, w)`, `w` each waist's position.
+fn assemble(n: usize, end: &[Seg], mid_right: &[Seg], mid_left: &[Seg], a: f64) -> Loop {
+    let off = (n as f64 - 1.0) * a;
+    let shift = |s: &Seg| match *s {
+        Seg::Line { a: p0, b: p1 } => line(up(p0, off), up(p1, off)),
+        Seg::Arc {
+            a: p0,
+            b: p1,
+            c,
+            ccw,
+        } => Seg::Arc {
+            a: up(p0, off),
+            b: up(p1, off),
+            c: up(c, off),
+            ccw,
+        },
+    };
+    let b_chain: Vec<Seg> = end.iter().map(shift).collect();
+    let a_chain: Vec<Seg> = b_chain.iter().rev().map(mirrored).collect();
+    let start = |l: &[Seg]| match l[0] {
+        Seg::Line { a, .. } | Seg::Arc { a, .. } => a,
+    };
+    let finish = |l: &[Seg]| match l[l.len() - 1] {
+        Seg::Line { b, .. } | Seg::Arc { b, .. } => b,
+    };
+    let waist = |k: usize| (2.0 * k as f64 + 2.0 - n as f64) * a;
+    let mut out = a_chain.clone();
+    // Up the fin side.
+    let mut at = finish(&a_chain);
+    for k in 0..n - 1 {
+        let last = k == n - 2;
+        let next = if last {
+            start(&b_chain)
+        } else {
+            start(mid_right)
+        };
+        out.push(Seg::Arc {
+            a: at,
+            b: next,
+            c: [a, waist(k)],
+            ccw: false,
+        });
+        if !last {
+            out.extend_from_slice(mid_right);
+            at = finish(mid_right);
+        }
+    }
+    out.extend_from_slice(&b_chain);
+    // Down the inner side.
+    let mut at = finish(&b_chain);
+    for k in (0..n - 1).rev() {
+        let last = k == 0;
+        let next = if last {
+            start(&a_chain)
+        } else {
+            start(mid_left)
+        };
+        out.push(Seg::Arc {
+            a: at,
+            b: next,
+            c: [-a, waist(k)],
+            ccw: false,
+        });
+        if !last {
+            out.extend_from_slice(mid_left);
+            at = finish(mid_left);
+        }
+    }
+    out
 }
 
 impl Lobe {
@@ -328,38 +433,78 @@ impl Lobe {
                 ccw: true,
             },
         ];
-        let shift = |s: &Seg| match *s {
-            Seg::Line { a: p0, b: p1 } => line(up(p0, a), up(p1, a)),
+        // A finless end lobe: the inner round mirrored onto the fin side, the stud circle
+        // round the far end, the inner round (lobe frame, from the fin-side waist arc to the
+        // inner one).
+        let mu = |q: P2| [-q[0], q[1]];
+        let plain = [
             Seg::Arc {
-                a: p0,
-                b: p1,
-                c,
-                ccw,
-            } => Seg::Arc {
-                a: up(p0, a),
-                b: up(p1, a),
-                c: up(c, a),
-                ccw,
+                a: mu(g2),
+                b: mu(g1),
+                c: mu(cg),
+                ccw: true,
             },
-        };
-        let b_chain: Vec<Seg> = chain.iter().map(shift).collect();
-        let jb = up(j, a);
-        let g2b = up(g2, a);
-        let m = |q: P2| [q[0], -q[1]];
-        let mut peanut = vec![Seg::Arc {
-            a: m(jb),
-            b: jb,
-            c: [a, 0.0],
-            ccw: false,
-        }];
-        peanut.extend(b_chain.iter().copied());
-        peanut.push(Seg::Arc {
-            a: g2b,
-            b: m(g2b),
-            c: [-a, 0.0],
-            ccw: false,
-        });
-        peanut.extend(b_chain.iter().rev().map(mirrored));
+            Seg::Arc {
+                a: mu(g1),
+                b: g1,
+                c: [0.0, 0.0],
+                ccw: true,
+            },
+            Seg::Arc {
+                a: g1,
+                b: g2,
+                c: cg,
+                ccw: true,
+            },
+        ];
+        // A triple's middle lobe, in its own frame (the unit frame): its fin side from the
+        // lower waist to the upper one, and its inner side from the upper waist to the lower.
+        let mv = |q: P2| [q[0], -q[1]];
+        let muv = |q: P2| [-q[0], -q[1]];
+        let mid_right = [
+            Seg::Arc {
+                a: mu(g2),
+                b: mu(g1),
+                c: mu(cg),
+                ccw: true,
+            },
+            Seg::Arc {
+                a: mu(g1),
+                b: muv(g1),
+                c: [0.0, 0.0],
+                ccw: true,
+            },
+            Seg::Arc {
+                a: muv(g1),
+                b: muv(g2),
+                c: muv(cg),
+                ccw: true,
+            },
+        ];
+        let mid_left = [
+            Seg::Arc {
+                a: mv(g2),
+                b: mv(g1),
+                c: mv(cg),
+                ccw: true,
+            },
+            Seg::Arc {
+                a: mv(g1),
+                b: g1,
+                c: [0.0, 0.0],
+                ccw: true,
+            },
+            Seg::Arc {
+                a: g1,
+                b: g2,
+                c: cg,
+                ccw: true,
+            },
+        ];
+        let peanut = assemble(2, &chain, &mid_right, &mid_left, a);
+        let triple = assemble(3, &chain, &mid_right, &mid_left, a);
+        let pair_plain = assemble(2, &plain, &mid_right, &mid_left, a);
+        let triple_plain = assemble(3, &plain, &mid_right, &mid_left, a);
 
         // Slot, in lobe B's frame. It starts where the fin's root is `root_width` across.
         let uc = slot_offset + hw;
@@ -497,10 +642,17 @@ impl Lobe {
             min_section,
             pocket_depth,
             pocket_out: u_out,
+            pair_area: geom::area(&peanut),
+            triple_area: geom::area(&triple),
+            pair_plain_area: geom::area(&pair_plain),
+            triple_plain_area: geom::area(&triple_plain),
         };
         Ok(Self {
             a,
             peanut,
+            triple,
+            pair_plain,
+            triple_plain,
             slot,
             pocket,
             pocket_depth,
@@ -518,9 +670,14 @@ impl Lobe {
         }
     }
 
-    /// Area of the peanut.
-    pub fn peanut_area(&self) -> f64 {
-        geom::area(&self.peanut)
+    /// The outline of a unit of `n` studs (2 or 3), with or without fins, in the unit frame.
+    pub fn outline(&self, n: usize, finned: bool) -> &Loop {
+        match (n, finned) {
+            (2, true) => &self.peanut,
+            (2, false) => &self.pair_plain,
+            (_, true) => &self.triple,
+            (_, false) => &self.triple_plain,
+        }
     }
 
     /// Area of a pocket.
@@ -550,50 +707,72 @@ impl Lobe {
     }
 }
 
-/// A peanut: two neighbouring stud cells and the direction its fins face.
+/// A unit of fused studs: two (a pair) or three (a triple) neighbouring cells of one row,
+/// and the direction its fins face (none for a row with neighbours on both sides).
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct Peanut {
-    /// Lobe A's cell.
-    pub a: (i32, i32),
-    /// Lobe B's cell (one step along the row from `a`).
-    pub b: (i32, i32),
-    /// Unit step (cells) toward the fin side.
-    pub fin: (i32, i32),
+pub(crate) struct Unit {
+    /// Lobe A's cell, the first along the row.
+    pub first: (i32, i32),
+    /// Unit step (cells) along the row, from lobe A toward lobe B.
+    pub step: (i32, i32),
+    /// Number of studs: 2 or 3.
+    pub n: usize,
+    /// Unit step (cells) toward the fin side, if the unit has fins.
+    pub fin: Option<(i32, i32)>,
 }
 
-impl Peanut {
-    /// The peanut frame in the plane of the part.
+impl Unit {
+    /// The unit's cells, from lobe A to lobe B.
+    pub fn cells(&self) -> Vec<(i32, i32)> {
+        (0..self.n as i32)
+            .map(|k| {
+                (
+                    self.first.0 + k * self.step.0,
+                    self.first.1 + k * self.step.1,
+                )
+            })
+            .collect()
+    }
+
+    /// The unit frame in the plane of the part (`u` toward the fin side, or for a finless
+    /// unit the step turned a quarter clockwise).
     pub fn frame(&self, pitch: f64) -> Frame {
+        let c = self.cells();
         let centre = |c: (i32, i32)| {
             [
                 (f64::from(c.0) + 0.5) * pitch,
                 (f64::from(c.1) + 0.5) * pitch,
             ]
         };
-        let (ca, cb) = (centre(self.a), centre(self.b));
-        let e = [
-            f64::from(self.b.0 - self.a.0),
-            f64::from(self.b.1 - self.a.1),
-        ];
+        let (ca, cb) = (centre(c[0]), centre(c[c.len() - 1]));
+        let y = [f64::from(self.step.0), f64::from(self.step.1)];
+        let x = match self.fin {
+            Some(f) => [f64::from(f.0), f64::from(f.1)],
+            None => [y[1], -y[0]],
+        };
         Frame {
             o: [(ca[0] + cb[0]) / 2.0, (ca[1] + cb[1]) / 2.0],
-            x: [f64::from(self.fin.0), f64::from(self.fin.1)],
-            y: e,
+            x,
+            y,
         }
     }
 
-    /// The two lobe frames (B, then A mirrored about the waist line), in the part's plane.
-    pub fn lobe_frames(&self, pitch: f64) -> [Frame; 2] {
+    /// The frames of the lobes that carry fins (B, then A mirrored about the unit's centre
+    /// line), in the part's plane: none for a finless unit.
+    pub fn lobe_frames(&self, pitch: f64) -> Vec<Frame> {
+        if self.fin.is_none() {
+            return Vec::new();
+        }
         let f = self.frame(pitch);
-        let a = pitch / 2.0;
-        [
+        let off = (self.n as f64 - 1.0) * pitch / 2.0;
+        vec![
             Frame {
-                o: f.map([0.0, a]),
+                o: f.map([0.0, off]),
                 x: f.x,
                 y: f.y,
             },
             Frame {
-                o: f.map([0.0, -a]),
+                o: f.map([0.0, -off]),
                 x: f.x,
                 y: [-f.y[0], -f.y[1]],
             },
@@ -601,25 +780,69 @@ impl Peanut {
     }
 }
 
-/// Splits `studs` into peanuts and plain round studs.
+/// How a run of `len` studs (at least 2) splits into units, as their sizes in order along
+/// the row: pairs, and for an odd run one triple, as close to the middle as the run's parity
+/// allows. Of the `k = (len − 3) / 2` pairs an odd run has, `⌈k / 2⌉` come before the
+/// triple: 3 → T, 5 → P T, 7 → P T P, 9 → P P T P, 11 → P P T P P.
+pub(crate) fn split_run(len: usize) -> Vec<usize> {
+    if len.is_multiple_of(2) {
+        return vec![2; len / 2];
+    }
+    let k = (len - 3) / 2;
+    let before = k.div_ceil(2);
+    let mut out = vec![2; before];
+    out.push(3);
+    out.extend(std::iter::repeat_n(2, k - before));
+    out
+}
+
+/// Splits `studs` into units of fused studs. Every stud belongs to one: none stays round.
 ///
-/// Studs pair up along the longer side of the stud area (ties: along Y), greedily from the
-/// low end of each row. A pair's fins face a side where neither cell of `cells` (the whole
-/// part) has a neighbour, so they press on the outside wall of the brick pushed on: the
-/// negative side when only that is open, else the positive side (so single rows face +X, or
-/// +Y when they run along X). A pair with neighbours on both sides, and a stud left over at
-/// the end of a row, stays round.
-pub(crate) fn layout(
-    cells: &BTreeSet<(i32, i32)>,
-    studs: &[(i32, i32)],
-) -> (Vec<Peanut>, Vec<(i32, i32)>) {
+/// Studs run in rows along the longer side of the stud area (ties: along Y). Each row's
+/// studs split into maximal runs of neighbours, and each run into units by [`split_run`].
+/// A unit's fins face a side where neither of its end cells (the cells whose lobes carry
+/// fins) has a neighbour in `cells` (the whole part), so they press on the outside wall of
+/// a brick pushed on: the positive side when that is open, else the negative side (so
+/// single rows face +X, or +Y when they run along X). A unit with neighbours on both sides
+/// has no fins.
+///
+/// A run of one stud cannot be fused. If rows along the first choice of axis leave one, the
+/// other axis is tried; if both do, the part is refused, naming the lone studs.
+pub(crate) fn layout(cells: &BTreeSet<(i32, i32)>, studs: &[(i32, i32)]) -> Result<Vec<Unit>> {
     let set: BTreeSet<(i32, i32)> = studs.iter().copied().collect();
     let span = |k: fn(&(i32, i32)) -> i32| {
         let lo = set.iter().map(k).min().unwrap_or(0);
         let hi = set.iter().map(k).max().unwrap_or(0);
         hi - lo
     };
-    let along_y = span(|c| c.1) >= span(|c| c.0);
+    let first = span(|c| c.1) >= span(|c| c.0);
+    let mut lone = Vec::new();
+    for along_y in [first, !first] {
+        match layout_along(cells, &set, along_y) {
+            Ok(units) => return Ok(units),
+            Err(cells) => {
+                if lone.is_empty() {
+                    lone = cells;
+                }
+            }
+        }
+    }
+    let list: Vec<String> = lone.iter().map(|c| format!("({}, {})", c.0, c.1)).collect();
+    Err(CustomError::InvalidShape(format!(
+        "fused studs come in pairs or triples, and the stud{} at {} would stand alone in its row \
+         (a 1×1, a 1-wide slope's single stud, or a footprint cell with no neighbour along \
+         its row): use a real part, or add a neighbouring stud",
+        if list.len() == 1 { "" } else { "s" },
+        list.join(", ")
+    )))
+}
+
+/// The units of `set` in rows along Y (or X), or the studs left alone in their row.
+fn layout_along(
+    cells: &BTreeSet<(i32, i32)>,
+    set: &BTreeSet<(i32, i32)>,
+    along_y: bool,
+) -> std::result::Result<Vec<Unit>, Vec<(i32, i32)>> {
     let (step, cross) = if along_y {
         ((0, 1), (1, 0))
     } else {
@@ -628,41 +851,44 @@ pub(crate) fn layout(
     let key = |c: &(i32, i32)| if along_y { (c.0, c.1) } else { (c.1, c.0) };
     let mut order: Vec<(i32, i32)> = set.iter().copied().collect();
     order.sort_by_key(key);
-    let mut used = BTreeSet::new();
-    let mut peanuts = Vec::new();
-    let mut round = Vec::new();
+    // Maximal runs of neighbours along the row.
+    let mut runs: Vec<Vec<(i32, i32)>> = Vec::new();
     for c in order {
-        if used.contains(&c) {
-            continue;
-        }
-        let n = (c.0 + step.0, c.1 + step.1);
-        let open = |d: (i32, i32)| {
-            [c, n]
-                .iter()
-                .all(|q| !cells.contains(&(q.0 + d.0, q.1 + d.1)))
-        };
-        let fin = if !set.contains(&n) || used.contains(&n) {
-            None
-        } else if open(cross) {
-            Some(cross)
-        } else if open((-cross.0, -cross.1)) {
-            Some((-cross.0, -cross.1))
-        } else {
-            None
-        };
-        match fin {
-            Some(fin) => {
-                used.insert(c);
-                used.insert(n);
-                peanuts.push(Peanut { a: c, b: n, fin });
-            }
-            None => {
-                used.insert(c);
-                round.push(c);
-            }
+        match runs.last_mut() {
+            Some(run) if run.last() == Some(&(c.0 - step.0, c.1 - step.1)) => run.push(c),
+            _ => runs.push(vec![c]),
         }
     }
-    (peanuts, round)
+    let lone: Vec<(i32, i32)> = runs.iter().filter(|r| r.len() == 1).map(|r| r[0]).collect();
+    if !lone.is_empty() {
+        return Err(lone);
+    }
+    let mut units = Vec::new();
+    for run in runs {
+        let mut i = 0;
+        for n in split_run(run.len()) {
+            let ends = [run[i], run[i + n - 1]];
+            let open = |d: (i32, i32)| {
+                ends.iter()
+                    .all(|q| !cells.contains(&(q.0 + d.0, q.1 + d.1)))
+            };
+            let fin = if open(cross) {
+                Some(cross)
+            } else if open((-cross.0, -cross.1)) {
+                Some((-cross.0, -cross.1))
+            } else {
+                None
+            };
+            units.push(Unit {
+                first: run[i],
+                step,
+                n,
+                fin,
+            });
+            i += n;
+        }
+    }
+    Ok(units)
 }
 
 /// The fin region of lobe B (lobe frame): inside the peanut, on the fin side of the slot,
@@ -795,9 +1021,9 @@ mod tests {
             step,
         );
         assert!(
-            (l.peanut_area() - grid).abs() < 2e-3,
+            (geom::area(&l.peanut) - grid).abs() < 2e-3,
             "{} vs {grid}",
-            l.peanut_area()
+            geom::area(&l.peanut)
         );
         // Inside: the stud circles, the fin peaks; outside: the tubes' clearance at the waist.
         for q in [
@@ -924,40 +1150,228 @@ mod tests {
         assert!(e.is_err());
     }
 
+    /// Closed, all arcs, tangent at every junction, each arc's ends on its circle.
+    fn assert_smooth(l: &Loop, what: &str) {
+        let n = l.len();
+        for k in 0..n {
+            let (s, t) = (&l[k], &l[(k + 1) % n]);
+            let (Seg::Arc { b: end, .. }, Seg::Arc { a: start, .. }) = (*s, *t) else {
+                panic!("{what}: all arcs");
+            };
+            assert!(
+                norm(sub(end, start)) < 1e-12,
+                "{what}: gap after segment {k}"
+            );
+            let (u, w) = (tangent(s, true), tangent(t, false));
+            assert!(
+                norm(sub(u, w)) < 1e-9,
+                "{what}: corner after segment {k}: {u:?} vs {w:?}"
+            );
+            if let Seg::Arc { a, b, c, .. } = *s {
+                assert!(
+                    (norm(sub(a, c)) - norm(sub(b, c))).abs() < 1e-12,
+                    "{what}: segment {k}"
+                );
+            }
+        }
+    }
+
     #[test]
-    fn studs_pair_along_rows_with_fins_outward() {
+    fn triples_and_finless_units_are_smooth_and_symmetric() {
+        let l = lobe();
+        for (what, outline, n, segs) in [
+            ("finned triple", &l.triple, 3, 18),
+            ("finless pair", &l.pair_plain, 2, 8),
+            ("finless triple", &l.triple_plain, 3, 16),
+        ] {
+            assert_eq!(outline.len(), segs, "{what}");
+            assert_smooth(outline, what);
+            // Mirror symmetric about the unit's centre line (and finless ones across it too).
+            let half = if n == 2 { 6.5 } else { 10.5 };
+            for i in 0..60 {
+                for j in 0..(half * 20.0) as i32 {
+                    let q = [
+                        -3.0 + 0.1 * f64::from(i) + 0.013,
+                        0.05 * f64::from(j) + 0.007,
+                    ];
+                    let inside = geom::contains(outline, q);
+                    assert_eq!(
+                        inside,
+                        geom::contains(outline, [q[0], -q[1]]),
+                        "{what} {q:?}"
+                    );
+                    if !std::ptr::eq(outline, &l.triple) {
+                        assert_eq!(
+                            inside,
+                            geom::contains(outline, [-q[0], q[1]]),
+                            "{what} {q:?}"
+                        );
+                    }
+                }
+            }
+        }
+        let a = l.a;
+        // The triple's middle lobe: the plain stud circle on both sides, the waists cut by the
+        // tube-clearance arcs (0.695 mm half-width on the waist lines).
+        for q in [[2.39, 0.0], [-2.39, 0.0], [0.69, a], [0.69, -a], [-0.69, a]] {
+            assert!(geom::contains(&l.triple, q), "{q:?}");
+        }
+        for q in [
+            [2.41, 0.0],
+            [-2.41, 0.0],
+            [0.70, a],
+            [0.70, -a],
+            [-0.70, -a],
+        ] {
+            assert!(!geom::contains(&l.triple, q), "{q:?}");
+        }
+        // Its end lobes keep the pair's fins: 2.85 mm out at 0.3 mm toward the waist.
+        for v in [2.0 * a - 0.3, -2.0 * a + 0.3] {
+            assert!(geom::contains(&l.triple, [2.84, v]) && !geom::contains(&l.triple, [2.86, v]));
+        }
+        // Areas: each end of a triple is half a pair; a finless lobe end differs from a
+        // finned one only on the fin side. Checked against a fine grid.
+        let step = 0.002;
+        for (outline, half) in [
+            (&l.triple, 10.5),
+            (&l.pair_plain, 6.5),
+            (&l.triple_plain, 10.5),
+        ] {
+            let grid = sampled(
+                |q| geom::contains(outline, q),
+                [-3.0, -half],
+                [3.0, half],
+                step,
+            );
+            assert!(
+                (geom::area(outline) - grid).abs() < 3e-3,
+                "{} vs {grid}",
+                geom::area(outline)
+            );
+        }
+        let d = l.dims;
+        assert!(
+            (d.triple_plain_area - d.pair_plain_area - (d.triple_area - d.pair_area)).abs() < 1e-9
+        );
+        println!(
+            "areas: pair {:.4}, triple {:.4}, finless pair {:.4}, finless triple {:.4} mm²",
+            d.pair_area, d.triple_area, d.pair_plain_area, d.triple_plain_area
+        );
+    }
+
+    #[test]
+    fn a_triples_end_lobes_are_cut_as_a_pairs() {
+        // Each end lobe of a triple meets its slot exactly as a pair's lobe does, so the
+        // slot volume per lobe is the same.
+        let l = lobe();
+        let b = Frame {
+            o: [0.0, 2.0 * l.a],
+            x: [1.0, 0.0],
+            y: [0.0, 1.0],
+        };
+        let in_triple = geom::intersection_area(&b.map_loop(&l.slot), &l.triple);
+        assert!(
+            (in_triple - l.slot_in_peanut()).abs() < 1e-12,
+            "{in_triple} vs {}",
+            l.slot_in_peanut()
+        );
+        // And the pocket stays on the end lobe: clear of the middle lobe's waist line.
+        let pocket = b.map_loop(&l.pocket);
+        for s in &pocket {
+            for k in 0..=20 {
+                assert!(s.at(f64::from(k) / 20.0)[1] > l.a + 1.5);
+            }
+        }
+    }
+
+    #[test]
+    fn runs_split_into_pairs_and_one_middle_triple() {
+        assert_eq!(split_run(2), vec![2]);
+        assert_eq!(split_run(3), vec![3]);
+        assert_eq!(split_run(4), vec![2, 2]);
+        assert_eq!(split_run(5), vec![2, 3]);
+        assert_eq!(split_run(6), vec![2, 2, 2]);
+        assert_eq!(split_run(7), vec![2, 3, 2]);
+        assert_eq!(split_run(9), vec![2, 2, 3, 2]);
+        assert_eq!(split_run(11), vec![2, 2, 3, 2, 2]);
+        for n in 2..40 {
+            assert_eq!(split_run(n).iter().sum::<usize>(), n);
+        }
+    }
+
+    #[test]
+    fn studs_fuse_along_rows_with_fins_outward() {
         let rect = |w: i32, d: i32| -> BTreeSet<(i32, i32)> {
             (0..w).flat_map(|i| (0..d).map(move |j| (i, j))).collect()
         };
         let all = |s: &BTreeSet<(i32, i32)>| s.iter().copied().collect::<Vec<_>>();
+        let unit = |first, step, n, fin| Unit {
+            first,
+            step,
+            n,
+            fin,
+        };
         let c = rect(2, 4);
-        let (p, r) = layout(&c, &all(&c));
-        assert!(r.is_empty());
-        assert_eq!(p.len(), 4);
-        assert!(p.contains(&Peanut {
-            a: (0, 0),
-            b: (0, 1),
-            fin: (-1, 0)
-        }));
-        assert!(p.contains(&Peanut {
-            a: (1, 2),
-            b: (1, 3),
-            fin: (1, 0)
-        }));
+        let u = layout(&c, &all(&c)).unwrap();
+        assert_eq!(u.len(), 4);
+        assert!(u.contains(&unit((0, 0), (0, 1), 2, Some((-1, 0)))));
+        assert!(u.contains(&unit((1, 2), (0, 1), 2, Some((1, 0)))));
+        // 2×3: one triple per row.
         let c = rect(2, 3);
-        let (p, r) = layout(&c, &all(&c));
-        assert_eq!((p.len(), r.len()), (2, 2));
-        assert!(r.contains(&(0, 2)) && r.contains(&(1, 2)));
-        let c = rect(1, 4);
-        let (p, _) = layout(&c, &all(&c));
-        assert!(p.iter().all(|q| q.fin == (1, 0)));
+        let u = layout(&c, &all(&c)).unwrap();
+        assert_eq!(
+            u,
+            vec![
+                unit((0, 0), (0, 1), 3, Some((-1, 0))),
+                unit((1, 0), (0, 1), 3, Some((1, 0)))
+            ]
+        );
+        // 1×5: a pair, then a triple.
+        let c = rect(1, 5);
+        let u = layout(&c, &all(&c)).unwrap();
+        assert_eq!(
+            u,
+            vec![
+                unit((0, 0), (0, 1), 2, Some((1, 0))),
+                unit((0, 2), (0, 1), 3, Some((1, 0)))
+            ]
+        );
         let c = rect(4, 1);
-        let (p, _) = layout(&c, &all(&c));
-        assert!(p.iter().all(|q| q.fin == (0, 1) && q.b.0 == q.a.0 + 1));
-        // A 3-wide brick: the middle row has neighbours on both sides and stays round.
+        let u = layout(&c, &all(&c)).unwrap();
+        assert!(
+            u.iter()
+                .all(|q| q.fin == Some((0, 1)) && q.step == (1, 0) && q.n == 2)
+        );
+        // A 3-wide brick: the middle row has neighbours on both sides: fused, finless.
         let c = rect(3, 4);
-        let (p, r) = layout(&c, &all(&c));
-        assert_eq!(p.len(), 4);
-        assert_eq!(r, vec![(1, 0), (1, 1), (1, 2), (1, 3)]);
+        let u = layout(&c, &all(&c)).unwrap();
+        assert_eq!(u.len(), 6);
+        let mid: Vec<_> = u.iter().filter(|q| q.first.0 == 1).collect();
+        assert_eq!(mid.len(), 2);
+        assert!(mid.iter().all(|q| q.fin.is_none()));
+        // Every stud is in exactly one unit.
+        for (w, d) in [(2, 7), (3, 5), (1, 9), (6, 2)] {
+            let c = rect(w, d);
+            let u = layout(&c, &all(&c)).unwrap();
+            let mut seen: Vec<_> = u.iter().flat_map(Unit::cells).collect();
+            seen.sort_unstable();
+            assert_eq!(seen, all(&c));
+        }
+        // A lone stud is refused.
+        let c = rect(1, 1);
+        let e = layout(&c, &all(&c)).unwrap_err().to_string();
+        assert!(e.contains("(0, 0)") && e.contains("alone"), "{e}");
+        // An L that leaves a lone stud along Y fuses along X instead.
+        let c: BTreeSet<_> = [(0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (0, 2), (1, 2)]
+            .into_iter()
+            .collect();
+        let u = layout(&c, &all(&c)).unwrap();
+        assert!(u.iter().all(|q| q.step == (1, 0)));
+        assert!(u.contains(&unit((0, 0), (1, 0), 3, Some((0, -1)))));
+        assert!(u.contains(&unit((0, 1), (1, 0), 2, None)));
+        assert!(u.contains(&unit((0, 2), (1, 0), 2, Some((0, 1)))));
+        // A T of four can't be split either way.
+        let c: BTreeSet<_> = [(0, 0), (1, 0), (2, 0), (1, 1)].into_iter().collect();
+        assert!(layout(&c, &all(&c)).is_err());
     }
 }

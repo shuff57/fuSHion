@@ -117,22 +117,28 @@ rare part) or a shape no catalog part can make, design a printable part:
 - `make_custom_part` with a template: `{"kind":"box","w":2,"d":4,"plates":3}`,
   `{"kind":"slope45","w":2,"d":3,"plates":3}`, `{"kind":"curve","w":1,"d":3,"plates":3}`
   or `{"kind":"footprint","cells":[[0,0],[1,0],[1,1]],"plates":3}`. Sizes are
-  studs and plates; slopes fall toward -Y. `compliant_stud` uses the
-  experimental Slant v2 stud (peanut studs with leaf-spring fins along the long
-  edges, 1.4 mm top), shaped to fit standard bricks; bricks pushed onto it must
-  start and end on a pair of studs, never between the two studs of a pair. The
-  standard profile has centre ribs and a 0.2 mm bottom chamfer. The stud profile
-  also has two options, off by default and not yet settable through
-  `make_custom_part`: `wall_ribs` (thin 0.6 mm ribs on the inside of every
-  wall, one per stud position, pressing a Ø4.8 stud from below by
-  `wall_rib_interference`, 0.05 mm; on footprints they sit mid-cell on straight
-  wall runs only; under a slope's roof only where a stud can reach; a Slant v2
-  brick pushed in under them would overload its fins) and `edge_radius`
-  (rounded vertical outside edges, convex and concave, at most the wall, e.g.
-  0.5 mm).
+  studs and plates; slopes fall toward -Y. Every part has fused studs (Slant
+  3D's v2 stud reshaped to fit standard bricks): each row's studs are joined in
+  pairs, and an odd run of 3 or more gets one triple as near its middle as it
+  can go (3 = T, 5 = P+T, 7 = P+T+P, 9 = P+P+T+P), with a leaf-spring fin on
+  each end lobe that presses the wall of the brick on top by 0.15 mm. A stud
+  can't stand alone in its row, so a 1×1 (or a 1-wide slope, or a footprint
+  that leaves a lone stud whichever way its rows run) is refused: use a real
+  part. Bricks pushed onto a custom part must start and end on a pair or triple,
+  never between its studs (their wall would land on a waist). 1-wide parts have
+  no pins: the fins of the brick below grip their walls. The profile is
+  `StudProfile::fused`: 1.4 mm top, centre ribs, 0.2 mm bottom chamfer, 0.4 mm
+  rounded vertical edges. `compliant_stud` is accepted and ignored. Not yet
+  settable through `make_custom_part`: `wall_ribs` (off by default; on fused
+  bricks only on the end walls, two 0.6 mm ribs per stud centred 1.7 mm either
+  side of it, 0.80 mm proud, pressing a Ø4.8 stud from below by 0.05 mm, so the
+  fins of a brick below turned 90° meet them by at most 0.06 mm) and
+  `edge_radius`.
 - `make_custom_part_from_commands` for anything else, written as a SolidCraft
   command batch in millimetres (8 mm pitch, 9.6 mm brick, Ø4.8 × 1.8 mm studs,
   Ø6.51/4.8 mm tubes, 1.2 mm walls, 0.1 mm side clearance) with an `expect`
   block for the volume and bounding box.
 
-Export already writes printable files for never-produced and rare colours.
+Export already writes printable files (fused studs) for never-produced and rare
+colours; a part that would need a lone stud (a 1×1) is listed in the notes
+instead.
