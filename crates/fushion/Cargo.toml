@@ -1,5 +1,5 @@
 [package]
-name = "studforge"
+name = "fushion"
 description = "Turn a picture into a buildable LEGO-compatible brick model."
 version.workspace = true
 edition.workspace = true

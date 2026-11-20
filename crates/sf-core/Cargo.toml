@@ -1,6 +1,6 @@
 [package]
 name = "sf-core"
-description = "Shared types for studforge: grid units, colours, the part catalog, placements and models."
+description = "Shared types for fuSHion: grid units, colours, the part catalog, placements and models."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

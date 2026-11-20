@@ -1,4 +1,4 @@
-//! Shared types for studforge.
+//! Shared types for fushion.
 //!
 //! # Coordinate system
 //! The build grid uses integer cells. `x` and `z` are horizontal and measured in

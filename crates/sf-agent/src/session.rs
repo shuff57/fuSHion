@@ -43,7 +43,7 @@ pub const SHEET_VIEWS: [View; 6] = [View::Front, View::Right, View::Back, View::
 pub const RELIEF_VIEWS: [View; 2] = [View::Top, View::Iso];
 
 pub fn default_sessions_dir() -> PathBuf {
-    dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("studforge").join("sessions")
+    dirs::data_dir().unwrap_or_else(|| PathBuf::from(".")).join("fushion").join("sessions")
 }
 
 /// Load the shared resources (catalog, meshes). Missing data degrades

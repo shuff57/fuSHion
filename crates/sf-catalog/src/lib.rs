@@ -219,9 +219,9 @@ impl CatalogIndex {
         self.color_lookup = self.colors.iter().enumerate().map(|(i, c)| (c.ldraw, i)).collect();
     }
 
-    /// `dirs::cache_dir()/studforge/catalog.json`.
+    /// `dirs::cache_dir()/fushion/catalog.json`.
     pub fn default_path() -> Option<PathBuf> {
-        dirs::cache_dir().map(|d| d.join("studforge").join("catalog.json"))
+        dirs::cache_dir().map(|d| d.join("fushion").join("catalog.json"))
     }
 
     /// Load from the default path. `Ok(None)` if the file is missing or was

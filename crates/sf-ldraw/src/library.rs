@@ -37,7 +37,7 @@ pub struct MeshLibrary {
 }
 
 impl MeshLibrary {
-    /// Open an LDraw library directory (a full library or a studforge cache).
+    /// Open an LDraw library directory (a full library or a fushion cache).
     /// File names are matched case-insensitively.
     pub fn open(dir: &Path) -> Result<Self> {
         let mut index = HashMap::new();

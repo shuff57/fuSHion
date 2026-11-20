@@ -1,8 +1,8 @@
 //! Render a small hand-made model as a 6-view sheet.
 //!
 //! `cargo run -p sf-render --example sample [--release]` writes
-//! `/tmp/studforge-sample.png` (LDraw meshes, falling back to procedural ones
-//! when the library isn't installed) and `/tmp/studforge-sample-procedural.png`
+//! `/tmp/fushion-sample.png` (LDraw meshes, falling back to procedural ones
+//! when the library isn't installed) and `/tmp/fushion-sample-procedural.png`
 //! (iso view with procedural meshes, for comparison).
 
 use sf_core::{Cell, Model, Palette, Placement, Rot};
@@ -52,7 +52,7 @@ fn main() -> anyhow::Result<()> {
     let t = Instant::now();
     let sheet = render_sheet(&model, &palette, &lib, &View::ALL, &opts);
     println!("sheet {}x{} in {:.1?}", sheet.width(), sheet.height(), t.elapsed());
-    sheet.save("/tmp/studforge-sample.png")?;
+    sheet.save("/tmp/fushion-sample.png")?;
 
     let proc_lib = MeshLibrary::procedural();
     let a = render_view(&model, &palette, &lib, View::Iso, &opts);
@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
     let mut pair = image::RgbaImage::new(a.width() * 2, a.height());
     image::imageops::replace(&mut pair, &a, 0, 0);
     image::imageops::replace(&mut pair, &b, a.width() as i64, 0);
-    pair.save("/tmp/studforge-sample-procedural.png")?;
-    println!("wrote /tmp/studforge-sample.png and /tmp/studforge-sample-procedural.png");
+    pair.save("/tmp/fushion-sample-procedural.png")?;
+    println!("wrote /tmp/fushion-sample.png and /tmp/fushion-sample-procedural.png");
     Ok(())
 }

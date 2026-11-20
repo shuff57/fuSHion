@@ -7,7 +7,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 rust-version = "1.95"
-repository = "https://github.com/shuff57/studforge"
+repository = "https://github.com/shuff57/fuSHion"
 
 [workspace.dependencies]
 sf-core = { path = "crates/sf-core" }

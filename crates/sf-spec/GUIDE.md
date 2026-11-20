@@ -1,4 +1,4 @@
-# studforge shape spec (version 1)
+# fuSHion shape spec (version 1)
 
 You describe the subject as simple shapes. The engine turns them into real
 bricks, checks the build holds together, and renders it so you can compare it

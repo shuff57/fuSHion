@@ -27,7 +27,7 @@ pub const ACCENT: Color32 = Color32::from_rgb(232, 163, 61);
 const ERROR: Color32 = Color32::from_rgb(235, 110, 100);
 const OK: Color32 = Color32::from_rgb(120, 200, 140);
 
-/// Options for `studforge gui`.
+/// Options for `fushion gui`.
 #[derive(Default)]
 pub struct GuiOptions {
     pub session: Option<PathBuf>,
@@ -39,8 +39,8 @@ pub fn run_with(opts: GuiOptions) -> Result<()> {
     let res = Resources::load();
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("studforge")
-            .with_app_id("studforge")
+            .with_title("fuSHion")
+            .with_app_id("fushion")
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([960.0, 600.0])
             .with_drag_and_drop(true),
@@ -50,7 +50,7 @@ pub fn run_with(opts: GuiOptions) -> Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "studforge",
+        "fushion",
         native,
         Box::new(move |cc| {
             let Some(rs) = cc.wgpu_render_state.as_ref() else {
@@ -59,7 +59,7 @@ pub fn run_with(opts: GuiOptions) -> Result<()> {
             gpu::install(rs);
             let srgb = rs.target_format.is_srgb();
             cc.egui_ctx
-                .data_mut(|d| d.insert_temp(egui::Id::unique("studforge_srgb_target"), srgb));
+                .data_mut(|d| d.insert_temp(egui::Id::unique("fushion_srgb_target"), srgb));
             apply_theme(&cc.egui_ctx);
             Ok(Box::new(App::new(&cc.egui_ctx, res, opts)))
         }),
@@ -290,7 +290,7 @@ impl App {
             exported: Vec::new(),
             export_task: None,
             debug_click: None,
-            debug_settings: std::env::var("STUDFORGE_SHOT_SETTINGS").is_ok(),
+            debug_settings: std::env::var("FUSHION_SHOT_SETTINGS").is_ok(),
             shot: opts.screenshot.map(|path| Shot {
                 path,
                 frames: 0,
@@ -311,36 +311,36 @@ impl App {
         app
     }
 
-    /// Hidden knobs for screenshots: `STUDFORGE_SHOT_STEP` (1-based),
-    /// `STUDFORGE_SHOT_SELECT` (placement index), `STUDFORGE_SHOT_VIEW`.
+    /// Hidden knobs for screenshots: `FUSHION_SHOT_STEP` (1-based),
+    /// `FUSHION_SHOT_SELECT` (placement index), `FUSHION_SHOT_VIEW`.
     fn apply_debug_env(&mut self) {
-        if let Some(k) = std::env::var("STUDFORGE_SHOT_STEP")
+        if let Some(k) = std::env::var("FUSHION_SHOT_STEP")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
         {
             self.step_mode = true;
             self.step = k.saturating_sub(1);
         }
-        if let Some(i) = std::env::var("STUDFORGE_SHOT_SELECT")
+        if let Some(i) = std::env::var("FUSHION_SHOT_SELECT")
             .ok()
             .and_then(|s| s.parse::<usize>().ok())
         {
             self.selected = Some(i);
         }
-        if let Ok(v) = std::env::var("STUDFORGE_SHOT_VIEW")
+        if let Ok(v) = std::env::var("FUSHION_SHOT_VIEW")
             && let Some(p) = Preset::ALL
                 .iter()
                 .find(|p| p.label().eq_ignore_ascii_case(&v))
         {
             self.cam.set_preset(*p);
         }
-        if let Ok(v) = std::env::var("STUDFORGE_SHOT_CLICK")
+        if let Ok(v) = std::env::var("FUSHION_SHOT_CLICK")
             && let Some((x, y)) = v.split_once(',')
             && let (Ok(x), Ok(y)) = (x.trim().parse::<f32>(), y.trim().parse::<f32>())
         {
             self.debug_click = Some(egui::pos2(x, y));
         }
-        if std::env::var("STUDFORGE_SHOT_ADD").is_ok() {
+        if std::env::var("FUSHION_SHOT_ADD").is_ok() {
             self.tool = Tool::Add;
         }
         self.clamp_state();
@@ -677,7 +677,7 @@ impl App {
             )
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("studforge").strong().size(15.0).color(ACCENT));
+                    ui.label(RichText::new("fuSHion").strong().size(15.0).color(ACCENT));
                     ui.separator();
                     let mut open: Option<PathBuf> = None;
                     ui.menu_button("Session", |ui| {
@@ -762,7 +762,7 @@ impl App {
                         if self.res.meshes.is_procedural() {
                             ui.label(
                                 RichText::new(
-                                    "Simple part shapes (run `studforge sync` for LDraw parts)",
+                                    "Simple part shapes (run `fushion sync` for LDraw parts)",
                                 )
                                 .weak()
                                 .small(),

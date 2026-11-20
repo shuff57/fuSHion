@@ -1,6 +1,6 @@
 [package]
 name = "sf-custom"
-description = "Custom 3D-printable LEGO-compatible bricks for studforge, modelled with the SolidCraft B-rep engine."
+description = "Custom 3D-printable LEGO-compatible bricks for fuSHion, modelled with the SolidCraft B-rep engine."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

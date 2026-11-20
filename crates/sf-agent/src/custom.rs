@@ -140,7 +140,7 @@ mod imp {
 #[cfg(not(feature = "custom"))]
 mod imp {
     use super::*;
-    const OFF: &str = "this studforge was built without custom bricks (the `custom-bricks` feature)";
+    const OFF: &str = "this fushion was built without custom bricks (the `custom-bricks` feature)";
     pub(super) fn make(_: &Value, _: bool, _: &Path, _: &str) -> Result<MadePart> {
         anyhow::bail!(OFF)
     }

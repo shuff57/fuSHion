@@ -59,6 +59,6 @@ fn main() -> anyhow::Result<()> {
         let _ = render_view(&model, &pal, &lib, v, &opts);
     }
     println!("6 views sequential: {:.1?}", t.elapsed());
-    sheet.save("/tmp/studforge-bench.png")?;
+    sheet.save("/tmp/fushion-bench.png")?;
     Ok(())
 }

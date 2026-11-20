@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 #[derive(Clone)]
-pub struct Studforge {
+pub struct Fushion {
     session: Arc<Mutex<Session>>,
     #[allow(dead_code)] // read by the #[tool_handler] macro
     tool_router: ToolRouter<Self>,
@@ -24,7 +24,7 @@ pub struct Studforge {
 
 #[derive(Deserialize, schemars::JsonSchema)]
 pub struct BuildParams {
-    /// A complete studforge shape spec (see get_guide).
+    /// A complete fuSHion shape spec (see get_guide).
     pub spec: serde_json::Value,
 }
 
@@ -80,7 +80,7 @@ fn b64(bytes: &[u8]) -> String {
 }
 
 #[tool_router]
-impl Studforge {
+impl Fushion {
     pub fn new(session: Session) -> Self {
         Self { session: Arc::new(Mutex::new(session)), tool_router: Self::tool_router() }
     }
@@ -100,7 +100,7 @@ impl Studforge {
         .map_err(internal)?
     }
 
-    #[tool(description = "Read the studforge spec guide: the shape language, colours, modes and how to work. Call this first.")]
+    #[tool(description = "Read the fuSHion spec guide: the shape language, colours, modes and how to work. Call this first.")]
     async fn get_guide(&self) -> Result<CallToolResult, McpError> {
         Ok(CallToolResult::success(vec![ContentBlock::text(sf_spec::GUIDE)]))
     }
@@ -191,10 +191,10 @@ impl Studforge {
 }
 
 #[tool_handler]
-impl ServerHandler for Studforge {
+impl ServerHandler for Fushion {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
-            "studforge turns a picture into a buildable brick model. Call get_guide, look at the picture with \
+            "fuSHion turns a picture into a buildable brick model. Call get_guide, look at the picture with \
              view_source_image, then iterate with build_model until the renders read as the subject and the \
              report shows no structure issues.",
         )
@@ -204,7 +204,7 @@ impl ServerHandler for Studforge {
 pub fn serve(session: Session) -> Result<()> {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     rt.block_on(async move {
-        let service = Studforge::new(session).serve(rmcp::transport::stdio()).await?;
+        let service = Fushion::new(session).serve(rmcp::transport::stdio()).await?;
         service.waiting().await?;
         Ok(())
     })

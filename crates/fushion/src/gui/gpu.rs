@@ -332,7 +332,7 @@ fn pipeline(
 impl Renderer {
     pub fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
         let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("studforge_viewer"),
+            label: Some("fushion_viewer"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
         });
         let globals_buf = device.create_buffer(&wgpu::BufferDescriptor {

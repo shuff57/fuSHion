@@ -1,7 +1,7 @@
 //! Minimal, rate-limited Rebrickable API client.
 //!
 //! The key comes from `REBRICKABLE_API_KEY` or
-//! `dirs::config_dir()/studforge/rebrickable.key`. It is only ever placed in
+//! `dirs::config_dir()/fushion/rebrickable.key`. It is only ever placed in
 //! the `Authorization` header and never appears in errors or logs.
 
 use anyhow::{Context, Result, bail};
@@ -26,7 +26,7 @@ fn load_key() -> Result<String> {
             return Ok(k);
         }
     }
-    let path = dirs::config_dir().context("no config directory")?.join("studforge").join("rebrickable.key");
+    let path = dirs::config_dir().context("no config directory")?.join("fushion").join("rebrickable.key");
     let k = std::fs::read_to_string(&path)
         .with_context(|| format!("no Rebrickable API key: set REBRICKABLE_API_KEY or create {}", path.display()))?;
     let k = k.trim().to_string();
@@ -39,7 +39,7 @@ fn load_key() -> Result<String> {
 impl Api {
     pub fn new() -> Result<Self> {
         let client = reqwest::blocking::Client::builder()
-            .user_agent(concat!("studforge/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("fushion/", env!("CARGO_PKG_VERSION")))
             .timeout(Duration::from_secs(30))
             .build()?;
         Ok(Self { client, key: load_key()?, last: None })

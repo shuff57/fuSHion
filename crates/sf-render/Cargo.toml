@@ -1,6 +1,6 @@
 [package]
 name = "sf-render"
-description = "Headless CPU software renderer for studforge models (multi-view sheets, thumbnails)."
+description = "Headless CPU software renderer for fuSHion models (multi-view sheets, thumbnails)."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

@@ -1,4 +1,4 @@
-//! studforge: turn a picture into a buildable brick model.
+//! fushion: turn a picture into a buildable brick model.
 //!
 //! With no subcommand, opens the desktop app.
 
@@ -11,7 +11,7 @@ use sf_agent::{Session, claude_api, claude_code};
 use std::path::PathBuf;
 
 #[derive(Parser)]
-#[command(name = "studforge", version, about = "Turn a picture into a buildable brick model")]
+#[command(name = "fushion", version, about = "Turn a picture into a buildable brick model")]
 struct Cli {
     #[command(subcommand)]
     cmd: Option<Cmd>,
@@ -76,9 +76,9 @@ enum Cmd {
         session: Option<PathBuf>,
     },
     /// Make a custom 3D-printable part (STL + 3MF), e.g.
-    /// `studforge custom '{"kind":"slope45","w":2,"d":3,"plates":3}' --out parts`.
+    /// `fushion custom '{"kind":"slope45","w":2,"d":3,"plates":3}' --out parts`.
     Custom {
-        /// The part as JSON: kind box | slope45 | curve | footprint (see `studforge guide`).
+        /// The part as JSON: kind box | slope45 | curve | footprint (see `fushion guide`).
         shape: String,
         #[arg(long, default_value = ".")]
         out: PathBuf,

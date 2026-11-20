@@ -1,17 +1,17 @@
-# studforge
+# fuSHion
 
 Turn a picture into a buildable model made of LEGO®-compatible bricks.
 
-You give studforge a photo or drawing. Claude looks at it and describes the
+You give fuSHion a photo or drawing. Claude looks at it and describes the
 subject as simple shapes. A deterministic engine turns those shapes into real
 parts, checks that the model holds together, and renders it from six sides so
 Claude can compare it with the picture and refine it. You can keep editing by
 chatting ("make the ears bigger") or by clicking bricks. When it's done you get
 an LDraw file with build steps, a parts list and a BrickLink wanted list. Where
-no real part fits, studforge can design a custom 3D-printable brick.
+no real part fits, fuSHion can design a custom 3D-printable brick.
 
 > LEGO® is a trademark of the LEGO Group, which does not sponsor, authorise or
-> endorse this project. studforge works with LEGO-compatible parts data from
+> endorse this project. fuSHion works with LEGO-compatible parts data from
 > the LDraw and Rebrickable communities.
 
 ## How it works
@@ -52,24 +52,24 @@ picture ─▶ Claude writes a shape spec ─▶ compile to coloured voxels
 Needs Rust 1.95 or newer.
 
 ```sh
-git clone https://github.com/shuff57/studforge
-cd studforge
-cargo install --path crates/studforge
-studforge sync          # downloads the LDraw parts library (~150 MB) and the Rebrickable catalog
+git clone https://github.com/shuff57/fuSHion
+cd fuSHion
+cargo install --path crates/fushion
+fushion sync          # downloads the LDraw parts library (~150 MB) and the Rebrickable catalog
 ```
 
 `sync` uses Rebrickable's public data dumps. With a free
 [Rebrickable API key](https://rebrickable.com/api/) in
-`~/.config/studforge/rebrickable.key` (or `REBRICKABLE_API_KEY`) it also maps
+`~/.config/fushion/rebrickable.key` (or `REBRICKABLE_API_KEY`) it also maps
 parts and colours to BrickLink ids for the wanted list. Without the LDraw
-library studforge still works, with simplified part meshes.
+library fuSHion still works, with simplified part meshes.
 
 ## Use it
 
 ### Desktop app
 
 ```sh
-studforge
+fushion
 ```
 
 Open a picture, set the part budget, choose how to reach Claude, and press
@@ -83,35 +83,35 @@ slider plays the build steps. **Export** writes the files.
 
 | | What you need | How |
 |---|---|---|
-| **Claude Code** (your Claude subscription) | [Claude Code](https://claude.com/claude-code) installed and logged in | Pick "Claude Code" in the app, or `studforge design photo.jpg --backend claude-code`. studforge runs `claude -p` with its own MCP server attached. |
-| **Claude API** (pay per use) | An Anthropic API key in `ANTHROPIC_API_KEY`, or pasted into the app's settings (saved to `~/.config/studforge/anthropic.key`, mode 600) | Pick "Claude API" in the app, or `studforge design photo.jpg`. Uses `claude-opus-5-5`. |
+| **Claude Code** (your Claude subscription) | [Claude Code](https://claude.com/claude-code) installed and logged in | Pick "Claude Code" in the app, or `fushion design photo.jpg --backend claude-code`. fuSHion runs `claude -p` with its own MCP server attached. |
+| **Claude API** (pay per use) | An Anthropic API key in `ANTHROPIC_API_KEY`, or pasted into the app's settings (saved to `~/.config/fushion/anthropic.key`, mode 600) | Pick "Claude API" in the app, or `fushion design photo.jpg`. Uses `claude-opus-5-5`. |
 
 ### Use it from Claude Code directly
 
-studforge is also an MCP server, so you can design models in any Claude Code
+fuSHion is also an MCP server, so you can design models in any Claude Code
 session:
 
 ```sh
-claude mcp add studforge -- studforge mcp --session ~/studforge-session
+claude mcp add fushion -- fushion mcp --session ~/fushion-session
 ```
 
-Then ask Claude: *"Use studforge to build ~/Pictures/fox.jpg as a brick
+Then ask Claude: *"Use fuSHion to build ~/Pictures/fox.jpg as a brick
 model, about 400 parts."* Tools: `get_guide`, `set_source_image`,
 `view_source_image`, `set_budget`, `build_model`, `get_state`,
 `export_model`, `make_custom_part`, `make_custom_part_from_commands`. Open the same session folder in the desktop app
-(`studforge gui --session ~/studforge-session`) to watch builds appear live.
+(`fushion gui --session ~/fushion-session`) to watch builds appear live.
 
 ### Command line
 
 ```sh
-studforge design photo.jpg --budget 400 [--backend api|claude-code] [--prompt "make it a relief"]
-studforge build spec.json [--image photo.jpg] [--budget 400]   # no Claude: build a spec you wrote
-studforge export --session <dir> <out-dir>
-studforge custom '{"kind":"slope45","w":2,"d":3,"plates":3}' --out parts   # a printable part
-studforge guide                                                # print the shape language
+fushion design photo.jpg --budget 400 [--backend api|claude-code] [--prompt "make it a relief"]
+fushion build spec.json [--image photo.jpg] [--budget 400]   # no Claude: build a spec you wrote
+fushion export --session <dir> <out-dir>
+fushion custom '{"kind":"slope45","w":2,"d":3,"plates":3}' --out parts   # a printable part
+fushion guide                                                # print the shape language
 ```
 
-Every session is a folder (by default under `~/.local/share/studforge/sessions`)
+Every session is a folder (by default under `~/.local/share/fushion/sessions`)
 holding `source.png`, `spec.json`, `model.json`, `report.txt`, `render.png`
 and the spec history.
 
@@ -127,7 +127,7 @@ and the spec history.
 ## Custom bricks
 
 When a model needs a part that doesn't exist (a colour never produced, a rare
-part, a cluster of tiny parts that would be better as one piece), studforge
+part, a cluster of tiny parts that would be better as one piece), fuSHion
 generates it with [SolidCraft](https://github.com/tangency-labs/solidcraft)'s
 parametric CAD engine, linked in-process. Export writes STL and 3MF files for
 every part whose colour was never produced or is rare, plus
@@ -138,7 +138,7 @@ mesh before anything is written. Every part's volume is verified against the
 expected value at each modelling stage.
 
 SolidCraft adds roughly 15 minutes to the first build. To skip it:
-`cargo install --path crates/studforge --no-default-features`. The default connector uses the
+`cargo install --path crates/fushion --no-default-features`. The default connector uses the
 standard FDM-tuned dimensions also used by Slant 3D's free brick tool (8 mm
 pitch, Ø4.8 mm studs, 0.1 mm side clearance). An experimental compliant stud,
 inspired by the leaf-spring design Slant 3D described in *We Made a Better LEGO
@@ -158,11 +158,11 @@ or upload them to a print service.
 | `sf-export` | LDraw, CSV and BrickLink writers (and an LDraw reader) |
 | `sf-custom` | Custom printable bricks via SolidCraft |
 | `sf-agent` | Sessions, the Claude API loop, the Claude Code backend |
-| `studforge` | Desktop app (egui + wgpu), CLI and MCP server |
+| `fushion` | Desktop app (egui + wgpu), CLI and MCP server |
 
 ## Credits and licences
 
-studforge is MIT licensed; see `NOTICE` for SolidCraft's notices. It downloads, but does not redistribute, the
+fuSHion is MIT licensed; see `NOTICE` for SolidCraft's notices. It downloads, but does not redistribute, the
 [LDraw parts library](https://library.ldraw.org) (CC BY 4.0 and earlier
 licences; see the library's `CAreadme.txt`) and
 [Rebrickable](https://rebrickable.com) catalog data. SolidCraft is MIT OR

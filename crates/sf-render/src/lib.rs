@@ -1,4 +1,4 @@
-//! Headless CPU software renderer for studforge models.
+//! Headless CPU software renderer for fushion models.
 //!
 //! Orthographic, z-buffered, flat-shaded (Lambert + ambient), with optional
 //! LDraw edge lines. No GPU, no windowing: it runs in tests and on servers.

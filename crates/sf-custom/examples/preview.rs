@@ -1,6 +1,6 @@
 //! Builds sample custom parts, writes their STLs and renders each to a PNG.
 //!
-//! `cargo run -p sf-custom --example preview [out_dir]` (default `/tmp/studforge-custom`).
+//! `cargo run -p sf-custom --example preview [out_dir]` (default `/tmp/fushion-custom`).
 //! Each PNG has three orthographic panels: from front-left above (studs, slope direction),
 //! from below (hollow, tubes) and from the right side (profile).
 
@@ -11,7 +11,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out = PathBuf::from(
         std::env::args()
             .nth(1)
-            .unwrap_or_else(|| "/tmp/studforge-custom".into()),
+            .unwrap_or_else(|| "/tmp/fushion-custom".into()),
     );
     std::fs::create_dir_all(&out)?;
     let std = StudProfile::standard_fdm();

@@ -62,7 +62,7 @@ pub fn write_ldr(model: &Model, palette: &Palette) -> String {
     let mut out = String::new();
     let _ = writeln!(out, "0 {title}");
     let _ = writeln!(out, "0 Name: {}.ldr", slug(&title));
-    let _ = writeln!(out, "0 Author: studforge");
+    let _ = writeln!(out, "0 Author: fushion");
     let _ = writeln!(out, "0 // Part geometry comes from the LDraw parts library (www.ldraw.org), licensed CC BY 4.0.");
     let used: BTreeSet<ColorId> = model.placements.iter().map(|p| p.color).collect();
     if !used.is_empty() {
@@ -392,7 +392,7 @@ mod tests {
         let lines: Vec<&str> = s.lines().collect();
         assert_eq!(lines[0], "0 My Cat Statue!");
         assert_eq!(lines[1], "0 Name: my-cat-statue.ldr");
-        assert_eq!(lines[2], "0 Author: studforge");
+        assert_eq!(lines[2], "0 Author: fushion");
         assert!(lines[3].contains("CC BY 4.0"));
         assert!(s.contains("1 4 40 -24 20 1 0 0 0 1 0 0 0 1 3001.dat\n"), "{s}");
         assert_eq!(s.matches("0 STEP").count(), 1);

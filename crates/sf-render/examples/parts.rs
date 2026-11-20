@@ -2,7 +2,7 @@
 //! views, with LDraw meshes (left) and procedural meshes (right).
 //!
 //! `cargo run -p sf-render --example parts -- [part ids...]` writes
-//! `/tmp/studforge-parts.png`.
+//! `/tmp/fushion-parts.png`.
 
 use sf_core::{CATALOG, Cell, Palette, Placement, Rot};
 use sf_ldraw::MeshLibrary;
@@ -29,7 +29,7 @@ fn main() -> anyhow::Result<()> {
             }
         }
     }
-    sheet.save("/tmp/studforge-parts.png")?;
-    println!("wrote /tmp/studforge-parts.png ({} parts; columns: LDraw front/iso/top, procedural front/iso/top)", parts.len());
+    sheet.save("/tmp/fushion-parts.png")?;
+    println!("wrote /tmp/fushion-parts.png ({} parts; columns: LDraw front/iso/top, procedural front/iso/top)", parts.len());
     Ok(())
 }

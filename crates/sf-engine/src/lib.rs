@@ -1,4 +1,4 @@
-//! The studforge engine: spec → voxels → parts → checks → steps.
+//! The fushion engine: spec → voxels → parts → checks → steps.
 
 pub mod pack;
 pub mod physics;

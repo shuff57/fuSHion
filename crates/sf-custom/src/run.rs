@@ -425,14 +425,14 @@ fn finish(
         &state,
         &[],
         solidcraft_io::Format::StlBinary,
-        "studforge-custom",
+        "fushion-custom",
     )
     .map_err(|e| CustomError::Export(e.to_string()))?;
     let three_mf = solidcraft_io::export(
         &state,
         &[],
         solidcraft_io::Format::ThreeMf,
-        "studforge-custom",
+        "fushion-custom",
     )
     .map_err(|e| CustomError::Export(e.to_string()))?;
 

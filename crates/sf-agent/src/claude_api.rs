@@ -33,7 +33,7 @@ pub struct ClaudeConfig {
 
 /// Where the API key may be stored (mode 600). `ANTHROPIC_API_KEY` wins.
 pub fn api_key_path() -> PathBuf {
-    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("studforge").join("anthropic.key")
+    dirs::config_dir().unwrap_or_else(|| PathBuf::from(".")).join("fushion").join("anthropic.key")
 }
 
 impl ClaudeConfig {
@@ -71,7 +71,7 @@ pub fn system_prompt() -> String {
 
 pub fn system_prompt_with(max_builds: u32) -> String {
     format!(
-        "You are studforge's designer. You turn a picture into a buildable model made of \
+        "You are fuSHion's designer. You turn a picture into a buildable model made of \
 LEGO-compatible bricks. You work by writing a shape spec and calling `build_model`; the engine \
 places every brick, checks that the model holds together, and shows you six rendered views \
 (front, right, back, left, top, iso, in that order, left to right then top to bottom; reliefs show only top and iso).\n\n\
@@ -88,7 +88,7 @@ starting over.\n\n{}",
 fn tools() -> Value {
     json!([{
         "name": "build_model",
-        "description": "Compile a studforge shape spec into real parts, check the structure, and return the report plus a six-view render sheet (front, right, back, left, top, iso). Call it with the complete spec every time.",
+        "description": "Compile a fuSHion shape spec into real parts, check the structure, and return the report plus a six-view render sheet (front, right, back, left, top, iso). Call it with the complete spec every time.",
         "input_schema": {
             "type": "object",
             "properties": {

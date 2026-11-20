@@ -1,4 +1,4 @@
-//! Extract the parts studforge needs from the LDraw `complete.zip`.
+//! Extract the parts fushion needs from the LDraw `complete.zip`.
 
 use crate::parse::{normalize_name, parse_file, references};
 use anyhow::{Context, Result, bail};
@@ -13,7 +13,7 @@ pub const SEARCH_DIRS: &[&str] = &["parts/", "p/"];
 
 /// Marker written last by [`install_from_zip`]; its presence means the cache
 /// is complete.
-pub const MARKER: &str = ".studforge-installed";
+pub const MARKER: &str = ".fushion-installed";
 
 /// Extra top-level files copied verbatim (licence and colours).
 const EXTRA_FILES: &[&str] = &["LDConfig.ldr", "CAreadme.txt", "CAlicense.txt", "CAlicense4.txt"];
@@ -28,16 +28,16 @@ pub struct InstallReport {
     pub missing: Vec<String>,
 }
 
-/// `<cache>/studforge/ldraw`, falling back to `./studforge-cache/ldraw`.
+/// `<cache>/fushion/ldraw`, falling back to `./fushion-cache/ldraw`.
 pub fn default_cache_dir() -> PathBuf {
-    dirs::cache_dir().unwrap_or_else(|| PathBuf::from("studforge-cache")).join("studforge").join("ldraw")
+    dirs::cache_dir().unwrap_or_else(|| PathBuf::from("fushion-cache")).join("fushion").join("ldraw")
 }
 
 /// Where the downloader stores the LDraw `complete.zip`.
 pub fn default_zip_path() -> PathBuf {
     dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("studforge-cache"))
-        .join("studforge")
+        .unwrap_or_else(|| PathBuf::from("fushion-cache"))
+        .join("fushion")
         .join("downloads")
         .join("complete.zip")
 }
@@ -141,7 +141,7 @@ pub fn install_parts_from_zip(zip: &Path, dest: &Path, part_ids: &[&str]) -> Res
     }
     fs::write(
         dest.join(MARKER),
-        "Extracted from the LDraw parts library (CC BY 4.0, see CAreadme.txt) by studforge.\n",
+        "Extracted from the LDraw parts library (CC BY 4.0, see CAreadme.txt) by fushion.\n",
     )?;
     Ok(report)
 }

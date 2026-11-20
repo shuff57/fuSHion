@@ -1,7 +1,7 @@
-//! Custom 3D-printable bricks for studforge.
+//! Custom 3D-printable bricks for fushion.
 //!
 //! When no real part fits a spot in a model (a colour never made, a cluster of tiny parts, an
-//! odd shape, a retired part), studforge designs one to print. This crate models it with the
+//! odd shape, a retired part), fushion designs one to print. This crate models it with the
 //! [SolidCraft](https://github.com/tangency-labs/solidcraft) B-rep engine, in process, by
 //! sending it the same JSON command batches its MCP server accepts.
 //!

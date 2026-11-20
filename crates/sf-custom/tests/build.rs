@@ -1,6 +1,6 @@
 //! Builds every shape through SolidCraft and checks it against hand calculations.
 //!
-//! STLs are written to `/tmp/studforge-custom/` for inspection.
+//! STLs are written to `/tmp/fushion-custom/` for inspection.
 
 use serde_json::json;
 use sf_custom::{
@@ -9,7 +9,7 @@ use sf_custom::{
 };
 use std::f64::consts::PI;
 
-const OUT: &str = "/tmp/studforge-custom";
+const OUT: &str = "/tmp/fushion-custom";
 
 fn stud() -> f64 {
     PI * 2.4 * 2.4 * 1.8

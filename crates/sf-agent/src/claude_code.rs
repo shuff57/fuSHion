@@ -1,5 +1,5 @@
 //! The Claude Code backend: runs the user's own `claude` CLI (their
-//! subscription) headless, with studforge's MCP server attached to the same
+//! subscription) headless, with fushion's MCP server attached to the same
 //! session directory. The MCP server writes every build into the session
 //! directory, which the app picks up.
 
@@ -14,11 +14,11 @@ pub fn available() -> bool {
     Command::new("claude").arg("--version").output().map(|o| o.status.success()).unwrap_or(false)
 }
 
-fn write_mcp_config(session: &Session, studforge_exe: &Path) -> Result<PathBuf> {
+fn write_mcp_config(session: &Session, fushion_exe: &Path) -> Result<PathBuf> {
     let cfg = json!({
         "mcpServers": {
-            "studforge": {
-                "command": studforge_exe,
+            "fushion": {
+                "command": fushion_exe,
                 "args": ["mcp", "--session", session.dir],
             }
         }
@@ -29,13 +29,13 @@ fn write_mcp_config(session: &Session, studforge_exe: &Path) -> Result<PathBuf> 
 }
 
 /// Run one turn through Claude Code. Returns Claude's final text.
-pub fn run_turn(session: &Session, studforge_exe: &Path, user_text: &str) -> Result<String> {
+pub fn run_turn(session: &Session, fushion_exe: &Path, user_text: &str) -> Result<String> {
     let id_path = session.dir.join("claude_code_session.txt");
     let resume = std::fs::read_to_string(&id_path).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     let budget = session.budget.unwrap_or(sf_engine::DEFAULT_BUDGET);
     let prompt = if resume.is_none() {
         format!(
-            "Use the studforge tools to build the picture at {} as a brick model (part budget {budget}). \
+            "Use the fushion tools to build the picture at {} as a brick model (part budget {budget}). \
              First call get_guide and view_source_image, then build with build_model and iterate on the \
              renders, at most 5 builds. Finish with two or three plain sentences for the user. {}",
             session.source_png_path().display(),
@@ -44,7 +44,7 @@ pub fn run_turn(session: &Session, studforge_exe: &Path, user_text: &str) -> Res
     } else {
         format!("{user_text}\n(Part budget: {budget}. Edit the previous spec with build_model; at most 5 builds.)")
     };
-    let mcp = write_mcp_config(session, studforge_exe)?;
+    let mcp = write_mcp_config(session, fushion_exe)?;
     let mut cmd = Command::new("claude");
     cmd.arg("-p")
         .arg("--output-format")
@@ -53,8 +53,8 @@ pub fn run_turn(session: &Session, studforge_exe: &Path, user_text: &str) -> Res
         .arg(&mcp)
         .arg("--strict-mcp-config")
         .arg("--allowedTools")
-        .arg("mcp__studforge__get_guide mcp__studforge__view_source_image mcp__studforge__build_model mcp__studforge__get_state")
-        // studforge only needs its own tools; keep Claude out of the shell and files.
+        .arg("mcp__fushion__get_guide mcp__fushion__view_source_image mcp__fushion__build_model mcp__fushion__get_state")
+        // fushion only needs its own tools; keep Claude out of the shell and files.
         .arg("--disallowedTools")
         .arg("Bash Edit Write NotebookEdit WebFetch WebSearch")
         .current_dir(&session.dir);

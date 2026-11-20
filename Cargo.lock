@@ -2255,6 +2255,35 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 
 [[package]]
+name = "fushion"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.23.1",
+ "bytemuck",
+ "clap",
+ "dirs",
+ "eframe",
+ "egui",
+ "egui-wgpu",
+ "image",
+ "rfd",
+ "rmcp",
+ "serde",
+ "serde_json",
+ "sf-agent",
+ "sf-catalog",
+ "sf-core",
+ "sf-engine",
+ "sf-export",
+ "sf-ldraw",
+ "sf-render",
+ "sf-spec",
+ "tokio",
+ "wgpu",
+]
+
+[[package]]
 name = "futures"
 version = "0.3.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6168,35 +6197,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "studforge"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "base64 0.23.1",
- "bytemuck",
- "clap",
- "dirs",
- "eframe",
- "egui",
- "egui-wgpu",
- "image",
- "rfd",
- "rmcp",
- "serde",
- "serde_json",
- "sf-agent",
- "sf-catalog",
- "sf-core",
- "sf-engine",
- "sf-export",
- "sf-ldraw",
- "sf-render",
- "sf-spec",
- "tokio",
- "wgpu",
 ]
 
 [[package]]

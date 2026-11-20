@@ -38,16 +38,16 @@ impl SyncOptions {
     }
 }
 
-/// `dirs::cache_dir()/studforge/downloads`.
+/// `dirs::cache_dir()/fushion/downloads`.
 pub fn default_downloads_dir() -> Option<PathBuf> {
-    dirs::cache_dir().map(|d| d.join("studforge").join("downloads"))
+    dirs::cache_dir().map(|d| d.join("fushion").join("downloads"))
 }
 
 /// Download any missing [`DUMP_FILES`] into `dir` (public CDN, no key).
 pub fn ensure_downloads(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let client = reqwest::blocking::Client::builder()
-        .user_agent(concat!("studforge/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("fushion/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(300))
         .build()?;
     for f in DUMP_FILES {

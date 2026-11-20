@@ -1,4 +1,4 @@
-//! LDraw support for studforge.
+//! LDraw support for fushion.
 //!
 //! * [`install`]: extract the parts the catalog needs from the LDraw
 //!   `complete.zip` into a cache directory.

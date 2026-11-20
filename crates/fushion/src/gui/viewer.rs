@@ -520,7 +520,7 @@ pub fn show(
     };
     let srgb_target = ui
         .ctx()
-        .data(|d| d.get_temp::<bool>(egui::Id::unique("studforge_srgb_target")))
+        .data(|d| d.get_temp::<bool>(egui::Id::unique("fushion_srgb_target")))
         .unwrap_or(false);
     let eye = cam.eye();
     let globals = Globals {
