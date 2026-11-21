@@ -197,6 +197,10 @@ pub struct DetailDesign {
     /// `source`. `mesh` is always the assembled detail in its main colour, for quick views.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kit: Option<Kit>,
+    /// How it attaches to a stem (a bar hole for a flower head, a clip for a leaf), if it
+    /// can go on one. A design may have both sockets and a mount.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mount: Option<crate::stem::StemMount>,
 }
 
 /// A detail built from separate printed parts, like the flowers of LEGO's Botanical

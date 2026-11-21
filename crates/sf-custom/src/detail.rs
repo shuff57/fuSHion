@@ -906,6 +906,7 @@ fn assemble(
         studs: Vec::new(),
         mesh,
         kit: None,
+        mount: None,
         source: DetailSource { source },
     };
     let overhang_mm2 = overhang_area(&part.stl, hollow_h + 0.05);

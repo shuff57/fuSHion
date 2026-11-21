@@ -35,6 +35,9 @@ pub struct Model {
     /// Kits (details built from several printed parts), by the same key.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub kits: BTreeMap<String, Kit>,
+    /// Stems (one printed piece each) with their heads and leaves, plugged into hubs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stems: Vec<crate::stem::StemPlacement>,
 }
 
 impl Model {

@@ -1284,6 +1284,7 @@ mod tests {
             studs: Vec::new(),
             mesh: DetailMesh { positions: vec![[0.0; 3]; 3], indices: vec![0, 1, 2] },
             kit: None,
+            mount: None,
             source: DetailSource { source: serde_json::json!({"template": "flower_head"}) },
         }
     }
@@ -1357,6 +1358,7 @@ mod tests {
                 [-19.0, 19.0, 0.0, 24.0, 11.0, 29.0],
             ]),
             kit: None,
+            mount: None,
             source: DetailSource { source: serde_json::json!({"template": "leaf"}) },
         }
     }

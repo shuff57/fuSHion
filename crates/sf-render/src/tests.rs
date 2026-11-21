@@ -176,6 +176,7 @@ fn box_detail() -> (sf_core::CustomDef, sf_core::DetailMesh) {
         studs: vec![],
         mesh: sf_core::DetailMesh { positions, indices },
         kit: None,
+        mount: None,
         source: sf_core::DetailSource { source: serde_json::Value::Null },
     };
     (design.instance("D001"), design.mesh)
@@ -314,6 +315,7 @@ fn kit_details_draw_their_parts_in_role_colours() {
         mesh: box_mesh([-20.0, -8.0, -20.0], [20.0, 8.0, 20.0]),
         source: sf_core::DetailSource { source: serde_json::Value::Null },
         kit: Some(kit.clone()),
+        mount: None,
     };
     let mut m = model(vec![printed(design.instance("D001"), RED, Cell::new(0, 0, 0))]);
     m.meshes.insert("flower".into(), design.mesh.clone());

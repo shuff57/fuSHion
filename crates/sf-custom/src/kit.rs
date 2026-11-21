@@ -671,6 +671,7 @@ pub(crate) fn build_kit(name: &str, label: &str, def: KitDef, source: Value) -> 
         mesh: assembled,
         source: DetailSource { source },
         kit: Some(kit),
+        mount: None,
     };
     Ok(BuiltKit { design, prints, overhangs })
 }
