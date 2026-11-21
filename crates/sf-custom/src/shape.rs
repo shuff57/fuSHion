@@ -68,6 +68,11 @@ pub enum CustomShape {
         /// `block ∩ (S ∪ P)`, studs only where the top under them is kept. `None`: plain.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         trim: Option<sf_core::Trim>,
+        /// With a trim: the columns whose socket stays open whatever the curve does (a stud
+        /// from below goes there). Under other columns whose top is cut the hollow is filled.
+        /// `None`: none listed (only columns that keep their top stay hollow).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        sockets: Option<Vec<(i32, i32)>>,
     },
 }
 

@@ -160,6 +160,7 @@ mod imp {
                         .collect(),
                     label: Some(def.id.clone()),
                     trim: None,
+                    sockets: None,
                 };
                 let build_plain = || sf_custom::build(&plain, &profile()).map_err(|e| anyhow::anyhow!("{}: {e}", def.id));
                 let Some(trim) = def.trim.as_deref() else {
@@ -168,7 +169,8 @@ mod imp {
                 // The curved brick, on its own thread so a stuck SolidCraft boolean can't
                 // hold up the whole print set.
                 let CustomShape::Printed { cells, plates, units, label, .. } = plain.clone() else { unreachable!() };
-                let curved = CustomShape::Printed { cells, plates, units, label, trim: Some(trim.clone()) };
+                let sockets = Some(def.sockets.iter().map(|&(a, b)| (i32::from(a), i32::from(b))).collect());
+                let curved = CustomShape::Printed { cells, plates, units, label, trim: Some(trim.clone()), sockets };
                 let (tx, rx) = std::sync::mpsc::channel();
                 std::thread::spawn(move || {
                     let _ = tx.send(sf_custom::build_trimmed(&curved, &profile()));

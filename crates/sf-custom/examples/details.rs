@@ -84,8 +84,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let bricks = if only.is_some() { Vec::new() } else { vec![
-        ("printed_L", CustomShape::Printed { cells: vec![(0, 0), (1, 0), (2, 0), (0, 1), (0, 2)], plates: 3, units: vec![vec![(0, 0), (1, 0), (2, 0)], vec![(0, 1), (0, 2)]], label: Some("B017".into()) , trim: None}),
-        ("printed_2x4_split", CustomShape::Printed { cells: (0..4).flat_map(|i| (0..2).map(move |j| (i, j))).collect(), plates: 3, units: vec![vec![(0, 0), (1, 0)], vec![(2, 0), (3, 0)], vec![(0, 1), (1, 1), (2, 1)]], label: Some("B123".into()), trim: None }),
+        ("printed_L", CustomShape::Printed { cells: vec![(0, 0), (1, 0), (2, 0), (0, 1), (0, 2)], plates: 3, units: vec![vec![(0, 0), (1, 0), (2, 0)], vec![(0, 1), (0, 2)]], label: Some("B017".into()) , trim: None, sockets: None }),
+        ("printed_2x4_split", CustomShape::Printed { cells: (0..4).flat_map(|i| (0..2).map(move |j| (i, j))).collect(), plates: 3, units: vec![vec![(0, 0), (1, 0)], vec![(2, 0), (3, 0)], vec![(0, 1), (1, 1), (2, 1)]], label: Some("B123".into()), trim: None, sockets: None }),
     ] };
     for (name, shape) in bricks {
         let part = build(&shape, &StudProfile::fused())?;

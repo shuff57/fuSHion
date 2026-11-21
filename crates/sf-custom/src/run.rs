@@ -46,6 +46,18 @@ pub fn build_plan(plan: &Plan) -> Result<CustomPart> {
 
 /// Runs a plan's stages in `s`, checking each (see [`build_plan`]); returns each stage's
 /// measured volume.
+/// Every stage's commands with no checks between them (see [`run_stages`] for those).
+pub(crate) fn run_unchecked(s: &mut Session, plan: &Plan) -> Result<()> {
+    let mut index = 0;
+    for stage in &plan.stages {
+        for c in &stage.commands {
+            run_step(s, &stage.name, index, c)?;
+            index += 1;
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn run_stages(s: &mut Session, plan: &Plan) -> Result<Vec<(String, f64)>> {
     let mut index = 0;
     let (mut before, mut expected_before) = (0.0, 0.0);
@@ -418,6 +430,17 @@ pub(crate) fn finish(
     volume: Option<f64>,
     bbox: Option<([f64; 3], [f64; 3])>,
 ) -> Result<CustomPart> {
+    finish_with(s, stage, volume, bbox, true)
+}
+
+/// [`finish`], with the 3MF export left out (empty) unless `three_mf`.
+pub(crate) fn finish_with(
+    s: &mut Session,
+    stage: &str,
+    volume: Option<f64>,
+    bbox: Option<([f64; 3], [f64; 3])>,
+    want_3mf: bool,
+) -> Result<CustomPart> {
     let m = measure(s, stage)?;
     if m.bodies == 0 {
         return mismatch(stage, "the batch made no body".into());
@@ -462,13 +485,17 @@ pub(crate) fn finish(
         "fushion-custom",
     )
     .map_err(|e| CustomError::Export(e.to_string()))?;
-    let three_mf = solidcraft_io::export(
-        &state,
-        &[],
-        solidcraft_io::Format::ThreeMf,
-        "fushion-custom",
-    )
-    .map_err(|e| CustomError::Export(e.to_string()))?;
+    let three_mf = if want_3mf {
+        solidcraft_io::export(
+            &state,
+            &[],
+            solidcraft_io::Format::ThreeMf,
+            "fushion-custom",
+        )
+        .map_err(|e| CustomError::Export(e.to_string()))?
+    } else {
+        Vec::new()
+    };
 
     let mesh = analyze_stl(&stl)?;
     if !mesh.is_watertight() {

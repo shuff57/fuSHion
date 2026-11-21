@@ -156,6 +156,8 @@ pub struct App {
     /// Build for 3D printing (merged printed bricks and designed details) rather than from
     /// real LEGO parts. Kept per session in `print.txt`.
     print_mode: bool,
+    /// Printed bricks follow the true curved surface. Kept per session in `curves.txt`.
+    curves: bool,
     backend: Backend,
     api_status: Result<(), String>,
     cc_status: Option<bool>,
@@ -195,6 +197,11 @@ const PRINT_FILE: &str = "print.txt";
 /// The session's build mode (printing when the file is missing).
 fn read_print_mode(dir: &Path) -> bool {
     std::fs::read_to_string(dir.join(PRINT_FILE)).map_or(true, |t| t.trim() != "0")
+}
+
+/// Whether printed bricks follow curves in this session (on when the file is missing).
+fn read_curves(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join("curves.txt")).map_or(true, |t| t.trim() != "0")
 }
 
 fn mtime(p: &Path) -> Option<SystemTime> {
@@ -293,6 +300,7 @@ impl App {
             source_tex: None,
             budget: sf_engine::DEFAULT_BUDGET,
             print_mode: true,
+            curves: true,
             backend: Backend::Api,
             api_status: Ok(()),
             cc_status: None,
@@ -389,6 +397,7 @@ impl App {
             Ok(s) => {
                 self.budget = s.budget.unwrap_or(sf_engine::DEFAULT_BUDGET);
                 self.print_mode = read_print_mode(&s.dir);
+                self.curves = read_curves(&s.dir);
                 self.chat = worker::transcript_from_conversation(&s)
                     .into_iter()
                     .map(|(u, t)| ChatLine {
@@ -629,6 +638,15 @@ impl App {
             return Ok(());
         };
         s.set_print(print).map_err(|e| format!("Saving build mode: {e:#}"))
+    }
+
+    /// Save the smooth-curves choice into the session (`curves.txt`, read into every build).
+    fn session_curves_sync(&mut self) -> Result<(), String> {
+        let curves = self.curves;
+        let Some(s) = &mut self.session else {
+            return Ok(());
+        };
+        s.set_curves(curves).map_err(|e| format!("Saving smooth curves: {e:#}"))
     }
 
     fn session_budget_sync(&mut self) -> Result<(), String> {

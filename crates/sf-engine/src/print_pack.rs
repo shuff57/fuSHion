@@ -38,6 +38,8 @@ pub struct PrintPacked {
     pub placements: Vec<Placement>,
     /// Display meshes of trimmed bricks, by `CustomDef::mesh` (`"trim:B007"`).
     pub meshes: BTreeMap<String, DetailMesh>,
+    /// What curving did (print mode with curves only).
+    pub curve_stats: Option<CurveStats>,
     pub dropped: usize,
     pub anchored: usize,
     pub compiled: Option<Compiled>,
@@ -58,6 +60,8 @@ struct Part {
 
 struct Body<'a> {
     c: &'a Compiled,
+    /// Filled plates (of 3) a column needs to join a course as a brick column.
+    min_fill: usize,
     dims: [i32; 3],
     inner: Vec<ColorId>,
     owner: Vec<i32>,
@@ -65,10 +69,13 @@ struct Body<'a> {
 }
 
 impl<'a> Body<'a> {
-    fn new(c: &'a Compiled) -> Self {
+    /// `min_fill`: filled plates (of 3) a column needs to join a course. 2 for plain bricks;
+    /// 1 when bricks are trimmed to the true surface, which cuts the empty plates away again.
+    /// (With 2, a sphere's rim leaves single-column plates that no fused stud can hold.)
+    fn new(c: &'a Compiled, min_fill: usize) -> Self {
         let dims = c.grid.dims;
         let n = (dims[0] * dims[1] * dims[2]) as usize;
-        Body { c, dims, inner: nearest_surface_colors(c), owner: vec![-1; n], parts: Vec::new() }
+        Body { c, min_fill, dims, inner: nearest_surface_colors(c), owner: vec![-1; n], parts: Vec::new() }
     }
 
     fn idx(&self, x: i32, y: i32, z: i32) -> usize {
@@ -99,8 +106,8 @@ impl<'a> Body<'a> {
         }
     }
 
-    /// The colour of a brick column of the course at `y`: at least two of its three plates
-    /// filled, none taken, and every visible one the same colour.
+    /// The colour of a brick column of the course at `y`: at least `min_fill` of its three
+    /// plates filled, none taken, and every visible one the same colour.
     fn brick_color(&self, x: i32, y: i32, z: i32) -> Option<ColorId> {
         let (mut filled, mut visible, mut hidden) = (0, None, None);
         for dy in 0..3 {
@@ -123,7 +130,7 @@ impl<'a> Body<'a> {
                 }
             }
         }
-        if filled >= 2 { visible.or(hidden) } else { None }
+        if filled >= self.min_fill { visible.or(hidden) } else { None }
     }
 
     fn add(&mut self, cols: Vec<(i32, i32)>, y: i32, plates: i32, color: ColorId) {
@@ -424,59 +431,304 @@ fn is_brick(p: &Placement) -> bool {
 /// With `exposed_studs` false (curved surfaces), columns with nothing on them get no stud,
 /// so the top of the sculpture is smooth.
 pub fn assign_studs(placements: &mut [Placement], meshes: &BTreeMap<String, DetailMesh>, exposed_studs: bool) {
-    let mut owner: HashMap<Cell, usize> = HashMap::new();
-    // Columns over which a stud would hit a detail's body rather than its socket base.
-    let mut no_stud: HashSet<Cell> = HashSet::new();
-    for (i, p) in placements.iter().enumerate() {
-        let cells = details::occupied_cells(p, meshes);
-        if is_detail(p) {
-            let sockets: HashSet<(i32, i32)> = p.bottom_sockets().into_iter().collect();
-            for c in cells.iter().filter(|c| c.y == p.origin.y) {
-                if !sockets.contains(&(c.x, c.z)) {
-                    no_stud.insert(*c);
+    let map = StudMap::new(placements, meshes);
+    for i in 0..placements.len() {
+        if is_brick(&placements[i]) {
+            layout_studs(placements, &map, i, exposed_studs, &|_| true);
+        }
+    }
+}
+
+/// Who fills each cell, and where a stud would hit a detail's body, for stud layout.
+struct StudMap {
+    owner: HashMap<Cell, usize>,
+    /// Columns over which a stud would hit a detail's body rather than its socket base.
+    no_stud: HashSet<Cell>,
+}
+
+impl StudMap {
+    fn new(placements: &[Placement], meshes: &BTreeMap<String, DetailMesh>) -> Self {
+        let mut owner: HashMap<Cell, usize> = HashMap::new();
+        let mut no_stud: HashSet<Cell> = HashSet::new();
+        for (i, p) in placements.iter().enumerate() {
+            let cells = details::occupied_cells(p, meshes);
+            if is_detail(p) {
+                let sockets: HashSet<(i32, i32)> = p.bottom_sockets().into_iter().collect();
+                for c in cells.iter().filter(|c| c.y == p.origin.y) {
+                    if !sockets.contains(&(c.x, c.z)) {
+                        no_stud.insert(*c);
+                    }
+                }
+            }
+            for c in cells {
+                owner.insert(c, i);
+            }
+        }
+        StudMap { owner, no_stud }
+    }
+}
+
+/// Lays out brick `i`'s studs over the grid columns `allow` accepts (see [`assign_studs`]).
+fn layout_studs(placements: &mut [Placement], map: &StudMap, i: usize, exposed_studs: bool, allow: &dyn Fn((i32, i32)) -> bool) {
+    let p = &placements[i];
+    let top = p.top();
+    let (ox, oz) = (p.origin.x, p.origin.z);
+    let cols: Vec<(i32, i32)> = {
+        let mut v: Vec<(i32, i32)> = p.cells().filter(|c| c.y == p.origin.y).map(|c| (c.x, c.z)).collect();
+        v.sort_unstable();
+        v.dedup();
+        v.into_iter()
+            .filter(|&(x, z)| !map.no_stud.contains(&Cell::new(x, top, z)))
+            .filter(|&(x, z)| exposed_studs || map.owner.contains_key(&Cell::new(x, top, z)))
+            .filter(|&c| allow(c))
+            .collect()
+    };
+    let above = |x: i32, z: i32| map.owner.get(&Cell::new(x, top, z)).copied();
+    let [fx, fz] = p.footprint();
+    let mut best: Option<(usize, Pieces)> = None;
+    for along_x in [fx >= fz, fx < fz] {
+        let (units, flat) = stud_layout(&cols, along_x, above);
+        let covered = flat.iter().filter(|&&(x, z)| above(x, z).is_some()).count();
+        let s = covered * 10 + flat.len();
+        if best.as_ref().is_none_or(|b| s < b.0) {
+            best = Some((s, units));
+        }
+    }
+    let units = best.map(|b| b.1).unwrap_or_default();
+    let local: Vec<Vec<(u8, u8)>> = units.iter().map(|u| u.iter().map(|&(x, z)| ((x - ox) as u8, (z - oz) as u8)).collect()).collect();
+    let def = placements[i].custom.as_mut().expect("a printed brick");
+    def.studs = local.iter().flatten().copied().collect();
+    def.studs.sort_unstable();
+    def.units = local;
+}
+
+/// What trimming contacts to the shape did (see [`curve_bricks`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct CurveStats {
+    /// Display meshes: body triangles, slivers, triangles cutting a crease (see
+    /// [`curves::TrimmedMesh`]) and the worst distance off the surface, µm.
+    pub mesh_triangles: usize,
+    pub slivers: usize,
+    pub chamfered: usize,
+    pub max_off_um: usize,
+    /// Bricks trimmed to the true surface.
+    pub curved: usize,
+    /// Stud contacts between two trimmed bricks, and how many `S` covers.
+    pub contacts: usize,
+    pub covered: usize,
+    /// Contacts restored although `S` doesn't cover them, so no part is cut loose.
+    pub restored: usize,
+    /// Parts that needed contacts restored.
+    pub parts_restored: usize,
+    /// After restoring: parts that had a connection before contacts were trimmed and have
+    /// none now, and parts floating now that weren't before. Both 0 unless no contact could
+    /// be restored.
+    pub cut_loose: usize,
+    pub newly_floating: usize,
+    /// Studs on body bricks before and after trimming contacts.
+    pub studs_before: usize,
+    pub studs_after: usize,
+    /// Protect boxes before (every contact kept) and after.
+    pub boxes_before: usize,
+    pub boxes_after: usize,
+    /// Of those, boxes reaching outside `S` grown by the contact margin (ledges).
+    pub ledges_before: usize,
+    pub ledges_after: usize,
+    /// Ground columns of curved bricks, how many keep a flat pad (`S` doesn't reach the
+    /// floor there), and how many stand on the floor at all.
+    pub ground_columns: usize,
+    pub pads: usize,
+    pub ground_touching: usize,
+    /// The base following the outline would have unbalanced the model, so it kept the
+    /// plain bottoms.
+    pub ground_fallback: bool,
+}
+
+/// Trims every exposed printed brick to the true surface, contacts included: a contact
+/// between two trimmed bricks keeps its stud, socket and protect boxes only where `S`
+/// covers them (see [`curves::contacts`]). Then, so no part is cut loose, a part left with
+/// no connection (or newly floating) gets its best-covered contacts back until it is held
+/// as well as before. Studs and sockets follow the kept contacts.
+fn curve_bricks(ps: &mut [Placement], meshes: &BTreeMap<String, DetailMesh>, surface: &[sf_spec::SurfaceShape]) -> CurveStats {
+    let n = ps.len();
+    let occ = curves::Occupancy::new(ps, meshes);
+    let trimmed: Vec<bool> = ps.iter().enumerate().map(|(i, p)| is_brick(p) && curves::is_exposed(i, p, &occ)).collect();
+    let solid = curves::Solid::new(surface);
+    let contacts = curves::contacts(ps, &occ, &trimmed, &solid);
+    let by_lower: HashMap<(usize, (i32, i32)), usize> = contacts.iter().enumerate().map(|(k, c)| ((c.lower, c.col), k)).collect();
+    let by_upper: HashMap<(usize, (i32, i32)), usize> = contacts.iter().enumerate().map(|(k, c)| ((c.upper, c.col), k)).collect();
+    let studs = |ps: &[Placement]| ps.iter().filter(|p| is_brick(p)).map(|p| p.top_studs().len()).sum::<usize>();
+    let mut stats = CurveStats {
+        curved: 0,
+        contacts: contacts.iter().filter(|c| !c.fixed).count(),
+        covered: contacts.iter().filter(|c| !c.fixed && c.covered).count(),
+        studs_before: studs(ps),
+        ..Default::default()
+    };
+    let analysis =
+        |ps: &[Placement]| crate::analyze(&sf_core::Model { placements: ps.to_vec(), meshes: meshes.clone(), ..Default::default() });
+    let linked = |a: &crate::Analysis, ps: &[Placement]| -> Vec<bool> {
+        let mut l: Vec<bool> = ps.iter().map(|p| p.origin.y == 0).collect();
+        for &(a, b, _) in &a.connections {
+            l[a] = true;
+            l[b] = true;
+        }
+        l
+    };
+    let base = analysis(ps);
+    let base_linked = linked(&base, ps);
+    let base_floating: HashSet<usize> = base.floating.iter().copied().collect();
+    let map = StudMap::new(ps, meshes);
+    // How each ground column of a curved brick meets the floor.
+    let ground_cols: Vec<(usize, (i32, i32))> = (0..n)
+        .filter(|&i| trimmed[i] && ps[i].origin.y == 0)
+        .flat_map(|i| {
+            ps[i].custom.as_ref().map(|d| d.cells.iter().map(|&(x, z)| (i, (x as i32, z as i32))).collect::<Vec<_>>()).unwrap_or_default()
+        })
+        .collect();
+    let ps_ref: &[Placement] = ps;
+    let mut feet: HashMap<(usize, (i32, i32)), curves::GroundFoot> =
+        ground_cols.iter().copied().zip(curves::par_map(&ground_cols, |&(i, c)| curves::ground_foot(&solid, &ps_ref[i], c))).collect();
+    stats.ground_columns = feet.len();
+    let mut keep: Vec<bool> = contacts.iter().map(|c| c.fixed || c.covered).collect();
+    let lowers: Vec<usize> = (0..n).filter(|&i| is_brick(&ps[i]) && contacts.iter().any(|c| c.lower == i && !c.fixed)).collect();
+    let mut restored_parts: HashSet<usize> = HashSet::new();
+    for _round in 0..(4 * contacts.len() + 1) {
+        // Studs over kept contacts only; sockets of trimmed bricks over studs (or the ground).
+        for &i in &lowers {
+            let allow = |c: (i32, i32)| by_lower.get(&(i, c)).is_none_or(|&k| keep[k]);
+            layout_studs(ps, &map, i, false, &allow);
+        }
+        let stud_at: HashSet<(i32, i32, i32)> =
+            ps.iter().flat_map(|p| p.top_studs().into_iter().map(move |(x, z)| (x, p.top(), z))).collect();
+        for j in (0..n).filter(|&j| trimmed[j]) {
+            let o = ps[j].origin;
+            let def = ps[j].custom.as_mut().expect("a printed brick");
+            let socket = |&(x, z): &(u8, u8)| {
+                if o.y == 0 {
+                    feet.get(&(j, (x as i32, z as i32))).is_none_or(|f| f.touches)
+                } else {
+                    stud_at.contains(&(o.x + x as i32, o.y, o.z + z as i32))
+                }
+            };
+            def.sockets = def.cells.iter().filter(|c| socket(c)).copied().collect();
+        }
+        let a = analysis(ps);
+        let now = linked(&a, ps);
+        let floating: HashSet<usize> = a.floating.iter().copied().collect();
+        let loose: Vec<usize> = (0..n).filter(|&k| trimmed[k] && base_linked[k] && !now[k]).collect();
+        let fresh: Vec<usize> = (0..n).filter(|k| floating.contains(k) && !base_floating.contains(k)).collect();
+        stats.cut_loose = loose.len();
+        stats.newly_floating = fresh.len();
+        let victims = if loose.is_empty() { fresh } else { loose };
+        let mut progress = false;
+        for &v in &victims {
+            // The victim's best dropped contact, preferring one to a part that is held.
+            let best = (0..contacts.len()).filter(|&k| !keep[k] && (contacts[k].lower == v || contacts[k].upper == v)).max_by(|&a, &b| {
+                let key = |k: usize| {
+                    let other = if contacts[k].lower == v { contacts[k].upper } else { contacts[k].lower };
+                    (!floating.contains(&other), contacts[k].score)
+                };
+                let (ka, kb) = (key(a), key(b));
+                ka.0.cmp(&kb.0).then(ka.1.total_cmp(&kb.1))
+            });
+            if let Some(k) = best {
+                keep[k] = true;
+                stats.restored += 1;
+                restored_parts.insert(v);
+                progress = true;
+            }
+        }
+        if !progress && !victims.is_empty() {
+            // Its own contacts are all back, yet it isn't held: dropping other columns changed
+            // how a neighbour's studs fuse. Give the bricks it touches every contact back, so
+            // their studs are laid out as before trimming.
+            let touching: HashSet<usize> = contacts
+                .iter()
+                .filter(|c| victims.contains(&c.lower) || victims.contains(&c.upper))
+                .flat_map(|c| [c.lower, c.upper])
+                .collect();
+            for (k, c) in contacts.iter().enumerate() {
+                if !keep[k] && touching.contains(&c.lower) {
+                    keep[k] = true;
+                    stats.restored += 1;
+                    restored_parts.insert(c.upper);
+                    progress = true;
                 }
             }
         }
-        for c in cells {
-            owner.insert(c, i);
+        if !progress {
+            break;
         }
     }
-    #[allow(clippy::needless_range_loop)] // reads all placements, then writes this one
-    for i in 0..placements.len() {
-        if !is_brick(&placements[i]) {
-            continue;
+    // The base must still balance: if following the outline tips it, keep plain bottoms.
+    if base.balance.ok && !analysis(ps).balance.ok {
+        stats.ground_fallback = true;
+        for (&(i, c), f) in feet.iter_mut() {
+            *f = curves::GroundFoot { boxes: curves::plain_bottom(&ps[i], c), touches: true, pad: false };
         }
-        let p = &placements[i];
-        let top = p.top();
-        let (ox, oz) = (p.origin.x, p.origin.z);
-        let cols: Vec<(i32, i32)> = {
-            let mut v: Vec<(i32, i32)> = p.cells().filter(|c| c.y == p.origin.y).map(|c| (c.x, c.z)).collect();
-            v.sort_unstable();
-            v.dedup();
-            v.into_iter()
-                .filter(|&(x, z)| !no_stud.contains(&Cell::new(x, top, z)))
-                .filter(|&(x, z)| exposed_studs || owner.contains_key(&Cell::new(x, top, z)))
-                .collect()
-        };
-        let above = |x: i32, z: i32| owner.get(&Cell::new(x, top, z)).copied();
-        let [fx, fz] = p.footprint();
-        let mut best: Option<(usize, Pieces)> = None;
-        for along_x in [fx >= fz, fx < fz] {
-            let (units, flat) = stud_layout(&cols, along_x, above);
-            let covered = flat.iter().filter(|&&(x, z)| above(x, z).is_some()).count();
-            let s = covered * 10 + flat.len();
-            if best.as_ref().is_none_or(|b| s < b.0) {
-                best = Some((s, units));
-            }
+        for &(i, _) in &ground_cols {
+            let def = ps[i].custom.as_mut().expect("a printed brick");
+            def.sockets = def.cells.clone();
         }
-        let units = best.map(|b| b.1).unwrap_or_default();
-        let local: Vec<Vec<(u8, u8)>> =
-            units.iter().map(|u| u.iter().map(|&(x, z)| ((x - ox) as u8, (z - oz) as u8)).collect()).collect();
-        let def = placements[i].custom.as_mut().expect("a printed brick");
-        def.studs = local.iter().flatten().copied().collect();
-        def.studs.sort_unstable();
-        def.units = local;
     }
+    stats.pads = feet.values().filter(|f| f.pad).count();
+    stats.ground_touching = feet.values().filter(|f| f.touches).count();
+    stats.parts_restored = restored_parts.len();
+    stats.studs_after = studs(ps);
+    // Trims: protect only contacts that stayed (fixed ones, or with a stud and socket).
+    let occ = curves::Occupancy::new(ps, meshes);
+    let is_trimmed = |j: usize| trimmed[j];
+    let ids: Vec<usize> = (0..n).filter(|&i| trimmed[i]).collect();
+    let ps_ref: &[Placement] = ps;
+    let results = curves::par_map(&ids, |&i| {
+        let ps = ps_ref;
+        let mut stats = CurveStats::default();
+        let p = &ps[i];
+        let o = p.origin;
+        let studs: HashSet<(u8, u8)> = p.custom.as_ref().map(|d| d.studs.iter().copied().collect()).unwrap_or_default();
+        let sockets: HashSet<(u8, u8)> = p.custom.as_ref().map(|d| d.sockets.iter().copied().collect()).unwrap_or_default();
+        let local = |c: (i32, i32)| (c.0 as u8, c.1 as u8);
+        let top =
+            |c: (i32, i32)| by_lower.get(&(i, (o.x + c.0, o.z + c.1))).is_none_or(|&k| contacts[k].fixed || studs.contains(&local(c)));
+        let bottom =
+            |c: (i32, i32)| by_upper.get(&(i, (o.x + c.0, o.z + c.1))).is_none_or(|&k| contacts[k].fixed || sockets.contains(&local(c)));
+        let all = |_: (i32, i32)| true;
+        let plain = |c: (i32, i32)| curves::plain_bottom(p, c);
+        let ground = |c: (i32, i32)| feet.get(&(i, c)).map(|f| f.boxes.clone()).unwrap_or_default();
+        let before =
+            curves::brick_trim(i, p, &occ, surface, &is_trimmed, &curves::KeptContacts { top: &all, bottom: &all, ground: &plain });
+        let after =
+            curves::brick_trim(i, p, &occ, surface, &is_trimmed, &curves::KeptContacts { top: &top, bottom: &bottom, ground: &ground });
+        // Kept boxes are a subset of the full set: test each box once.
+        let outside: HashMap<String, bool> = before
+            .iter()
+            .flat_map(|t| t.protect.iter())
+            .map(|b| (format!("{b:?}"), solid.reaches_outside(p, b, curves::CONTACT_MARGIN)))
+            .collect();
+        let ledges = |t: &sf_core::Trim| t.protect.iter().filter(|b| outside.get(&format!("{b:?}")).copied().unwrap_or(false)).count();
+        if let Some(t) = &before {
+            stats.boxes_before += t.protect.len();
+            stats.ledges_before += ledges(t);
+        }
+        if let Some(t) = &after {
+            stats.boxes_after += t.protect.len();
+            stats.ledges_after += ledges(t);
+            stats.curved += 1;
+        }
+        (after, stats)
+    });
+    for (&i, (t, s)) in ids.iter().zip(results) {
+        stats.boxes_before += s.boxes_before;
+        stats.boxes_after += s.boxes_after;
+        stats.ledges_before += s.ledges_before;
+        stats.ledges_after += s.ledges_after;
+        stats.curved += s.curved;
+        if let (Some(def), Some(t)) = (ps[i].custom.as_mut(), t) {
+            def.trim = Some(Box::new(t));
+        }
+    }
+    stats
 }
 
 /// Gives every printed brick an id per distinct geometry (columns, plates, units),
@@ -487,14 +739,16 @@ pub fn assign_ids(placements: &mut [Placement]) {
         let o = placements[i].origin;
         (o.y, o.z, o.x)
     });
-    type Key = (Vec<(u8, u8)>, u8, Vec<Vec<(u8, u8)>>, String);
+    type Key = (Vec<(u8, u8)>, u8, Vec<Vec<(u8, u8)>>, Vec<(u8, u8)>, String);
     let mut ids: HashMap<Key, String> = HashMap::new();
     for i in order {
         let def = placements[i].custom.as_ref().expect("a printed brick");
         let mut units = def.units.clone();
         units.sort();
         let trim = def.trim.as_ref().map(|t| serde_json::to_string(t).unwrap_or_default()).unwrap_or_default();
-        let key = (def.cells.clone(), def.plates, units, trim);
+        let mut sockets = def.sockets.clone();
+        sockets.sort_unstable();
+        let key = (def.cells.clone(), def.plates, units, sockets, trim);
         let n = ids.len() + 1;
         let id = ids.entry(key).or_insert_with(|| format!("B{n:03}")).clone();
         placements[i].custom.as_mut().expect("a printed brick").id = id.clone();
@@ -504,7 +758,7 @@ pub fn assign_ids(placements: &mut [Placement]) {
 
 /// Builds one display mesh per distinct trimmed brick (in parallel), sets each trimmed
 /// brick's `mesh` key and overhang flag, and returns the meshes by key.
-fn mesh_trims(ps: &mut [Placement]) -> BTreeMap<String, DetailMesh> {
+fn mesh_trims(ps: &mut [Placement], quality: &mut CurveStats) -> BTreeMap<String, DetailMesh> {
     let mut jobs: BTreeMap<String, (CustomDef, sf_core::Trim)> = BTreeMap::new();
     for p in ps.iter() {
         if let Some(def) = p.custom.as_deref()
@@ -529,6 +783,12 @@ fn mesh_trims(ps: &mut [Placement]) -> BTreeMap<String, DetailMesh> {
     let mut meshes = BTreeMap::new();
     let mut overhang: HashMap<String, bool> = HashMap::new();
     for (id, m) in results {
+        // Quality over every placed copy.
+        let copies = ps.iter().filter(|p| p.custom.as_ref().is_some_and(|d| d.id == id)).count();
+        quality.mesh_triangles += m.triangles * copies;
+        quality.slivers += m.slivers * copies;
+        quality.chamfered += m.chamfered * copies;
+        quality.max_off_um = quality.max_off_um.max((m.max_off_mm * 1000.0).round() as usize);
         overhang.insert(id.clone(), m.overhang);
         meshes.insert(format!("trim:{id}"), m.mesh);
     }
@@ -560,6 +820,79 @@ pub fn unsupported_details(placements: &[Placement]) -> Vec<String> {
         .collect()
 }
 
+/// With curves, an empty cell joins the model when at least this many of its 18 samples
+/// are inside the shape (22 %): the trim cuts it back to the true outline, so a curve that
+/// bulges past a cell's centre isn't left flat at the cell's edge.
+pub const GROW_SAMPLES: u32 = 4;
+
+/// The grid grown for trimmed bricks (see [`GROW_SAMPLES`]): every empty cell that the
+/// shape covers enough of and that touches a filled cell in its layer joins, in that
+/// neighbour's colour. `None` when nothing joins. Cells outside the grid (cropped away)
+/// can't join.
+fn grow_to_shape(c: &Compiled, min_samples: u32) -> Option<Compiled> {
+    let [dx, dy, dz] = c.grid.dims;
+    let mut grid = c.grid.clone();
+    let mut added = 0;
+    for y in 0..dy {
+        for z in 0..dz {
+            for x in 0..dx {
+                let cell = Cell::new(x, y, z);
+                if c.grid.get(cell) != Fill::Empty || c.sample_mask(cell).count_ones() < min_samples {
+                    continue;
+                }
+                // Same layer only: a bulge past a cell's edge. (Up and down, the course rule
+                // already takes a column with one plate filled; a plate grown above a shape's
+                // top would make a loose sliver.)
+                let colour = [(1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1)].iter().find_map(|&(ox, oy, oz)| {
+                    let n = Cell::new(x + ox, y + oy, z + oz);
+                    match c.grid.in_bounds(n).then(|| c.grid.get(n)) {
+                        Some(Fill::Solid(col)) => Some(col),
+                        _ => None,
+                    }
+                });
+                if let Some(col) = colour {
+                    grid.set(cell, Fill::Solid(col));
+                    added += 1;
+                }
+            }
+        }
+    }
+    if added == 0 {
+        return None;
+    }
+    grid.mark_interior();
+    Some(Compiled { grid, ..c.clone() })
+}
+
+/// Un-grows cells that pack into pieces no stud can hold: after packing `grown`, every grown
+/// cell in a one-column part, or next to one in its layer, goes back to empty (the trim
+/// leaves that bit of curve flat instead). Repeats until the packing settles (3 rounds).
+fn keep_holdable(c: &Compiled, mut grown: Compiled) -> Compiled {
+    let is_grown = |g: &Compiled, cell: Cell| c.grid.get(cell) == Fill::Empty && g.grid.get(cell) != Fill::Empty;
+    for _ in 0..3 {
+        let parts = Body::new(&grown, 1).pack();
+        let mut undo: Vec<Cell> = Vec::new();
+        for part in parts.iter().filter(|p| p.cols.len() == 1) {
+            let (x, z) = part.cols[0];
+            for y in part.y..part.y + part.plates {
+                for (dx, dz) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let cell = Cell::new(x + dx, y, z + dz);
+                    if grown.grid.in_bounds(cell) && is_grown(&grown, cell) {
+                        undo.push(cell);
+                    }
+                }
+            }
+        }
+        if undo.is_empty() {
+            break;
+        }
+        for cell in undo {
+            grown.grid.set(cell, Fill::Empty);
+        }
+    }
+    grown
+}
+
 /// Packs `c` into printed parts, rests the spec's details on it and lays out studs.
 pub fn pack_print(
     c: &Compiled,
@@ -568,13 +901,13 @@ pub fn pack_print(
     repair: bool,
     curves: bool,
 ) -> Result<PrintPacked> {
-    let mut owned: Option<Compiled> = None;
     let mut anchored = 0;
     let meshes = details::design_meshes(designs);
     let curves = curves && !c.surface.is_empty();
+    let mut owned: Option<Compiled> = if curves { grow_to_shape(c, GROW_SAMPLES).map(|g| keep_holdable(c, g)) } else { None };
     for attempt in 0..3 {
         let cc = owned.as_ref().unwrap_or(c);
-        let body: Vec<Placement> = Body::new(cc).pack().iter().map(to_placement).collect();
+        let body: Vec<Placement> = Body::new(cc, if curves { 1 } else { 2 }).pack().iter().map(to_placement).collect();
         let placed = details::place_details(uses, designs, &body)?;
         let mut ps = body;
         ps.extend(placed.placements);
@@ -603,30 +936,20 @@ pub fn pack_print(
             });
             assign_studs(&mut ps, &meshes, !curves);
         }
-        if curves {
-            let occ = curves::Occupancy::new(&ps, &meshes);
-            let exposed: Vec<bool> = ps.iter().enumerate().map(|(i, p)| is_brick(p) && curves::is_exposed(i, p, &occ)).collect();
-            let trimmed = |j: usize| exposed[j];
-            let trims: Vec<Option<sf_core::Trim>> = ps
-                .iter()
-                .enumerate()
-                .map(|(i, p)| if exposed[i] { curves::brick_trim(i, p, &occ, &cc.surface, &trimmed) } else { None })
-                .collect();
-            for (p, t) in ps.iter_mut().zip(trims) {
-                if let (Some(def), Some(t)) = (p.custom.as_mut(), t) {
-                    def.trim = Some(Box::new(t));
-                }
-            }
-        }
+        let curve_stats = curves.then(|| curve_bricks(&mut ps, &meshes, &cc.surface));
         assign_ids(&mut ps);
-        let trim_meshes = if curves { mesh_trims(&mut ps) } else { BTreeMap::new() };
+        let mut curve_stats = curve_stats;
+        let trim_meshes = match curve_stats.as_mut() {
+            Some(q) => mesh_trims(&mut ps, q),
+            None => BTreeMap::new(),
+        };
         let mut warnings = placed.warnings;
         for d in unsupported_details(&ps) {
             warnings.push(format!(
                 "detail {d} has no stud under its base and will fall off: give it a base at least two studs long along a row of the part below"
             ));
         }
-        return Ok(PrintPacked { placements: ps, meshes: trim_meshes, dropped, anchored, compiled: owned, warnings });
+        return Ok(PrintPacked { placements: ps, meshes: trim_meshes, dropped, anchored, compiled: owned, warnings, curve_stats });
     }
     unreachable!("the last attempt always returns")
 }
@@ -700,7 +1023,12 @@ mod tests {
                 let op = if rnd(0.0, 1.0) < 0.2 { "paint" } else { "add" };
                 shapes.push(format!(
                     r#"{{"shape":"{kind}","center":[{:.2},{:.2},{:.2}],"size":[{:.2},{:.2},{:.2}],"color":"{col}","op":"{op}"}}"#,
-                    rnd(-4.0, 4.0), rnd(0.0, 8.0), rnd(-4.0, 4.0), rnd(1.0, 9.0), rnd(1.0, 9.0), rnd(1.0, 9.0)
+                    rnd(-4.0, 4.0),
+                    rnd(0.0, 8.0),
+                    rnd(-4.0, 4.0),
+                    rnd(1.0, 9.0),
+                    rnd(1.0, 9.0),
+                    rnd(1.0, 9.0)
                 ));
             }
             let json = format!(r#"{{"shapes":[{}]}}"#, shapes.join(","));

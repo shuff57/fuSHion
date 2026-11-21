@@ -191,8 +191,8 @@ pub fn smooth_mesh(d: &DetailMesh, crease_deg: f32) -> PartMesh {
     smooth_mesh_with(d, crease_deg, false)
 }
 
-/// [`smooth_mesh`]; with `axis_edges_only`, a feature edge must also have a face whose
-/// normal is within ~5° of an axis beside it.
+/// [`smooth_mesh`]; with `axis_edges_only`, a feature edge must also have a flat block face
+/// (normal on an axis, see [`AXIS_COS`]) beside it, no sliver and no fold.
 fn smooth_mesh_with(d: &DetailMesh, crease_deg: f32, axis_edges_only: bool) -> PartMesh {
     let n = d.positions.len() as u32;
     let weld = Welder::new(&d.positions);
@@ -214,15 +214,24 @@ fn smooth_mesh_with(d: &DetailMesh, crease_deg: f32, axis_edges_only: bool) -> P
         }
         tris.push(([a, b, c], ids, [w[0] / len, w[1] / len, w[2] / len], w));
     }
+    // Sliver triangles (area / longest side² below SLIVER): their normals are noise.
+    let slivers: Vec<bool> = tris
+        .iter()
+        .map(|(v, _, _, w)| {
+            let longest = [sub(v[1], v[0]), sub(v[2], v[1]), sub(v[0], v[2])].iter().map(|e| dot(*e, *e)).fold(0.0, f32::max);
+            0.5 * dot(*w, *w).sqrt() < SLIVER * longest
+        })
+        .collect();
     // Welded vertex → the triangles around it; welded edge → its endpoints and face normals.
     let mut around: HashMap<u32, Vec<usize>> = HashMap::new();
-    let mut edges: HashMap<(u32, u32), ([V; 2], Vec<V>)> = HashMap::new();
+    // (Per face on the edge: its unit normal and whether it is a sliver.)
+    let mut edges: HashMap<(u32, u32), ([V; 2], Vec<EdgeFace>)> = HashMap::new();
     for (i, (v, ids, nrm, _)) in tris.iter().enumerate() {
         for k in 0..3 {
             around.entry(ids[k]).or_default().push(i);
             let (p, q) = (ids[k], ids[(k + 1) % 3]);
             let e = (p.min(q), p.max(q));
-            edges.entry(e).or_insert_with(|| ([v[k], v[(k + 1) % 3]], Vec::new())).1.push(*nrm);
+            edges.entry(e).or_insert_with(|| ([v[k], v[(k + 1) % 3]], Vec::new())).1.push((*nrm, slivers[i]));
         }
     }
     let cos_max = crease_deg.to_radians().cos();
@@ -249,14 +258,24 @@ fn smooth_mesh_with(d: &DetailMesh, crease_deg: f32, axis_edges_only: bool) -> P
     // faces on a non-manifold edge), and open borders.
     let feature: Vec<((u32, u32), [V; 2])> = edges
         .into_iter()
-        .filter(|(_, (_, normals))| {
-            let axis = |n: &V| n.iter().any(|c| c.abs() > AXIS_COS);
-            if axis_edges_only && !normals.iter().any(axis) {
-                return false;
+        .filter(|(_, (_, faces))| {
+            if axis_edges_only {
+                // A trimmed brick's surface is marching-tetrahedra output: only trust creases
+                // between well-shaped faces, one of them flat on an axis (a block face), and
+                // not folded back on each other (a fin of the approximation).
+                let axis = |n: &V| n.iter().any(|c| c.abs() > AXIS_COS);
+                if faces.iter().any(|f| f.1) || !faces.iter().any(|f| axis(&f.0)) {
+                    return false;
+                }
+                if let [a, b] = faces.as_slice()
+                    && dot(a.0, b.0) < FOLD_COS
+                {
+                    return false;
+                }
             }
-            match normals.as_slice() {
+            match faces.as_slice() {
                 [_] => true,
-                ns => ns.iter().enumerate().any(|(i, a)| ns[i + 1..].iter().any(|b| dot(*a, *b) < cos_max)),
+                fs => fs.iter().enumerate().any(|(i, a)| fs[i + 1..].iter().any(|b| dot(a.0, b.0) < cos_max)),
             }
         })
         .map(|(k, (seg, _))| (k, seg))
@@ -303,8 +322,19 @@ fn smooth_mesh_with(d: &DetailMesh, crease_deg: f32, axis_edges_only: bool) -> P
     m
 }
 
-/// A normal is axis-aligned when one component exceeds this (about 5°).
-const AXIS_COS: f32 = 0.996;
+/// One face on an edge: its unit normal and whether it is a sliver.
+type EdgeFace = (V, bool);
+
+/// A triangle is a sliver when its area is below this times its longest side squared
+/// (an equilateral triangle has 0.43).
+const SLIVER: f32 = 0.02;
+/// Faces meeting at more than ~150° are folded back on each other: a fin of the
+/// approximate surface, not a corner of the brick.
+const FOLD_COS: f32 = -0.866;
+/// A face is a flat block face when its normal is this close to an axis (about 0.3°). The
+/// block's faces are exact planes; parts of the curve that only happen to face along an
+/// axis are not, and creases beside them are folds of the approximation.
+const AXIS_COS: f32 = 0.99999;
 /// Vertices closer than this are one vertex, LDU.
 const WELD_LDU: f32 = 0.01;
 /// Feature-edge runs shorter than this (in total) are not drawn, LDU.
@@ -537,5 +567,28 @@ mod tests {
         // The rim stays sharp: a side face's corners keep the side's normal.
         assert!(m.normals.iter().any(|n| (n[0].abs() - 1.0).abs() < 1e-4));
         assert_ne!(trimmed_key(&d), detail_key(&d));
+    }
+
+    #[test]
+    fn trimmed_edges_skip_slivers_folds_and_near_axis_curves() {
+        // A flat block face (exactly facing -z) and a second face hinged on their shared edge
+        // from (0,0,0) to (10,0,0); is the shared edge drawn?
+        let hinge = |far: [f32; 3]| {
+            let positions = vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [5.0, 8.0, 0.0], far];
+            // Face A: 0 2 1 (normal -z); face B: 0 1 3.
+            let m = trimmed_mesh(&DetailMesh { positions, indices: vec![0, 2, 1, 0, 1, 3] });
+            let shared = |e: &[V; 2]| e.iter().all(|p| p[1].abs() < 1e-4 && p[2].abs() < 1e-4);
+            m.edges.iter().any(shared)
+        };
+        assert!(hinge([5.0, -0.0, 8.0]), "a real 90° corner is drawn");
+        // Face B (0,0,0) (10,0,0) (5,0,0.1): area 0.5 against a longest side of 10, a sliver.
+        assert!(!hinge([5.0, 0.0, 0.1]), "a sliver beside the face is not");
+        assert!(!hinge([5.0, 7.0, 0.5]), "a fold back over the face is not");
+        // The same corner, but the 'flat' face only faces near -z (a gently curved surface).
+        // (Face B tilted off the y axis too, so neither face is a block face; they still
+        // meet at ~76°, past the crease.)
+        let positions = vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [5.0, 8.0, 0.3], [5.0, 2.0, 8.0]];
+        let m = trimmed_mesh(&DetailMesh { positions, indices: vec![0, 2, 1, 0, 1, 3] });
+        assert!(!m.edges.iter().any(|e| e.iter().all(|p| p[1].abs() < 1e-4 && p[2].abs() < 1e-4)));
     }
 }

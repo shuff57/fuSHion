@@ -12,7 +12,7 @@ fn printed(
         cells: cells.to_vec(),
         plates,
         units: units.iter().map(|u| u.to_vec()).collect(),
-        label: label.map(str::to_string), trim: None
+        label: label.map(str::to_string), trim: None, sockets: None
     }
 }
 
@@ -119,7 +119,7 @@ fn bad_units_are_refused() {
             cells: cells.clone(),
             plates: 3,
             units,
-            label: None, trim: None
+            label: None, trim: None, sockets: None
         };
         assert!(plan(&shape, &p).is_err(), "{why} should be refused");
     }

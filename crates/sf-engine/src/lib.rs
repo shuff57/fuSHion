@@ -76,6 +76,7 @@ fn build_at(
         let packed = pack::Packed {
             placements: p.placements,
             meshes: p.meshes,
+            curve_stats: p.curve_stats,
             dropped: p.dropped,
             anchored: p.anchored,
             compiled: p.compiled,
@@ -159,6 +160,9 @@ pub fn build(spec: &Spec, opts: &BuildOptions, image: Option<&image::RgbaImage>)
     let mut report = Report::new(&model, &analysis, &opts.palette, opts.availability.as_ref());
     report.budget = Some(budget);
     report.resolution = resolution;
+    if let (Some(p), Some(c)) = (report.printed.as_mut(), packed.curve_stats.take()) {
+        p.contacts = Some(c);
+    }
     report.warnings.extend(compiled.warnings.iter().cloned());
     report.warnings.extend(packed.warnings.iter().cloned());
     if report.parts as u32 > budget {
@@ -246,6 +250,9 @@ pub struct PrintSummary {
     pub curved: usize,
     /// Curved bricks with an overhang steeper than 45° (print them with supports).
     pub need_supports: usize,
+    /// How contacts were trimmed to the shape (set by the build, not by [`PrintSummary::of`]).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contacts: Option<print_pack::CurveStats>,
 }
 
 impl PrintSummary {
@@ -487,6 +494,29 @@ impl Report {
                     "Curved: {} bricks follow the true surface ({} need supports)",
                     p.curved, p.need_supports
                 );
+                if let Some(c) = &p.contacts {
+                    let _ = writeln!(
+                        s,
+                        "Contacts: {} of {} between curved bricks trimmed to the shape ({} studs dropped){}",
+                        c.contacts - c.covered - c.restored,
+                        c.contacts,
+                        c.studs_before.saturating_sub(c.studs_after),
+                        if c.restored > 0 {
+                            format!("; {} kept flat so {} part(s) stay held", c.restored, c.parts_restored)
+                        } else {
+                            String::new()
+                        }
+                    );
+                    if c.ground_fallback {
+                        let _ = writeln!(s, "Base: kept square (following the outline would tip the model over)");
+                    } else if c.ground_columns > 0 {
+                        let _ = writeln!(
+                            s,
+                            "Base: follows the outline; {} flat pad(s) where the shape doesn't reach the floor",
+                            c.pads
+                        );
+                    }
+                }
             }
             for d in &p.unsupported_details {
                 let _ = writeln!(s, "Unsupported detail: {d} has no stud under its base and will fall off");

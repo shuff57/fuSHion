@@ -64,6 +64,8 @@ pub struct Packed {
     pub warnings: Vec<String>,
     /// Display meshes of trimmed printed bricks.
     pub meshes: std::collections::BTreeMap<String, sf_core::DetailMesh>,
+    /// What curving printed bricks did.
+    pub curve_stats: Option<crate::print_pack::CurveStats>,
 }
 
 struct Packer<'a> {
@@ -644,7 +646,7 @@ pub fn pack(c: &Compiled, avail: &dyn Availability, opts: &PackOptions) -> Packe
         });
         unavailable.sort();
         unavailable.dedup();
-        return Packed { placements, dropped, anchored, unavailable, compiled: owned, warnings: Vec::new(), meshes: Default::default() };
+        return Packed { placements, dropped, anchored, unavailable, compiled: owned, warnings: Vec::new(), meshes: Default::default(), curve_stats: None };
     }
     unreachable!("the last attempt always returns")
 }

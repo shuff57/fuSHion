@@ -22,10 +22,26 @@ fn main() -> anyhow::Result<()> {
             "curves {curves}: {} bricks ({} files), {} curved, {} need supports, {} mesh triangles, built in {took:.2?}",
             p.bricks, p.unique_bricks, p.curved, p.need_supports, tris
         );
+        if let Some(c) = p.contacts.as_ref() {
+            println!("  {c:?}");
+        }
+        let open =
+            r.model.meshes.iter().filter(|(k, _)| k.starts_with("trim:")).map(|(_, m)| sf_engine::curves::open_edges(m)).sum::<usize>();
+        let dropped = r.analysis.floating.len();
+        println!("  open mesh edges {open}, floating parts {dropped}");
         if curves {
+            if let Some(dir) = std::path::Path::new(&out).parent() {
+                std::fs::create_dir_all(dir)?;
+            }
             let lib = sf_ldraw::MeshLibrary::open_default().unwrap_or_else(|_| sf_ldraw::MeshLibrary::procedural());
             let t = Instant::now();
-            let img = render_sheet(&r.model, &sf_core::Palette::builtin(), &lib, &[View::Front, View::Left, View::Iso], &RenderOptions::default());
+            let img = render_sheet(
+                &r.model,
+                &sf_core::Palette::builtin(),
+                &lib,
+                &[View::Front, View::Left, View::Iso, View::Top],
+                &RenderOptions::default(),
+            );
             img.save(&out)?;
             println!("rendered {out} in {:.2?}", t.elapsed());
         }

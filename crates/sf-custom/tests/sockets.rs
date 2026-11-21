@@ -26,7 +26,7 @@ fn shapes() -> Vec<TestBrick> {
 fn every_test_brick_builds_with_exact_stage_volumes() {
     for p in [StudProfile::compliant_socket(), StudProfile::compliant_socket_nozzle04()] {
         for (name, cells, plates) in shapes() {
-            let shape = CustomShape::Printed { cells, plates, units: vec![], label: None , trim: None};
+            let shape = CustomShape::Printed { cells, plates, units: vec![], label: None , trim: None, sockets: None };
             let t = std::time::Instant::now();
             let part = build(&shape, &p).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert!(analyze_stl(&part.stl).unwrap().is_watertight(), "{name}");

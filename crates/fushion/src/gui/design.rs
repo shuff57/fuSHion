@@ -148,6 +148,19 @@ impl App {
         {
             self.set_status(e, true);
         }
+        let r = ui
+            .add_enabled(!busy && self.print_mode, egui::Checkbox::new(&mut self.curves, "Smooth curves"))
+            .on_hover_text(
+                "On: printed bricks are trimmed to the true curved surface (round bodies, \
+                 domes), and studs stay only where the top is flat. Bricks marked SUPPORTS \
+                 in the print list overhang.\n\
+                 Off: every printed brick is a square block (faster export).",
+            );
+        if r.changed()
+            && let Err(e) = self.session_curves_sync()
+        {
+            self.set_status(e, true);
+        }
 
         // Backend.
         ui.add_space(6.0);
