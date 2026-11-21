@@ -92,10 +92,66 @@ Use `group`s for each object (a house, a tree, a car) and place them with
 `at`. Add a `base` so everything stands on one baseplate. Keep objects
 touching the ground or each other; floating pieces are reported as errors.
 
+## Designing details
+Replicate the picture as closely as you can. Bricks make the masses; every feature that
+bricks can't capture (a flower, a petal, a leaf or fern frond, a stem, an eye, a nose, a
+beak, a horn, an ear tip) becomes a printed **detail** that you design:
+1. `design_detail` with a template (`list_details` shows them all with their parameters)
+   or your own SolidCraft commands. Name it for what it is (`red_rose`, `owl_eye`).
+2. Look at the picture it returns (iso, front, right, top). Check the shape, size and
+   proportions against the source picture; change the parameters and design again until
+   it reads right. A design is saved under its name; designing the same name replaces it.
+3. Place it, as many times as the picture shows, with the spec's `details`. One design
+   can be used many times in different colours.
+
+**Flowers follow LEGO's Botanical bouquets** (10280 Flower Bouquet, 10313 Wildflower
+Bouquet): each head is a hub with petals arranged around it, often in two layers offset
+by half a petal, with a separate centre in a contrasting colour. Pick the species
+template that matches the picture: `rose` (two layers of large cupped petals around a
+spiral of small inner petals), `daisy` (one ring of rounded petals around a round
+yellow centre), `aster` and `gerbera` (many narrow petals in concentric rings), `poppy`
+(four large cupped petals, flat dark centre), `cornflower` (a ring of trumpet florets),
+`spike` for snapdragon, lupin, lavender and larkspur (rings of florets stacked up a stem,
+smaller toward the tip), `umbel` for cow parsley, and `fern` / `leaf` for foliage. Count
+the petals in the picture and match them; match each flower's colour and its size
+relative to the rest of the model (a LEGO rose head is about 32 mm, a daisy about 16 mm;
+1 stud = 8 mm). A head can stand on its own `stem_height`; tall stems are thin, so keep
+them short on a model that will be handled.
+
+## Details (printed parts)
+Bricks can't make a petal, an eye, a beak or a leaf. For features like these, design a
+printed **detail** part first (see "Custom printable parts" below), then place it with
+`details`:
+```json
+"details": [
+  {"design": "daisy_head", "at": [0, 14, -2], "turn": 0, "color": "White"},
+  {"design": "leaf", "at": [1.5, 9, -1], "turn": 1, "color": "Green"}
+]
+```
+- `design`: the name of a design you made. An unknown name is an error that lists the
+  designs that exist.
+- `at`: where the centre of the detail's base should sit, in the same units as the
+  shapes (relief: `[column, plates, row]` from the picture's top left). The engine puts
+  it on the highest surface of the model under its base at or below that height.
+- `turn`: quarter turns about the vertical axis (0–3). `color`: defaults to
+  `default_color`.
+- A detail must sit on the model's top surface, not overlap it. Its base must cover at
+  least two studs in a row, since a fused stud can't stand alone. The report warns when
+  a detail is skipped, or has no stud under its base and would fall off.
+
+## Building for 3D printing
+When the model is built for printing, every brick is designed for its place: same-colour
+areas merge into bricks of any shape up to 8 × 8 studs. A feature only one stud wide in
+both directions (a 1 × 1 pole, a single-stud nub) can't be held, because its stud would
+stand alone. Make thin parts at least two studs long along one direction, or use a
+detail. Slopes aren't used; round the shape with details instead.
+
 ## How to work
 1. Look at the image. Pick the mode. Note the 3–6 features that make the
    subject recognisable (silhouette, proportions, colour regions, eyes).
 2. Block the big masses first (body, head), then limbs, then paint details.
+   Design printed details for features bricks can't make (flowers, petals, leaves,
+   eyes, beaks) and place them with `details`.
 3. Build, then read the report and the rendered views next to the image.
    Check silhouette, proportions, key features and colour regions, in that
    order. Fix the spec, not individual bricks.

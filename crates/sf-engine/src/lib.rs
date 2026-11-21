@@ -1,12 +1,14 @@
 //! The fushion engine: spec → voxels → parts → checks → steps.
 
+pub mod details;
 pub mod pack;
 pub mod physics;
+pub mod print_pack;
 pub mod steps;
 
 use anyhow::Result;
 use serde::Serialize;
-use sf_core::{Availability, Cell, ColorId, Model, Palette, UnknownAvailability};
+use sf_core::{Availability, Cell, ColorId, CustomKind, DetailDesign, Model, Palette, UnknownAvailability};
 use sf_spec::{CompileOptions, Compiled, Spec, compile};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -25,6 +27,11 @@ pub struct BuildOptions {
     /// Overrides the spec's resolution (and skips the budget search).
     pub resolution: Option<u32>,
     pub slopes: bool,
+    /// Build for 3D printing: every part is designed for its spot (merged polyomino bricks
+    /// with fused studs laid out for what sits on them) instead of taken from LEGO's catalog.
+    pub print: bool,
+    /// Detail designs the spec's `details` may use, by name.
+    pub details: BTreeMap<String, DetailDesign>,
 }
 
 impl Default for BuildOptions {
@@ -35,6 +42,8 @@ impl Default for BuildOptions {
             budget: None,
             resolution: None,
             slopes: true,
+            print: false,
+            details: BTreeMap::new(),
         }
     }
 }
@@ -54,7 +63,28 @@ fn build_at(
     repair_rounds: u32,
 ) -> Result<(Compiled, pack::Packed)> {
     let c = compile(spec, &opts.palette, &CompileOptions { resolution: res, image })?;
-    let p = pack::pack(&c, opts.availability.as_ref(), &pack::PackOptions { slopes: opts.slopes, repair_rounds });
+    details::check_designs(&c.details, &opts.details)?;
+    if opts.print {
+        let p = print_pack::pack_print(&c, &c.details, &opts.details, repair_rounds > 0)?;
+        let packed = pack::Packed {
+            placements: p.placements,
+            dropped: p.dropped,
+            anchored: p.anchored,
+            compiled: p.compiled,
+            unavailable: Vec::new(),
+            warnings: p.warnings,
+        };
+        return Ok((c, packed));
+    }
+    let mut p = pack::pack(&c, opts.availability.as_ref(), &pack::PackOptions { slopes: opts.slopes, repair_rounds });
+    if !c.details.is_empty() {
+        let placed = details::place_details(&c.details, &opts.details, &p.placements)?;
+        p.placements.extend(placed.placements);
+        p.warnings.extend(placed.warnings);
+        for d in print_pack::unsupported_details(&p.placements) {
+            p.warnings.push(format!("detail {d} has no stud under its base and will fall off"));
+        }
+    }
     Ok((c, p))
 }
 
@@ -106,13 +136,22 @@ pub fn build(spec: &Spec, opts: &BuildOptions, image: Option<&image::RgbaImage>)
     if let Some(c) = packed.compiled.take() {
         compiled = c;
     }
-    let mut model = Model { title: spec.title.clone(), mode: spec.mode, placements: std::mem::take(&mut packed.placements), steps: Vec::new(), ..Default::default() };
+    let mut model = Model {
+        title: spec.title.clone(),
+        mode: spec.mode,
+        placements: std::mem::take(&mut packed.placements),
+        steps: Vec::new(),
+        printable: opts.print,
+        ..Default::default()
+    };
+    details::attach_designs(&mut model, &opts.details);
     let analysis = analyze(&model);
     model.steps = steps::order_steps(&model, &analysis);
     let mut report = Report::new(&model, &analysis, &opts.palette, opts.availability.as_ref());
     report.budget = Some(budget);
     report.resolution = resolution;
     report.warnings.extend(compiled.warnings.iter().cloned());
+    report.warnings.extend(packed.warnings.iter().cloned());
     if report.parts as u32 > budget {
         let why = match (fixed, searchable) {
             (Some(r), _) => format!("at the fixed size of {r} studs; lower `resolution` (or the relief width) or remove it"),
@@ -175,6 +214,59 @@ pub struct CustomCandidate {
     pub count: usize,
 }
 
+/// What a model needs printed.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct PrintSummary {
+    /// Printed parts (body bricks and details).
+    pub total: usize,
+    /// Distinct printed body bricks (one print file each).
+    pub unique_bricks: usize,
+    /// Printed body bricks.
+    pub bricks: usize,
+    /// Detail parts placed.
+    pub details: usize,
+    /// Distinct detail designs used.
+    pub detail_designs: usize,
+    /// Details with no stud under their base, as "printed flower head D001 at (x, y, z)".
+    pub unsupported_details: Vec<String>,
+}
+
+impl PrintSummary {
+    /// `None` when the model has no printed parts.
+    pub fn of(model: &Model, a: &Analysis) -> Option<Self> {
+        let ps = &model.placements;
+        let mut s = PrintSummary::default();
+        let mut ids = std::collections::BTreeSet::new();
+        let mut designs = std::collections::BTreeSet::new();
+        for p in ps {
+            match p.custom.as_deref().map(|c| &c.kind) {
+                Some(CustomKind::Brick) => {
+                    s.bricks += 1;
+                    ids.insert(p.part.clone());
+                }
+                Some(CustomKind::Detail { mesh, .. }) => {
+                    s.details += 1;
+                    designs.insert(mesh.clone());
+                }
+                None => {}
+            }
+        }
+        s.total = s.bricks + s.details;
+        if s.total == 0 {
+            return None;
+        }
+        s.unique_bricks = ids.len();
+        s.detail_designs = designs.len();
+        let held: std::collections::HashSet<usize> = a.connections.iter().map(|&(_, b, _)| b).collect();
+        for (i, p) in ps.iter().enumerate() {
+            if details::is_detail(p) && p.origin.y > 0 && !held.contains(&i) {
+                s.unsupported_details.push(format!("{} at ({}, {}, {})", p.name(), p.origin.x, p.origin.y, p.origin.z));
+            }
+        }
+        Some(s)
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct Report {
     pub title: String,
@@ -191,6 +283,9 @@ pub struct Report {
     pub issues: Vec<Issue>,
     pub balance_ok: bool,
     pub custom_candidates: Vec<CustomCandidate>,
+    /// Printed parts, when the model has any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub printed: Option<PrintSummary>,
     pub warnings: Vec<String>,
 }
 
@@ -216,7 +311,9 @@ impl Report {
             *colors.entry(p.color).or_default() += 1;
             let name = p.name();
             *types.entry(name).or_default() += 1;
-            *combos.entry((p.part.clone(), p.color)).or_default() += 1;
+            if p.custom.is_none() {
+                *combos.entry((p.part.clone(), p.color)).or_default() += 1;
+            }
         }
         let mut colors: Vec<ColorUse> =
             colors.into_iter().map(|(code, n)| ColorUse { color: palette.name(code), code, parts: n }).collect();
@@ -311,6 +408,7 @@ impl Report {
             issues,
             balance_ok: a.balance.ok,
             custom_candidates: custom,
+            printed: PrintSummary::of(model, a),
             warnings: Vec::new(),
         }
     }
@@ -341,6 +439,21 @@ impl Report {
             let _ = writeln!(s, "Structure issues:");
             for i in &self.issues {
                 let _ = writeln!(s, "- {}: {} [{}]", i.kind, i.detail, i.where_);
+            }
+        }
+        if let Some(p) = &self.printed {
+            let _ = writeln!(
+                s,
+                "Printed: {} parts: {} body bricks ({} different print files), {} details ({} design{})",
+                p.total,
+                p.bricks,
+                p.unique_bricks,
+                p.details,
+                p.detail_designs,
+                if p.detail_designs == 1 { "" } else { "s" }
+            );
+            for d in &p.unsupported_details {
+                let _ = writeln!(s, "Unsupported detail: {d} has no stud under its base and will fall off");
             }
         }
         for c in &self.custom_candidates {

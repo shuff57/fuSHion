@@ -176,7 +176,14 @@ pub(crate) fn compile(
         .flat_map(|y| (0..dims[2]).flat_map(move |z| (0..dims[0]).map(move |x| Cell::new(x, y, z))))
         .map(|c| if grid.get(c).is_filled() { full } else { 0 })
         .collect();
-    Ok(Compiled { grid, samples, warnings: Vec::new(), units_per_stud: 0.0 })
+    Ok(Compiled {
+        grid,
+        samples,
+        warnings: Vec::new(),
+        units_per_stud: 0.0,
+        map: crate::GridMap::Relief { depth, shift: [0; 3] },
+        details: Vec::new(),
+    })
 }
 
 /// Flood-fill from the border through cells close in colour (ΔE00 < 12) to

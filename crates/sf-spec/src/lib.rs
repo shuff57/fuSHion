@@ -77,9 +77,74 @@ pub struct Spec {
     /// Optional baseplate under the model.
     #[serde(default)]
     pub base: Option<BaseSpec>,
+    /// Printed detail parts (flower heads, petals, eyes, beaks…) placed on the model.
+    /// Each names a design made beforehand (`make_detail`); the engine rests it on the
+    /// body under `at`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<DetailUse>,
     /// Free-form notes Claude keeps between rounds (ignored by the compiler).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+}
+
+/// One use of a detail design in a spec.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DetailUse {
+    /// The design's name.
+    pub design: String,
+    /// Where the centre of the design's socket base should sit, in spec units (relief:
+    /// `[column, plates, row]` counted from the picture's top left). The engine rests the
+    /// detail on the highest body surface under its base at or below this height.
+    pub at: [f32; 3],
+    /// Quarter turns about the vertical axis (0–3).
+    #[serde(default)]
+    pub turn: u8,
+    /// Colour (default: the spec's `default_color`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+/// A detail use mapped onto the grid: `x`, `z` in studs and `y` in plates, as fractional
+/// grid coordinates (cell `(x, y, z)` spans `[x, x + 1)` and so on).
+#[derive(Clone, Debug, PartialEq)]
+pub struct GridDetail {
+    pub design: String,
+    pub at: [f32; 3],
+    pub turn: u8,
+    pub color: ColorId,
+}
+
+/// Maps spec coordinates onto the grid, kept through cropping and the base.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GridMap {
+    /// Shapes: `grid = (p − origin) / (units per stud, per plate, per stud) + shift`.
+    Shapes { origin: [f32; 3], ups: f32, upp: f32, shift: [i32; 3] },
+    /// Reliefs: `[column, plates, row]` → `(column, plates, depth − 1 − row) + shift`.
+    Relief { depth: i32, shift: [i32; 3] },
+}
+
+impl GridMap {
+    /// The grid position of spec point `p`.
+    pub fn to_grid(&self, p: [f32; 3]) -> [f32; 3] {
+        match self {
+            GridMap::Shapes { origin, ups, upp, shift } => [
+                (p[0] - origin[0]) / ups + shift[0] as f32,
+                (p[1] - origin[1]) / upp + shift[1] as f32,
+                (p[2] - origin[2]) / ups + shift[2] as f32,
+            ],
+            GridMap::Relief { depth, shift } => [
+                p[0] + 0.5 + shift[0] as f32,
+                p[1] + shift[1] as f32,
+                (*depth - 1) as f32 - p[2] + 0.5 + shift[2] as f32,
+            ],
+        }
+    }
+
+    fn shift_mut(&mut self) -> &mut [i32; 3] {
+        match self {
+            GridMap::Shapes { shift, .. } | GridMap::Relief { shift, .. } => shift,
+        }
+    }
 }
 
 fn one() -> u32 {
@@ -156,6 +221,10 @@ pub struct Compiled {
     pub warnings: Vec<String>,
     /// Model units per stud (0 for reliefs, which are in studs already).
     pub units_per_stud: f32,
+    /// Spec coordinates → grid.
+    pub map: GridMap,
+    /// The spec's detail uses, mapped onto the grid.
+    pub details: Vec<GridDetail>,
 }
 
 impl Compiled {
@@ -202,6 +271,17 @@ pub fn compile(spec: &Spec, palette: &Palette, opts: &CompileOptions) -> Result<
             ));
         }
         add_base(&mut out, base, color)?;
+    }
+    for d in &spec.details {
+        let color = match &d.color {
+            Some(name) => resolve_color(palette, name, &mut warnings),
+            None => default_color,
+        };
+        if !d.at.iter().all(|v| v.is_finite()) {
+            bail!("detail `{}`: `at` must be three finite numbers", d.design);
+        }
+        let at = out.map.to_grid(d.at);
+        out.details.push(GridDetail { design: d.design.clone(), at, turn: d.turn % 4, color });
     }
     out.grid.mark_interior();
     out.warnings = warnings;
@@ -369,7 +449,14 @@ fn compile_shapes(
             }
         }
     }
-    let mut out = Compiled { grid, samples: masks, warnings: Vec::new(), units_per_stud: ups };
+    let mut out = Compiled {
+        grid,
+        samples: masks,
+        warnings: Vec::new(),
+        units_per_stud: ups,
+        map: GridMap::Shapes { origin, ups, upp, shift: [0; 3] },
+        details: Vec::new(),
+    };
     crop(&mut out);
     Ok(out)
 }
@@ -403,6 +490,10 @@ fn crop(c: &mut Compiled) {
     }
     c.grid = g;
     c.samples = s;
+    let shift = c.map.shift_mut();
+    for k in 0..3 {
+        shift[k] -= lo[k];
+    }
 }
 
 fn add_base(c: &mut Compiled, base: &BaseSpec, color: ColorId) -> Result<()> {
@@ -430,6 +521,10 @@ fn add_base(c: &mut Compiled, base: &BaseSpec, color: ColorId) -> Result<()> {
     }
     c.grid = g;
     c.samples = s;
+    let shift = c.map.shift_mut();
+    shift[0] += m;
+    shift[1] += t;
+    shift[2] += m;
     Ok(())
 }
 
@@ -533,4 +628,30 @@ mod tests {
         assert!(compile(&Spec::from_json(&wide).unwrap(), &p, &opts).is_err());
     }
 
+
+    #[test]
+    fn details_map_onto_the_grid_through_crop_and_base() {
+        // A 4 × 2 × 4 box at the origin, resolution 4: one unit per stud, 0.4 units per plate.
+        let s = spec(
+            r#"{"shapes":[{"shape":"box","center":[0,1,0],"size":[4,2,4],"color":"Red"}],
+            "base":{"margin":1,"plates":1},
+            "details":[{"design":"flower","at":[0,2,0],"turn":5,"color":"Yellow"}]}"#,
+        );
+        let c = compile(&s, &Palette::builtin(), &CompileOptions { resolution: Some(4), image: None }).unwrap();
+        assert_eq!(c.details.len(), 1);
+        let d = &c.details[0];
+        assert_eq!(d.turn, 1);
+        assert_eq!(d.color, 14);
+        // Box spans x −2..2 → grid 0..4, + 1 margin: centre at 3. Top at 2 units = 5 plates,
+        // + 1 base plate = 6.
+        assert!((d.at[0] - 3.0).abs() < 1e-4 && (d.at[2] - 3.0).abs() < 1e-4, "{:?}", d.at);
+        assert!((d.at[1] - 6.0).abs() < 1e-4, "{:?}", d.at);
+        // Relief: column 2, row 0 of a 3-row picture → x 2.5, z 2.5.
+        let r = spec(
+            r#"{"mode":"relief","relief":{"rows":["abc","abc","abc"],"legend":{"a":"Red","b":"Blue","c":"Red"}},
+            "details":[{"design":"x","at":[2,1,0]}]}"#,
+        );
+        let c = compile(&r, &Palette::builtin(), &CompileOptions::default()).unwrap();
+        assert_eq!(c.details[0].at, [2.5, 1.0, 2.5]);
+    }
 }

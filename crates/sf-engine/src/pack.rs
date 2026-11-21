@@ -60,6 +60,8 @@ pub struct Packed {
     /// (part, colour) pairs placed although the availability data says they
     /// were never produced.
     pub unavailable: Vec<(String, ColorId)>,
+    /// Notes for the report (details skipped or unsupported, say).
+    pub warnings: Vec<String>,
 }
 
 struct Packer<'a> {
@@ -81,7 +83,7 @@ struct Packer<'a> {
 }
 
 /// Multi-source BFS from visible cells through filled cells.
-fn nearest_surface_colors(c: &Compiled) -> Vec<ColorId> {
+pub(crate) fn nearest_surface_colors(c: &Compiled) -> Vec<ColorId> {
     let [dx, dy, dz] = c.grid.dims;
     let n = (dx * dy * dz) as usize;
     let idx = |x: i32, y: i32, z: i32| ((y * dz + z) * dx + x) as usize;
@@ -533,7 +535,7 @@ fn pack_once(c: &Compiled, avail: &dyn Availability, opts: &PackOptions) -> (Vec
 }
 
 /// Groups of at most `max` parts that reach neither the ground nor the rest.
-fn small_floating(placements: &[Placement], max: usize) -> Vec<Vec<usize>> {
+pub(crate) fn small_floating(placements: &[Placement], max: usize) -> Vec<Vec<usize>> {
     let a = analyze_parts(placements);
     a.components
         .into_iter()
@@ -543,15 +545,15 @@ fn small_floating(placements: &[Placement], max: usize) -> Vec<Vec<usize>> {
 
 /// Floating groups up to this size get anchor cells; up to `DROP_MAX` are
 /// removed if anchoring fails.
-const ANCHOR_MAX: usize = 12;
+pub(crate) const ANCHOR_MAX: usize = 12;
 /// Part/colour pairs found in this many sets or fewer count as rare.
 pub const RARE_SETS: u32 = 3;
-const DROP_MAX: usize = 3;
+pub(crate) const DROP_MAX: usize = 3;
 
 /// Give each tiny group an anchor: recolour one filled neighbour cell in the
 /// same layer (inside the body) to the group's colour, so one part can span
 /// the feature and the body and clip in. Returns `None` if nothing changed.
-fn anchor(c: &Compiled, placements: &[Placement], groups: &[Vec<usize>]) -> Option<Compiled> {
+pub(crate) fn anchor(c: &Compiled, placements: &[Placement], groups: &[Vec<usize>]) -> Option<Compiled> {
     let mut out = c.clone();
     let mut changed = false;
     for g in groups {
@@ -640,7 +642,7 @@ pub fn pack(c: &Compiled, avail: &dyn Availability, opts: &PackOptions) -> Packe
         });
         unavailable.sort();
         unavailable.dedup();
-        return Packed { placements, dropped, anchored, unavailable, compiled: owned };
+        return Packed { placements, dropped, anchored, unavailable, compiled: owned, warnings: Vec::new() };
     }
     unreachable!("the last attempt always returns")
 }
