@@ -30,6 +30,7 @@ egui-wgpu.workspace = true
 wgpu.workspace = true
 bytemuck.workspace = true
 rfd.workspace = true
+arboard = "3"
 
 [features]
 default = ["custom-bricks"]

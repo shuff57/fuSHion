@@ -5,6 +5,7 @@
 //! the session folder is polled so builds written by another process (the MCP
 //! server driven by Claude Code) show up live.
 
+mod clip;
 mod design;
 mod edit;
 mod gpu;
@@ -435,6 +436,20 @@ impl App {
         }
     }
 
+    /// Use the picture on the clipboard as the source image.
+    fn paste_image(&mut self, ctx: &egui::Context) {
+        let Some(s) = &mut self.session else { return };
+        match clip::read_image().and_then(|img| s.set_image_rgba(img).map_err(|e| format!("{e:#}")))
+        {
+            Ok(()) => {
+                self.source_mtime = mtime(&s.source_png_path());
+                self.load_source_texture(ctx);
+                self.set_status("Picture pasted from the clipboard", false);
+            }
+            Err(e) => self.set_status(e, true),
+        }
+    }
+
     /// Keep step and selection in range after the model changed.
     fn clamp_state(&mut self) {
         let (n, steps) = self
@@ -798,6 +813,13 @@ impl eframe::App for App {
         });
         if let Some(p) = dropped.first() {
             self.set_image(&ctx, p);
+        }
+
+        // Ctrl+V pastes a picture (unless a text box has the keyboard, where it pastes text).
+        if !ctx.egui_wants_keyboard_input()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::V))
+        {
+            self.paste_image(&ctx);
         }
 
         self.handle_keys(&ctx);

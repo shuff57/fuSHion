@@ -75,7 +75,7 @@ impl App {
                 painter.text(
                     rect.center(),
                     egui::Align2::CENTER_CENTER,
-                    "Drop a picture here\nor click Open",
+                    "Drop or paste a picture here\nor click Open",
                     egui::FontId::proportional(13.0),
                     Color32::from_gray(120),
                 );
@@ -94,7 +94,19 @@ impl App {
         );
         let open_clicked = resp.clicked();
         ui.add_space(4.0);
-        let open_btn = ui.button("Open picture…").clicked();
+        let (open_btn, paste_btn) = ui
+            .horizontal(|ui| {
+                let o = ui.button("Open picture…").clicked();
+                let p = ui
+                    .button("Paste picture")
+                    .on_hover_text("Use the image on the clipboard (Ctrl+V)")
+                    .clicked();
+                (o, p)
+            })
+            .inner;
+        if paste_btn {
+            self.paste_image(&ctx);
+        }
         if (open_clicked || open_btn)
             && let Some(p) = rfd::FileDialog::new()
                 .add_filter("Images", &["png", "jpg", "jpeg", "webp"])

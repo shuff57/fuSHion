@@ -147,6 +147,13 @@ impl Session {
         Ok(())
     }
 
+    /// Set the source image from pixels already in memory (a pasted picture).
+    pub fn set_image_rgba(&mut self, img: image::RgbaImage) -> Result<()> {
+        write_bytes_atomic(&self.dir.join("source.png"), &encode_png(&img)?)?;
+        self.image = Some(img);
+        Ok(())
+    }
+
     pub fn source_png_path(&self) -> PathBuf {
         self.dir.join("source.png")
     }
