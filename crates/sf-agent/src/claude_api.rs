@@ -366,7 +366,7 @@ fn run_turn_inner(
                 on_event(Event::Text(format!("Designing detail {name}…")));
                 match session.design_detail(&input["design"], name, input["label"].as_str().unwrap_or(""), input["color"].as_str().unwrap_or("")) {
                     Ok((d, png)) => results.push(json!({"type": "tool_result", "tool_use_id": id, "content": [
-                        {"type": "text", "text": format!("Saved design {}: cells {:?}, sockets {:?}, {} plates tall.", d.name, d.cells, d.sockets, d.plates)},
+                        {"type": "text", "text": format!("Saved design {}", crate::details::summary(&d))},
                         {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64(&png)}}
                     ]})),
                     Err(e) => results.push(json!({"type": "tool_result", "tool_use_id": id, "is_error": true, "content": format!("{e:#}")})),

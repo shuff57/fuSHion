@@ -9,19 +9,19 @@ fn main() -> anyhow::Result<()> {
     s.set_print(true)?;
     s.set_budget(Some(150))?;
     let t = std::time::Instant::now();
-    let (d, png) = s.design_detail(&serde_json::json!({"template": "rose", "params": {"size": 24}}), "red_flower", "red flower", "Red")?;
+    let (d, png) = s.design_detail(&serde_json::json!({"template": "rose", "params": {}}), "red_flower", "red flower", "Red")?;
     std::fs::write("/tmp/fushion-e2e-detail.png", &png)?;
     let (_, png2) = s.design_detail(&serde_json::json!({"template": "leaf", "params": {"length": 16, "tilt": 30}}), "leaf", "leaf", "Green")?;
     std::fs::write("/tmp/fushion-e2e-leaf.png", &png2)?;
     println!("designs in {:.1}s: {:?} cells {:?}", t.elapsed().as_secs_f32(), d.name, d.cells);
-    let spec = r#"{"title":"Flower pot","mode":"sculpture","resolution":10,"shapes":[
+    let spec = r#"{"title":"Flower pot","mode":"sculpture","resolution":12,"shapes":[
       {"shape":"cylinder","center":[0,3,0],"size":[8,6,8],"color":"Reddish Brown"},
       {"shape":"cylinder","center":[0,6.3,0],"size":[9,1,9],"color":"Reddish Brown"},
       {"shape":"cylinder","center":[0,6.6,0],"size":[7.5,0.6,7.5],"color":"Dark Brown"}],
       "details":[
         {"design":"red_flower","at":[-2,7,-2],"color":"Red"},
-        {"design":"red_flower","at":[2,7,1],"color":"Yellow"},
-        {"design":"leaf","at":[0,7,2.5],"color":"Green","turn":1}]}"#;
+        {"design":"red_flower","at":[2.5,7,1.5],"color":"Yellow","colors":{"stem":"Dark Green"}},
+        {"design":"leaf","at":[-2.5,7,2.5],"color":"Green","turn":2}]}"#;
     let out = s.build_spec(spec)?;
     std::fs::write("/tmp/fushion-e2e-sheet.png", &out.sheet_png)?;
     println!("{}", out.report_text);

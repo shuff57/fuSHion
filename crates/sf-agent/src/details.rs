@@ -85,6 +85,34 @@ pub fn preview_png(design: &DetailDesign, color: ColorId, palette: &Palette, mes
     crate::session::encode_png(&img)
 }
 
+/// A few lines about a design for Claude: its footprint, height, and for a kit its parts
+/// (with copies and whether they need supports) and colour roles.
+pub fn summary(d: &DetailDesign) -> String {
+    let mut s = format!(
+        "{} (\"{}\"): cells {:?}, sockets {:?}, {} plates tall",
+        d.name, d.label, d.cells, d.sockets, d.plates
+    );
+    match &d.kit {
+        Some(k) => {
+            let parts: Vec<String> = k
+                .parts
+                .iter()
+                .map(|p| format!("{} ×{} ({}{})", p.label, p.copies.len(), p.role, if p.supports { ", needs supports" } else { "" }))
+                .collect();
+            let roles: Vec<String> = k.roles.iter().map(|(r, c)| format!("{r} (default {c})")).collect();
+            s.push_str(&format!(
+                ". Kit of {} printed parts in {} kinds: {}. Colour roles: {}; set \"color\" for main and \"colors\": {{role: colour}} for the rest in the spec's details.",
+                k.parts.iter().map(|p| p.copies.len()).sum::<usize>(),
+                k.parts.len(),
+                parts.join(", "),
+                roles.join(", ")
+            ));
+        }
+        None => s.push_str(". One printed piece."),
+    }
+    s
+}
+
 /// Every design saved in `dir`, by name. Unreadable files are skipped with a note on stderr.
 pub fn load_all(dir: &Path) -> BTreeMap<String, DetailDesign> {
     let mut out = BTreeMap::new();

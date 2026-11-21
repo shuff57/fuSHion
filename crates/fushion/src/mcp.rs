@@ -103,17 +103,9 @@ fn internal(e: impl std::fmt::Display) -> McpError {
     McpError::internal_error(e.to_string(), None)
 }
 
-/// One line about a detail design.
+/// A few lines about a detail design.
 fn detail_summary(d: &sf_core::DetailDesign) -> String {
-    format!(
-        "{} (\"{}\"): cells {:?}, sockets {:?}, {} plates tall, {} triangles",
-        d.name,
-        d.label,
-        d.cells,
-        d.sockets,
-        d.plates,
-        d.mesh.indices.len() / 3
-    )
+    sf_agent::details::summary(d)
 }
 
 fn b64(bytes: &[u8]) -> String {
