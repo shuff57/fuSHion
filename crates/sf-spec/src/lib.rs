@@ -99,9 +99,13 @@ pub struct DetailUse {
     /// Quarter turns about the vertical axis (0–3).
     #[serde(default)]
     pub turn: u8,
-    /// Colour (default: the spec's `default_color`).
+    /// Colour (default: the spec's `default_color`): the design's "main" role.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
+    /// Colours of the design's other roles, e.g. `{"centre": "Yellow", "leaf": "Green"}`.
+    /// Roles left out keep the design's defaults.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub colors: std::collections::BTreeMap<String, String>,
 }
 
 /// A detail use mapped onto the grid: `x`, `z` in studs and `y` in plates, as fractional
@@ -112,6 +116,8 @@ pub struct GridDetail {
     pub at: [f32; 3],
     pub turn: u8,
     pub color: ColorId,
+    /// Colours by role (besides "main", which is `color`), resolved.
+    pub colors: std::collections::BTreeMap<String, ColorId>,
 }
 
 /// Maps spec coordinates onto the grid, kept through cropping and the base.
@@ -273,15 +279,24 @@ pub fn compile(spec: &Spec, palette: &Palette, opts: &CompileOptions) -> Result<
         add_base(&mut out, base, color)?;
     }
     for d in &spec.details {
-        let color = match &d.color {
+        let mut color = match &d.color {
             Some(name) => resolve_color(palette, name, &mut warnings),
             None => default_color,
         };
+        let mut colors = std::collections::BTreeMap::new();
+        for (role, name) in &d.colors {
+            let c = resolve_color(palette, name, &mut warnings);
+            if role == "main" {
+                color = c;
+            } else {
+                colors.insert(role.clone(), c);
+            }
+        }
         if !d.at.iter().all(|v| v.is_finite()) {
             bail!("detail `{}`: `at` must be three finite numbers", d.design);
         }
         let at = out.map.to_grid(d.at);
-        out.details.push(GridDetail { design: d.design.clone(), at, turn: d.turn % 4, color });
+        out.details.push(GridDetail { design: d.design.clone(), at, turn: d.turn % 4, color, colors });
     }
     out.grid.mark_interior();
     out.warnings = warnings;
@@ -635,13 +650,14 @@ mod tests {
         let s = spec(
             r#"{"shapes":[{"shape":"box","center":[0,1,0],"size":[4,2,4],"color":"Red"}],
             "base":{"margin":1,"plates":1},
-            "details":[{"design":"flower","at":[0,2,0],"turn":5,"color":"Yellow"}]}"#,
+            "details":[{"design":"flower","at":[0,2,0],"turn":5,"color":"Yellow","colors":{"centre":"Orange"}}]}"#,
         );
         let c = compile(&s, &Palette::builtin(), &CompileOptions { resolution: Some(4), image: None }).unwrap();
         assert_eq!(c.details.len(), 1);
         let d = &c.details[0];
         assert_eq!(d.turn, 1);
         assert_eq!(d.color, 14);
+        assert_eq!(d.colors.get("centre"), Some(&25));
         // Box spans x −2..2 → grid 0..4, + 1 margin: centre at 3. Top at 2 units = 5 plates,
         // + 1 base plate = 6.
         assert!((d.at[0] - 3.0).abs() < 1e-4 && (d.at[2] - 3.0).abs() < 1e-4, "{:?}", d.at);

@@ -217,7 +217,8 @@ pub struct CustomCandidate {
 /// What a model needs printed.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct PrintSummary {
-    /// Printed parts (body bricks and details).
+    /// Parts to print: body bricks, plus every kit part of every detail (a detail without a
+    /// kit counts as one part).
     pub total: usize,
     /// Distinct printed body bricks (one print file each).
     pub unique_bricks: usize,
@@ -227,6 +228,9 @@ pub struct PrintSummary {
     pub details: usize,
     /// Distinct detail designs used.
     pub detail_designs: usize,
+    /// Separately printed parts the details are built from (each kit's copies, times the
+    /// details using it).
+    pub kit_parts: usize,
     /// Details with no stud under their base, as "printed flower head D001 at (x, y, z)".
     pub unsupported_details: Vec<String>,
 }
@@ -247,14 +251,21 @@ impl PrintSummary {
                 Some(CustomKind::Detail { mesh, .. }) => {
                     s.details += 1;
                     designs.insert(mesh.clone());
+                    if let Some(kit) = model.kits.get(mesh) {
+                        s.kit_parts += kit.parts.iter().map(|k| k.copies.len()).sum::<usize>();
+                    }
                 }
                 None => {}
             }
         }
-        s.total = s.bricks + s.details;
-        if s.total == 0 {
+        if s.bricks + s.details == 0 {
             return None;
         }
+        let kitless = ps
+            .iter()
+            .filter(|p| matches!(p.custom.as_deref().map(|c| &c.kind), Some(CustomKind::Detail { mesh, .. }) if !model.kits.contains_key(mesh)))
+            .count();
+        s.total = s.bricks + s.kit_parts + kitless;
         s.unique_bricks = ids.len();
         s.detail_designs = designs.len();
         let held: std::collections::HashSet<usize> = a.connections.iter().map(|&(_, b, _)| b).collect();
@@ -442,13 +453,14 @@ impl Report {
             }
         }
         if let Some(p) = &self.printed {
+            let kits = if p.kit_parts > 0 { format!(" built from {} kit parts", p.kit_parts) } else { String::new() };
             let _ = writeln!(
                 s,
-                "Printed: {} parts: {} body bricks ({} different print files), {} details ({} design{})",
-                p.total,
+                "Printed: {} parts + {} details{kits} ({} to print in all; {} different brick files, {} detail design{})",
                 p.bricks,
-                p.unique_bricks,
                 p.details,
+                p.total,
+                p.unique_bricks,
                 p.detail_designs,
                 if p.detail_designs == 1 { "" } else { "s" }
             );

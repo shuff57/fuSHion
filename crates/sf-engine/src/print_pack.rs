@@ -18,7 +18,7 @@ use crate::details::{self, is_detail};
 use crate::pack::{ANCHOR_MAX, DROP_MAX, anchor, nearest_surface_colors, small_floating};
 use anyhow::Result;
 use sf_core::print::stud_layout;
-use sf_core::{Cell, ColorId, CustomDef, CustomKind, DetailDesign, Fill, Placement, Rot};
+use sf_core::{Cell, ColorId, CustomDef, CustomKind, DetailDesign, DetailMesh, Fill, Placement, Rot};
 use sf_spec::{Compiled, GridDetail};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
@@ -413,22 +413,24 @@ fn is_brick(p: &Placement) -> bool {
 }
 
 /// Lays out every printed brick's studs for what sits on it (see the module docs). Bricks
-/// must be placed at `Rot(0)`, so local columns are grid columns less the origin.
-pub fn assign_studs(placements: &mut [Placement]) {
+/// must be placed at `Rot(0)`, so local columns are grid columns less the origin. `meshes`
+/// are the detail meshes by design name: a detail fills only what its mesh reaches.
+pub fn assign_studs(placements: &mut [Placement], meshes: &BTreeMap<String, DetailMesh>) {
     let mut owner: HashMap<Cell, usize> = HashMap::new();
     // Columns over which a stud would hit a detail's body rather than its socket base.
     let mut no_stud: HashSet<Cell> = HashSet::new();
     for (i, p) in placements.iter().enumerate() {
-        for c in p.cells() {
-            owner.insert(c, i);
-        }
+        let cells = details::occupied_cells(p, meshes);
         if is_detail(p) {
             let sockets: HashSet<(i32, i32)> = p.bottom_sockets().into_iter().collect();
-            for c in p.cells().filter(|c| c.y == p.origin.y) {
+            for c in cells.iter().filter(|c| c.y == p.origin.y) {
                 if !sockets.contains(&(c.x, c.z)) {
-                    no_stud.insert(c);
+                    no_stud.insert(*c);
                 }
             }
+        }
+        for c in cells {
+            owner.insert(c, i);
         }
     }
     #[allow(clippy::needless_range_loop)] // reads all placements, then writes this one
@@ -514,13 +516,14 @@ pub fn pack_print(
 ) -> Result<PrintPacked> {
     let mut owned: Option<Compiled> = None;
     let mut anchored = 0;
+    let meshes = details::design_meshes(designs);
     for attempt in 0..3 {
         let cc = owned.as_ref().unwrap_or(c);
         let body: Vec<Placement> = Body::new(cc).pack().iter().map(to_placement).collect();
         let placed = details::place_details(uses, designs, &body)?;
         let mut ps = body;
         ps.extend(placed.placements);
-        assign_studs(&mut ps);
+        assign_studs(&mut ps, &meshes);
         let small: Vec<Vec<usize>> = if repair {
             small_floating(&ps, ANCHOR_MAX).into_iter().filter(|g| !g.iter().any(|&i| is_detail(&ps[i]))).collect()
         } else {
@@ -543,7 +546,7 @@ pub fn pack_print(
                 i += 1;
                 keep
             });
-            assign_studs(&mut ps);
+            assign_studs(&mut ps, &meshes);
         }
         assign_ids(&mut ps);
         let mut warnings = placed.warnings;
@@ -730,5 +733,114 @@ mod tests {
         let cat = build(&spec, &BuildOptions { print: false, ..opts }, None).unwrap();
         assert_eq!(cat.model.placements.iter().filter(|p| details::is_detail(p)).count(), 2);
         assert!(cat.report.printed.as_ref().unwrap().unsupported_details.is_empty());
+    }
+
+    /// Axis-aligned boxes as one mesh (local LDU frame), each `[x0, x1, y0, y1, z0, z1]`.
+    fn boxes(bs: &[[f32; 6]]) -> DetailMesh {
+        let mut m = DetailMesh::default();
+        for b in bs {
+            let base = m.positions.len() as u32;
+            for k in 0..8 {
+                m.positions.push([b[k & 1], b[2 + ((k >> 1) & 1)], b[4 + ((k >> 2) & 1)]]);
+            }
+            for f in [[0, 1, 3, 2], [4, 6, 7, 5], [0, 4, 5, 1], [2, 3, 7, 6], [0, 2, 6, 4], [1, 5, 7, 3]] {
+                m.indices.extend([base + f[0], base + f[1], base + f[2], base + f[0], base + f[2], base + f[3]]);
+            }
+        }
+        m
+    }
+
+    /// A leaf: a 2 × 1 socket base at local row 0, a blade rising over rows 1 and 2
+    /// (6 plates tall box: rows 1 and 2 reach down only to plates 1 and 3).
+    fn leaf_design() -> DetailDesign {
+        DetailDesign {
+            name: "leaf".into(),
+            label: "leaf".into(),
+            cells: vec![(0, 0), (1, 0), (0, 1), (1, 1), (0, 2), (1, 2)],
+            plates: 6,
+            sockets: vec![(0, 0), (1, 0)],
+            studs: Vec::new(),
+            mesh: boxes(&[
+                [-20.0, 20.0, 40.0, 48.0, -30.0, -10.0],
+                [-19.0, 19.0, 16.0, 40.0, -9.0, 9.0],
+                [-19.0, 19.0, 0.0, 24.0, 11.0, 29.0],
+            ]),
+            kit: None,
+            source: DetailSource { source: serde_json::json!({"template": "leaf"}) },
+        }
+    }
+
+    #[test]
+    fn a_leaf_rests_on_the_soil_inside_a_pot_rim() {
+        // Soil 6 × 6 studs, 3 plates; a rim one brick higher along the back row (grid z 5).
+        // The leaf's base sits on soil row 3, its blade rises over rows 4 and 5: the part
+        // over the rim starts 3 plates up, clear of it.
+        let json = r#"{"shapes":[
+            {"shape":"box","center":[0,0.6,0],"size":[6,1.2,6],"color":"Dark Brown"},
+            {"shape":"box","center":[0,1.8,2.5],"size":[6,1.2,1],"color":"Reddish Brown"}],
+            "details":[{"design":"leaf","at":[0,1.2,0.5],"color":"Green"}]}"#;
+        let spec = Spec::from_json(json).unwrap();
+        let mut designs = BTreeMap::new();
+        designs.insert("leaf".to_string(), leaf_design());
+        let opts = BuildOptions { resolution: Some(6), print: true, details: designs, ..Default::default() };
+        let r = build(&spec, &opts, None).unwrap();
+        let text = r.report.to_text();
+        println!("{text}");
+        let leaf = r.model.placements.iter().find(|p| details::is_detail(p)).expect("the leaf was skipped");
+        assert_eq!(leaf.origin.y, 3, "the leaf should rest on the soil, not float: {:?}", leaf.origin);
+        assert!(!text.contains("overlap") && !text.contains("no stud"), "{text}");
+        assert!(r.analysis.overlaps.is_empty(), "{:?}", r.analysis.overlaps);
+        assert!(r.report.printed.as_ref().unwrap().unsupported_details.is_empty());
+        // Its blade really clears the rim: no occupied cell of the leaf is a body cell.
+        let body: HashSet<Cell> = r.model.placements.iter().filter(|p| !details::is_detail(p)).flat_map(|p| p.cells()).collect();
+        let occ = details::occupied_cells(leaf, &r.model.meshes);
+        assert!(occ.iter().all(|c| !body.contains(c)));
+        assert!(occ.iter().any(|c| c.z == 5 && c.y >= 6), "the blade over the rim is missing: {occ:?}");
+        // The coarse box would have hit the rim.
+        assert!(leaf.cells().any(|c| body.contains(&c)));
+    }
+
+    #[test]
+    fn detail_colour_roles_and_kit_parts() {
+        use sf_core::{Kit, KitPart, KitPose};
+        let pose = KitPose { rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], position: [0.0; 3] };
+        let part = |key: &str, role: &str, n: usize| KitPart {
+            key: key.into(),
+            label: key.replace('_', " "),
+            role: role.into(),
+            mesh: DetailMesh::default(),
+            source: DetailSource { source: serde_json::json!({}) },
+            supports: false,
+            copies: vec![pose; n],
+        };
+        let mut design = flower_design();
+        design.kit = Some(Kit {
+            parts: vec![part("petal", "main", 5), part("centre", "centre", 1)],
+            steps: Vec::new(),
+            roles: vec![("main".into(), "Red".into()), ("centre".into(), "Yellow".into())],
+        });
+        let mut designs = BTreeMap::new();
+        designs.insert("flower".to_string(), design);
+        let json = r#"{"shapes":[{"shape":"box","center":[0,1,0],"size":[6,2,6],"color":"Green"}],
+            "details":[{"design":"flower","at":[0.5,2,0.5],"color":"Red","colors":{"centre":"Orange"}},
+                       {"design":"flower","at":[-2,2,-2],"color":"Yellow"}]}"#;
+        let opts = BuildOptions { resolution: Some(6), print: true, details: designs, ..Default::default() };
+        let r = build(&Spec::from_json(json).unwrap(), &opts, None).unwrap();
+        let dets: Vec<&Placement> = r.model.placements.iter().filter(|p| details::is_detail(p)).collect();
+        assert_eq!(dets.len(), 2);
+        let orange = Palette::builtin().resolve("Orange").unwrap();
+        assert!(dets.iter().any(|d| d.custom.as_ref().unwrap().colors.get("centre") == Some(&orange)));
+        assert!(dets.iter().any(|d| d.custom.as_ref().unwrap().colors.is_empty()));
+        // Labels never name a colour: both uses read "flower head".
+        assert!(dets.iter().all(|d| d.name().contains("flower head") && !d.name().contains("Red") && !d.name().contains("Yellow")));
+        assert!(r.model.kits.contains_key("flower"));
+        let s = r.report.printed.as_ref().unwrap();
+        assert_eq!(s.kit_parts, 12);
+        assert_eq!(s.total, s.bricks + 12);
+        assert!(r.report.to_text().contains("built from 12 kit parts"), "{}", r.report.to_text());
+        // An unknown role is refused with the design's roles.
+        let bad = json.replace("\"centre\":\"Orange\"", "\"stem\":\"Green\"");
+        let e = build(&Spec::from_json(&bad).unwrap(), &opts, None).err().unwrap().to_string();
+        assert!(e.contains("stem") && e.contains("centre"), "{e}");
     }
 }

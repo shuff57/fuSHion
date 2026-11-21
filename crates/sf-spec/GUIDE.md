@@ -124,18 +124,27 @@ printed **detail** part first (see "Custom printable parts" below), then place i
 `details`:
 ```json
 "details": [
-  {"design": "daisy_head", "at": [0, 14, -2], "turn": 0, "color": "White"},
+  {"design": "daisy", "at": [0, 14, -2], "turn": 0, "color": "White",
+   "colors": {"centre": "Yellow", "stem": "Green"}},
   {"design": "leaf", "at": [1.5, 9, -1], "turn": 1, "color": "Green"}
 ]
 ```
+A detail is a **kit** of separately printed parts, like LEGO's botanical flowers: petals
+clipped onto a hub, a centre pressed in, a stem, leaves. Each part has a colour **role**
+(`main`, `centre`, `stem`, `leaf`, `pupil`…; the design lists its own). `color` sets the
+`main` role; `colors` sets any others, and roles left out keep the design's defaults.
+So one design serves a red rose and a yellow rose. An unknown role is an error that lists
+the design's roles.
 - `design`: the name of a design you made. An unknown name is an error that lists the
   designs that exist.
 - `at`: where the centre of the detail's base should sit, in the same units as the
   shapes (relief: `[column, plates, row]` from the picture's top left). The engine puts
   it on the highest surface of the model under its base at or below that height.
-- `turn`: quarter turns about the vertical axis (0–3). `color`: defaults to
-  `default_color`.
-- A detail must sit on the model's top surface, not overlap it. Its base must cover at
+- `turn`: quarter turns about the vertical axis (0–3). `color`: the `main` role,
+  defaulting to `default_color`. `colors`: other roles by name.
+- A detail must sit on the model's top surface, not overlap it or another detail. Only
+  what its parts really fill counts: a leaf's blade can rise over a pot's rim as long as
+  it clears it. Its base must cover at
   least two studs in a row, since a fused stud can't stand alone. The report warns when
   a detail is skipped, or has no stud under its base and would fall off.
 

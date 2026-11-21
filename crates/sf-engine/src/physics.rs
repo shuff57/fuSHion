@@ -68,7 +68,8 @@ pub fn analyze(model: &Model) -> Analysis {
     let mut owner: HashMap<Cell, usize> = HashMap::new();
     let mut overlaps = Vec::new();
     for (i, p) in ps.iter().enumerate() {
-        for c in p.cells() {
+        // Details fill only what their mesh reaches, not their whole box.
+        for c in crate::details::occupied_cells(p, &model.meshes) {
             if let Some(&j) = owner.get(&c) {
                 if !overlaps.contains(&[j, i]) {
                     overlaps.push([j, i]);
