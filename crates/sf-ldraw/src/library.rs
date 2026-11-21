@@ -110,24 +110,31 @@ impl MeshLibrary {
     /// [`crate::printed::detail_key`]), since printed ids repeat across models. A detail
     /// whose mesh is missing from `model.meshes` has none.
     pub fn placement_mesh(&self, p: &sf_core::Placement, model: &sf_core::Model) -> Option<(String, Arc<PartMesh>)> {
-        use crate::printed::{brick_key, custom_mesh, detail_key, detail_mesh};
+        use crate::printed::{brick_key, custom_mesh};
         let Some(def) = &p.custom else {
             return self.mesh(&p.part).map(|m| (p.part.clone(), m));
         };
         let (key, make): (String, Box<dyn FnOnce() -> PartMesh>) = match &def.kind {
             sf_core::CustomKind::Brick => (brick_key(def), Box::new(|| custom_mesh(def))),
-            sf_core::CustomKind::Detail { mesh, .. } => {
-                let d = model.meshes.get(mesh)?;
-                (detail_key(d), Box::new(|| detail_mesh(d)))
-            }
+            sf_core::CustomKind::Detail { mesh, .. } => return Some(self.detail(model.meshes.get(mesh)?)),
         };
+        Some(self.cached(key, make))
+    }
+
+    /// The display mesh of a detail mesh (a whole detail, or one part of a kit), with its
+    /// content key ([`crate::printed::detail_key`]), cached.
+    pub fn detail(&self, d: &sf_core::DetailMesh) -> (String, Arc<PartMesh>) {
+        self.cached(crate::printed::detail_key(d), Box::new(|| crate::printed::detail_mesh(d)))
+    }
+
+    fn cached(&self, key: String, make: Box<dyn FnOnce() -> PartMesh + '_>) -> (String, Arc<PartMesh>) {
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(Some(m)) = cache.meshes.get(&key) {
-            return Some((key, m.clone()));
+            return (key, m.clone());
         }
         let m = Arc::new(make());
         cache.meshes.insert(key.clone(), Some(m.clone()));
-        Some((key, m))
+        (key, m)
     }
 
     /// Subfile references that could not be found so far.

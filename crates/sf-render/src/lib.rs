@@ -15,9 +15,9 @@ mod raster;
 
 use image::{Rgba, RgbaImage};
 use raster::{SVert, Target};
-use sf_core::{ColorId, Fill, Model, Palette, Placement, VoxelGrid};
+use sf_core::{ColorId, Fill, Kit, KitPart, KitPose, Model, Palette, Placement, VoxelGrid};
 use sf_ldraw::{MAIN_COLOR, MeshLibrary, PartMesh};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 #[derive(Clone, Debug)]
@@ -234,8 +234,32 @@ fn draw_model(target: &mut Target, cam: &Camera, model: &Model, palette: &Palett
     // Edges are drawn after all faces so later parts can't overwrite them.
     let mut edge_queue: Vec<(Arc<Projected>, SVert, [u8; 3])> = Vec::new();
 
+    // Kit parts' meshes, by (design, part key), for this draw.
+    let mut kit_meshes: HashMap<(&str, &str), Arc<PartMesh>> = HashMap::new();
+
     for pl in &model.placements {
         let (pos, m) = pl.ldraw_transform();
+        // A detail built from a kit: draw each copy of each part, in its role's colour.
+        if let Some((design, def, kit)) = placement_kit(pl, model) {
+            for part in &kit.parts {
+                let mesh = kit_meshes
+                    .entry((design, part.key.as_str()))
+                    .or_insert_with(|| meshes.detail(&part.mesh).1)
+                    .clone();
+                let code = kit.role_color(&part.role, pl.color, &def.colors, |n| palette.resolve(n));
+                let main = palette.rgb(code);
+                for pose in &part.copies {
+                    let (pm, ppos) = compose(m, pos, pose);
+                    let proj = Arc::new(project_mesh(cam, &mesh, pm, edges));
+                    let o = cam.project(ppos);
+                    draw_projected(target, &proj, o, main, &mut colors);
+                    if edges && !proj.edges.is_empty() {
+                        edge_queue.push((proj, o, edge_color(main)));
+                    }
+                }
+            }
+            continue;
+        }
         let key = (mesh_key(pl), pl.rot.turns());
         let proj = projected
             .entry(key)
@@ -264,6 +288,25 @@ fn draw_model(target: &mut Target, cam: &Camera, model: &Model, palette: &Palett
             target.line(add(e[0], *o), add(e[1], *o), *rgb, alpha, bias);
         }
     }
+}
+
+/// The kit a detail placement is built from, if its design has one in the model.
+fn placement_kit<'a>(pl: &'a Placement, model: &'a Model) -> Option<(&'a str, &'a sf_core::CustomDef, &'a Kit)> {
+    let def = pl.custom.as_deref()?;
+    let sf_core::CustomKind::Detail { mesh, .. } = &def.kind else { return None };
+    Some((mesh.as_str(), def, model.kits.get(mesh)?))
+}
+
+/// A kit copy's transform inside a placement: `world = m · (R · v + t) + pos`.
+fn compose(m: [[f32; 3]; 3], pos: [f32; 3], pose: &KitPose) -> ([[f32; 3]; 3], [f32; 3]) {
+    let r = pose.rotation;
+    let mut out = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..3 {
+            out[i][j] = (0..3).map(|k| m[i][k] * r[k][j]).sum();
+        }
+    }
+    (out, add(pos, mat_vec(m, pose.position)))
 }
 
 /// What a placement's mesh is cached under within one draw: the part id for catalog parts,
@@ -439,6 +482,223 @@ pub fn render_part_in(
         one.meshes.insert(mesh.clone(), m.clone());
     }
     render_view(&one, palette, meshes, view, opts)
+}
+
+// ---- Kits: sub-build pictures for the instructions -------------------------------------
+
+/// How pale ghosted (earlier) parts are: 0 = their own colour, 1 = the ghost grey.
+const GHOST: f32 = 0.6;
+/// How much of its hue a ghost keeps (the rest goes grey), so a pale red can't pass for pink.
+const GHOST_HUE: f32 = 0.22;
+const GHOST_GREY: [u8; 3] = [236, 237, 240];
+
+/// The pale, greyish stand-in drawn for parts placed in earlier steps (the same look as the
+/// pamphlet's step pages).
+pub fn ghost_rgb(rgb: [u8; 3]) -> [u8; 3] {
+    let c = rgb.map(f32::from);
+    let lum = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    [0, 1, 2].map(|i| {
+        let desat = lum + (c[i] - lum) * GHOST_HUE;
+        (desat * (1.0 - GHOST) + GHOST_GREY[i] as f32 * GHOST).round() as u8
+    })
+}
+
+/// Every colour role a kit uses ("main", its declared roles and its parts' roles), resolved
+/// for one use of the design: `main` is the placement's colour, `overrides` the
+/// placement's `CustomDef::colors`.
+pub fn kit_role_colors(
+    kit: &Kit,
+    main: ColorId,
+    overrides: &BTreeMap<String, ColorId>,
+    palette: &Palette,
+) -> BTreeMap<String, ColorId> {
+    let roles = std::iter::once("main")
+        .chain(kit.roles.iter().map(|(r, _)| r.as_str()))
+        .chain(kit.parts.iter().map(|p| p.role.as_str()));
+    roles.map(|r| (r.to_string(), kit.role_color(r, main, overrides, |n| palette.resolve(n)))).collect()
+}
+
+/// One kit copy to draw.
+struct KitItem {
+    mesh: Arc<PartMesh>,
+    m: [[f32; 3]; 3],
+    pos: [f32; 3],
+    rgb: [u8; 3],
+}
+
+const IDENTITY: [[f32; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+/// Bounds of the items' meshes after their transforms (box corners transformed).
+fn items_bounds(items: &[KitItem]) -> Option<([f32; 3], [f32; 3])> {
+    let mut lo = [f32::MAX; 3];
+    let mut hi = [f32::MIN; 3];
+    let mut any = false;
+    for it in items {
+        let Some((a, b)) = it.mesh.bounds() else { continue };
+        for i in 0..8 {
+            let c = [
+                if i & 1 == 0 { a[0] } else { b[0] },
+                if i & 2 == 0 { a[1] } else { b[1] },
+                if i & 4 == 0 { a[2] } else { b[2] },
+            ];
+            let w = add(it.pos, mat_vec(it.m, c));
+            for k in 0..3 {
+                lo[k] = lo[k].min(w[k]);
+                hi[k] = hi[k].max(w[k]);
+            }
+            any = true;
+        }
+    }
+    any.then_some((lo, hi))
+}
+
+/// Draw `items` fitted to `frame` (or to their own bounds).
+fn render_items(
+    items: &[KitItem],
+    frame: Option<([f32; 3], [f32; 3])>,
+    palette: &Palette,
+    view: View,
+    opts: &RenderOptions,
+) -> RgbaImage {
+    let size = opts.view_size.max(8);
+    let mut target = Target::new(size as usize, size as usize, opts.background);
+    if let Some((lo, hi)) = frame.or_else(|| items_bounds(items)) {
+        let cam = Camera::fit(view, lo, hi, size);
+        let mut colors = Colors::new(palette);
+        let mut edge_queue = Vec::new();
+        for it in items {
+            let proj = project_mesh(&cam, &it.mesh, it.m, opts.edges);
+            let o = cam.project(it.pos);
+            draw_projected(&mut target, &proj, o, it.rgb, &mut colors);
+            if opts.edges && !proj.edges.is_empty() {
+                edge_queue.push((proj, o, edge_color(it.rgb)));
+            }
+        }
+        let (alpha, bias) = (cam.edge_alpha(), cam.edge_bias());
+        for (proj, o, rgb) in &edge_queue {
+            for e in &proj.edges {
+                target.line(add(e[0], *o), add(e[1], *o), *rgb, alpha, bias);
+            }
+        }
+    }
+    to_image(&target)
+}
+
+/// The step (index into `kit.steps`) in which each copy is attached; copies no step names
+/// count as there from the start (step 0's earlier parts).
+fn copy_steps(kit: &Kit) -> HashMap<(usize, usize), usize> {
+    let mut at = HashMap::new();
+    for (k, step) in kit.steps.iter().enumerate() {
+        for &pc in &step.parts {
+            at.entry(pc).or_insert(k);
+        }
+    }
+    at
+}
+
+/// The kit's items: every copy, in its role colour, pushed `spread` times its distance out
+/// from the kit's centre (0 = assembled). `keep(part, copy)` returns `None` to leave a copy
+/// out, or whether to ghost it.
+fn kit_items(
+    kit: &Kit,
+    colors: &BTreeMap<String, ColorId>,
+    palette: &Palette,
+    meshes: &MeshLibrary,
+    spread: f32,
+    keep: impl Fn(usize, usize) -> Option<bool>,
+) -> Vec<KitItem> {
+    // Spread by where each copy's material actually is (its mesh centroid, posed), not by
+    // its pose origin: a part whose offset is built into its mesh still moves out.
+    let centroid = |m: &sf_core::DetailMesh| -> [f32; 3] {
+        let n = m.positions.len().max(1) as f32;
+        m.positions.iter().fold([0.0; 3], |a, p| add(a, mul(*p, 1.0 / n)))
+    };
+    let at = |pose: &sf_core::KitPose, c: [f32; 3]| add(pose.position, mat_vec(pose.rotation, c));
+    let n = kit.parts.iter().map(|p| p.copies.len()).sum::<usize>().max(1) as f32;
+    let centre = kit
+        .parts
+        .iter()
+        .flat_map(|p| {
+            let c = centroid(&p.mesh);
+            p.copies.iter().map(move |pose| at(pose, c))
+        })
+        .fold([0.0; 3], |a, c| add(a, mul(c, 1.0 / n)));
+    let mut out = Vec::new();
+    for (pi, part) in kit.parts.iter().enumerate() {
+        let (_, mesh) = meshes.detail(&part.mesh);
+        let code = colors.get(&part.role).or_else(|| colors.get("main")).copied().unwrap_or(16);
+        let rgb = palette.rgb(code);
+        let c = centroid(&part.mesh);
+        for (ci, pose) in part.copies.iter().enumerate() {
+            let Some(ghost) = keep(pi, ci) else { continue };
+            let pos = add(pose.position, mul(sub(at(pose, c), centre), spread));
+            out.push(KitItem {
+                mesh: mesh.clone(),
+                m: pose.rotation,
+                pos,
+                rgb: if ghost { ghost_rgb(rgb) } else { rgb },
+            });
+        }
+    }
+    out
+}
+
+/// A kit's sub-build after step `upto_step` (an index into `kit.steps`): that step's copies
+/// in full colour, earlier ones ghosted when `ghost_earlier` (else in full colour), later
+/// ones left out. Framed on the whole assembled kit, so every step of a sub-build lines up.
+/// `colors` maps roles to colours (see [`kit_role_colors`]).
+#[allow(clippy::too_many_arguments)]
+pub fn render_kit_step(
+    kit: &Kit,
+    upto_step: usize,
+    colors: &BTreeMap<String, ColorId>,
+    palette: &Palette,
+    meshes: &MeshLibrary,
+    view: View,
+    opts: &RenderOptions,
+    ghost_earlier: bool,
+) -> RgbaImage {
+    let frame = items_bounds(&kit_items(kit, colors, palette, meshes, 0.0, |_, _| Some(false)));
+    let at = copy_steps(kit);
+    let items = kit_items(kit, colors, palette, meshes, 0.0, |p, c| {
+        let k = at.get(&(p, c)).copied();
+        match k {
+            Some(k) if k > upto_step => None,
+            Some(k) if k == upto_step => Some(false),
+            _ => Some(ghost_earlier),
+        }
+    });
+    render_items(&items, frame, palette, view, opts)
+}
+
+/// One copy of a kit part on its own, in its own frame (for a "what you need" thumbnail).
+pub fn render_kit_part(
+    part: &KitPart,
+    color: ColorId,
+    palette: &Palette,
+    meshes: &MeshLibrary,
+    view: View,
+    opts: &RenderOptions,
+) -> RgbaImage {
+    let (_, mesh) = meshes.detail(&part.mesh);
+    let items = [KitItem { mesh, m: IDENTITY, pos: [0.0; 3], rgb: palette.rgb(color) }];
+    render_items(&items, None, palette, view, opts)
+}
+
+/// The whole kit, assembled (`spread` 0) or exploded: each copy pushed out from the kit's
+/// centre by `spread` times its distance (1.0 doubles every distance), for the picture at
+/// the start of a sub-build.
+pub fn render_kit_exploded(
+    kit: &Kit,
+    colors: &BTreeMap<String, ColorId>,
+    palette: &Palette,
+    meshes: &MeshLibrary,
+    view: View,
+    opts: &RenderOptions,
+    spread: f32,
+) -> RgbaImage {
+    let items = kit_items(kit, colors, palette, meshes, spread, |_, _| Some(false));
+    render_items(&items, None, palette, view, opts)
 }
 
 fn to_image(t: &Target) -> RgbaImage {

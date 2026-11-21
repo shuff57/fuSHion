@@ -233,3 +233,170 @@ fn printed_brick_sheet_png() {
     let o = RenderOptions { view_size: 320, edges: true, background: [236, 238, 241] };
     render_sheet(&m, &Palette::builtin(), &lib, &[View::Iso, View::Top, View::Front, View::Right], &o).save(path).unwrap();
 }
+
+// ---- Kits -------------------------------------------------------------------------------
+
+/// A box mesh from `lo` to `hi` (LDU), outward faces.
+fn box_mesh(lo: [f32; 3], hi: [f32; 3]) -> sf_core::DetailMesh {
+    let c = |i: u8| [if i & 1 == 0 { lo[0] } else { hi[0] }, if i & 2 == 0 { lo[1] } else { hi[1] }, if i & 4 == 0 { lo[2] } else { hi[2] }];
+    let positions = (0..8).map(c).collect();
+    // Corner index bits: x = 1, y = 2, z = 4.
+    let indices = vec![0, 2, 1, 1, 2, 3, 4, 5, 6, 5, 7, 6, 0, 1, 4, 1, 5, 4, 2, 6, 3, 3, 6, 7, 0, 4, 2, 2, 4, 6, 1, 3, 5, 3, 7, 5];
+    sf_core::DetailMesh { positions, indices }
+}
+
+fn yaw(deg: f32) -> [[f32; 3]; 3] {
+    let (s, c) = deg.to_radians().sin_cos();
+    [[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]]
+}
+
+/// A flower: a yellow hub ("centre") and four petals ("main") around it, clipped on in two
+/// steps after the hub.
+fn flower_kit() -> sf_core::Kit {
+    let src = sf_core::DetailSource { source: serde_json::Value::Null };
+    let hub = sf_core::KitPart {
+        key: "hub".into(),
+        label: "hub".into(),
+        role: "centre".into(),
+        mesh: box_mesh([-8.0, -6.0, -8.0], [8.0, 0.0, 8.0]),
+        source: src.clone(),
+        supports: false,
+        copies: vec![sf_core::KitPose { rotation: yaw(0.0), position: [0.0, 0.0, 0.0] }],
+    };
+    // A petal points along +x from its clip at the origin.
+    let petal = sf_core::KitPart {
+        key: "petal".into(),
+        label: "petal".into(),
+        role: "main".into(),
+        mesh: box_mesh([0.0, -3.0, -6.0], [24.0, 0.0, 6.0]),
+        source: src,
+        supports: false,
+        copies: (0..4)
+            .map(|k| {
+                let r = yaw(90.0 * k as f32);
+                let p = [8.0 * r[0][0], -2.0, 8.0 * r[2][0]];
+                sf_core::KitPose { rotation: r, position: p }
+            })
+            .collect(),
+    };
+    sf_core::Kit {
+        parts: vec![hub, petal],
+        steps: vec![
+            sf_core::KitStep { parts: vec![(0, 0)], note: "hub".into() },
+            sf_core::KitStep { parts: vec![(1, 0), (1, 2)], note: String::new() },
+            sf_core::KitStep { parts: vec![(1, 1), (1, 3)], note: String::new() },
+        ],
+        roles: vec![("main".into(), "Red".into()), ("centre".into(), "Yellow".into())],
+    }
+}
+
+fn yellowish(c: [u8; 3]) -> bool {
+    c[0] > 120 && c[1] > 100 && c[2] < 80
+}
+
+fn count(img: &RgbaImage, pred: impl Fn([u8; 3]) -> bool) -> usize {
+    img.pixels().filter(|p| pred([p[0], p[1], p[2]])).count()
+}
+
+#[test]
+fn kit_details_draw_their_parts_in_role_colours() {
+    let lib = MeshLibrary::procedural();
+    let kit = flower_kit();
+    let design = sf_core::DetailDesign {
+        name: "flower".into(),
+        label: "flower".into(),
+        cells: vec![(0, 0), (1, 0), (0, 1), (1, 1)],
+        plates: 1,
+        sockets: vec![(0, 0), (1, 0)],
+        studs: vec![],
+        mesh: box_mesh([-20.0, -8.0, -20.0], [20.0, 8.0, 20.0]),
+        source: sf_core::DetailSource { source: serde_json::Value::Null },
+        kit: Some(kit.clone()),
+    };
+    let mut m = model(vec![printed(design.instance("D001"), RED, Cell::new(0, 0, 0))]);
+    m.meshes.insert("flower".into(), design.mesh.clone());
+    m.kits.insert("flower".into(), kit);
+    let top = render_view(&m, &Palette::builtin(), &lib, View::Top, &opts(96));
+    assert!(count(&top, reddish) > 50, "petals in the placement's colour");
+    assert!(count(&top, yellowish) > 20, "hub in its role's default colour");
+    // An override recolours the hub's role.
+    if let Some(d) = m.placements[0].custom.as_deref_mut() {
+        d.colors.insert("centre".into(), BLUE);
+    }
+    let top = render_view(&m, &Palette::builtin(), &lib, View::Top, &opts(96));
+    assert_eq!(count(&top, yellowish), 0);
+    assert!(count(&top, bluish) > 20);
+    // Without its kit the detail falls back to the assembled mesh, all in the main colour.
+    m.kits.clear();
+    let top = render_view(&m, &Palette::builtin(), &lib, View::Top, &opts(96));
+    assert!(count(&top, bluish) == 0 && count(&top, reddish) > 50);
+}
+
+#[test]
+fn kit_steps_ghost_earlier_parts_and_hide_later_ones() {
+    let lib = MeshLibrary::procedural();
+    let kit = flower_kit();
+    let pal = Palette::builtin();
+    let colors = kit_role_colors(&kit, RED, &BTreeMap::new(), &pal);
+    let o = opts(96);
+    let s0 = render_kit_step(&kit, 0, &colors, &pal, &lib, View::Top, &o, true);
+    assert!(count(&s0, yellowish) > 20 && count(&s0, reddish) == 0, "step 0: the hub only");
+    let s1 = render_kit_step(&kit, 1, &colors, &pal, &lib, View::Top, &o, true);
+    let s2 = render_kit_step(&kit, 2, &colors, &pal, &lib, View::Top, &o, true);
+    assert_eq!(count(&s1, yellowish), 0, "the hub is ghosted after its step");
+    let (r1, r2) = (count(&s1, reddish), count(&s2, reddish));
+    assert!(r1 > 50 && r2 > 50 && (r1 as i64 - r2 as i64).abs() < r1 as i64 / 4, "two new petals each step: {r1} {r2}");
+    // Every step is framed on the whole kit: the hub sits in the same place.
+    let pale = |c: [u8; 3]| c.iter().all(|&v| v > 150) && c.iter().max().unwrap() - c.iter().min().unwrap() < 40;
+    let g1 = bbox_of(&s1, pale).expect("ghosted hub");
+    let g2 = bbox_of(&s2, pale).expect("ghosted hub");
+    // The ghost is pale and greyish, not a lighter yellow.
+    let gh = ghost_rgb(pal.rgb(14));
+    assert!(pale(gh), "{gh:?}");
+    assert!((cx(g1) - cx(g2)).abs() < 2.0 && (cy(g1) - cy(g2)).abs() < 2.0);
+    // Without ghosting earlier parts keep their colour.
+    let plain = render_kit_step(&kit, 2, &colors, &pal, &lib, View::Top, &o, false);
+    assert!(count(&plain, yellowish) > 0 && count(&plain, reddish) > r2);
+}
+
+#[test]
+fn exploded_kits_spread_and_parts_render_alone() {
+    let lib = MeshLibrary::procedural();
+    let kit = flower_kit();
+    let pal = Palette::builtin();
+    let colors = kit_role_colors(&kit, RED, &BTreeMap::new(), &pal);
+    let o = opts(128);
+    let assembled = render_kit_exploded(&kit, &colors, &pal, &lib, View::Top, &o, 0.0);
+    let exploded = render_kit_exploded(&kit, &colors, &pal, &lib, View::Top, &o, 1.5);
+    // Exploded, the picture is refitted, so the parts get smaller and gaps open between the
+    // hub and the petals: fewer red pixels, and background shows between hub and petals.
+    let (ra, re) = (count(&assembled, reddish), count(&exploded, reddish));
+    assert!(re < ra, "{re} {ra}");
+    let hub = bbox_of(&exploded, yellowish).unwrap();
+    let right_of_hub = (hub.2 + 2, ((hub.1 + hub.3) / 2));
+    assert_eq!(exploded.get_pixel(right_of_hub.0, right_of_hub.1).0[..3], [0, 0, 0], "a gap beside the hub");
+    let thumb = render_kit_part(&kit.parts[1], RED, &pal, &lib, View::Iso, &opts(48));
+    assert!(count(&thumb, reddish) > 100);
+}
+
+#[test]
+fn kit_sample_png() {
+    let Ok(path) = std::env::var("FUSHION_KIT_PNG") else { return };
+    let lib = MeshLibrary::procedural();
+    let kit = flower_kit();
+    let pal = Palette::builtin();
+    let colors = kit_role_colors(&kit, RED, &BTreeMap::new(), &pal);
+    let o = RenderOptions { view_size: 256, edges: true, background: [255, 255, 255] };
+    let imgs = [
+        render_kit_exploded(&kit, &colors, &pal, &lib, View::Iso, &o, 1.2),
+        render_kit_step(&kit, 0, &colors, &pal, &lib, View::Iso, &o, true),
+        render_kit_step(&kit, 1, &colors, &pal, &lib, View::Iso, &o, true),
+        render_kit_step(&kit, 2, &colors, &pal, &lib, View::Iso, &o, true),
+        render_kit_part(&kit.parts[1], RED, &pal, &lib, View::Iso, &o),
+    ];
+    let mut sheet = RgbaImage::from_pixel(256 * imgs.len() as u32, 256, image::Rgba([255, 255, 255, 255]));
+    for (i, img) in imgs.iter().enumerate() {
+        image::imageops::overlay(&mut sheet, img, 256 * i as i64, 0);
+    }
+    sheet.save(path).unwrap();
+}

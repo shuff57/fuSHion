@@ -280,7 +280,22 @@ pub fn visibility(model: &Model, step: Option<usize>) -> Visibility {
 
 /// Column-major model matrix: LDraw part frame → world.
 fn instance_matrix(p: &Placement) -> [[f32; 4]; 4] {
-    let (pos, m) = p.ldraw_transform();
+    instance_matrix_posed(p, None)
+}
+
+/// [`instance_matrix`] for one copy of a kit part: `pose` places the copy in the detail's
+/// frame (`v' = R·v + t`) before the placement's own transform.
+fn instance_matrix_posed(p: &Placement, pose: Option<&sf_core::KitPose>) -> [[f32; 4]; 4] {
+    let (mut pos, mut m) = p.ldraw_transform();
+    if let Some(k) = pose {
+        let mr: [[f32; 3]; 3] =
+            std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|n| m[i][n] * k.rotation[n][j]).sum()));
+        let t = k.position;
+        for i in 0..3 {
+            pos[i] += m[i][0] * t[0] + m[i][1] * t[1] + m[i][2] * t[2];
+        }
+        m = mr;
+    }
     let s = 1.0 / 20.0;
     // World = S · (R · v + t) with S = diag(s, -s, s).
     let sy = [s, -s, s];
@@ -349,6 +364,50 @@ pub fn build_scene(generation: u64, inp: &SceneInput) -> Scene {
             if !inp.vis.visible.get(i).copied().unwrap_or(true) {
                 continue;
             }
+            let mut flags = inp.vis.flags.get(i).copied().unwrap_or(0);
+            if inp.selected == Some(i) {
+                flags = gpu::FLAG_SELECTED;
+                let (lo, hi) = placement_box(p);
+                let e = 0.04;
+                box_lines(
+                    &mut overlay,
+                    sub(lo, [e; 3]),
+                    add(hi, [e; 3]),
+                    rgba(inp.accent),
+                );
+            }
+            // A detail built from a kit: each copy of each part, in its role's colour.
+            if let Some(def) = p.custom.as_deref()
+                && let sf_core::CustomKind::Detail { mesh: design, .. } = &def.kind
+                && let Some(kit) = model.kits.get(design)
+            {
+                for part in &kit.parts {
+                    let local = format!("kit:{design}:{}", part.key);
+                    let key = match printed_keys.get(&local) {
+                        Some(Some(k)) => k.clone(),
+                        _ => {
+                            let (k, mesh) = inp.meshes.detail(&part.mesh);
+                            printed_keys.insert(local, Some(k.clone()));
+                            if !batches.contains_key(&k) {
+                                order.push(k.clone());
+                                batches.insert(k.clone(), (mesh, Vec::new()));
+                            }
+                            k
+                        }
+                    };
+                    let code = kit.role_color(&part.role, p.color, &def.colors, |n| inp.palette.resolve(n));
+                    let rgb = inp.palette.rgb(code);
+                    let Some(entry) = batches.get_mut(&key) else { continue };
+                    for pose in &part.copies {
+                        entry.1.push(Instance {
+                            model: instance_matrix_posed(p, Some(pose)),
+                            color: [rgb[0], rgb[1], rgb[2], 255],
+                            flags,
+                        });
+                    }
+                }
+                continue;
+            }
             let local = p.custom.as_deref().map(|def| match &def.kind {
                 sf_core::CustomKind::Brick => sf_ldraw::brick_key(def),
                 sf_core::CustomKind::Detail { mesh, .. } => format!("detail:{mesh}"),
@@ -385,18 +444,6 @@ pub fn build_scene(generation: u64, inp: &SceneInput) -> Scene {
                 }
             };
             let rgb = inp.palette.rgb(p.color);
-            let mut flags = inp.vis.flags.get(i).copied().unwrap_or(0);
-            if inp.selected == Some(i) {
-                flags = gpu::FLAG_SELECTED;
-                let (lo, hi) = placement_box(p);
-                let e = 0.04;
-                box_lines(
-                    &mut overlay,
-                    sub(lo, [e; 3]),
-                    add(hi, [e; 3]),
-                    rgba(inp.accent),
-                );
-            }
             entry.1.push(Instance {
                 model: instance_matrix(p),
                 color: [rgb[0], rgb[1], rgb[2], 255],
