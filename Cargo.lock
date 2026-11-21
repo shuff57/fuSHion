@@ -5505,6 +5505,7 @@ dependencies = [
  "anyhow",
  "flate2",
  "image",
+ "serde_json",
  "sf-core",
  "sf-ldraw",
  "sf-render",
