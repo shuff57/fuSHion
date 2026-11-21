@@ -106,7 +106,7 @@ pub fn build(spec: &Spec, opts: &BuildOptions, image: Option<&image::RgbaImage>)
     if let Some(c) = packed.compiled.take() {
         compiled = c;
     }
-    let mut model = Model { title: spec.title.clone(), mode: spec.mode, placements: std::mem::take(&mut packed.placements), steps: Vec::new() };
+    let mut model = Model { title: spec.title.clone(), mode: spec.mode, placements: std::mem::take(&mut packed.placements), steps: Vec::new(), ..Default::default() };
     let analysis = analyze(&model);
     model.steps = steps::order_steps(&model, &analysis);
     let mut report = Report::new(&model, &analysis, &opts.palette, opts.availability.as_ref());
@@ -214,7 +214,7 @@ impl Report {
         let mut combos: BTreeMap<(String, ColorId), usize> = BTreeMap::new();
         for p in ps {
             *colors.entry(p.color).or_default() += 1;
-            let name = p.def().map(|d| d.name.to_string()).unwrap_or_else(|| p.part.clone());
+            let name = p.name();
             *types.entry(name).or_default() += 1;
             *combos.entry((p.part.clone(), p.color)).or_default() += 1;
         }

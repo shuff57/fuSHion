@@ -212,7 +212,7 @@ fn balance(model: &Model) -> Balance {
     for p in &model.placements {
         let [fx, fz] = p.footprint();
         let h = p.height() as f32;
-        let w = (fx * fz) as f32 * h * p.def().map(|d| d.fill_fraction()).unwrap_or(1.0);
+        let w = (fx * fz) as f32 * h * p.fill_fraction();
         c[0] += w * (p.origin.x as f32 + fx as f32 / 2.0);
         c[1] += w * (p.origin.y as f32 + h / 2.0);
         c[2] += w * (p.origin.z as f32 + fz as f32 / 2.0);

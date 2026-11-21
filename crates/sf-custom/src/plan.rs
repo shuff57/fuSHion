@@ -275,6 +275,42 @@ impl Corner {
     }
 }
 
+/// The fused units on top of a box or 45° slope, as stud cells `(i, j)` (X, Y) in row order:
+/// what the part's studs group into (pairs, and one triple for an odd run). Other shapes are
+/// refused. `sf-core` keeps its own copy of this rule for the packer; a test in `sf-agent`
+/// checks the two agree.
+pub fn fused_units(shape: &CustomShape, profile: &StudProfile) -> Result<Vec<Vec<(i32, i32)>>> {
+    let (cells, studs): (BTreeSet<(i32, i32)>, Vec<(i32, i32)>) = match shape {
+        CustomShape::Box { w, d, .. } => {
+            let (w, d) = dims(*w, *d, 1)?;
+            let studs = grid(0..w, 0..d);
+            (studs.iter().copied().collect(), studs)
+        }
+        CustomShape::Slope45 { w, d, plates } => {
+            let (w, d) = dims(*w, *d, 2)?;
+            let roof = Roof::new(profile, d, profile.body_height(*plates), false)?;
+            let studs = grid(0..w, 0..d)
+                .into_iter()
+                .filter(|&(_, j)| f64::from(j) * profile.pitch >= roof.y_top - 1e-9)
+                .collect();
+            (grid(0..w, 0..d).into_iter().collect(), studs)
+        }
+        _ => {
+            return Err(CustomError::InvalidShape(
+                "fused_units: only boxes and 45° slopes".into(),
+            ));
+        }
+    };
+    Ok(slant::layout(&cells, &studs)?
+        .into_iter()
+        .map(|u| {
+            (0..u.n as i32)
+                .map(|k| (u.first.0 + k * u.step.0, u.first.1 + k * u.step.1))
+                .collect()
+        })
+        .collect())
+}
+
 /// The plan for `shape` under `profile`: commands, stage volumes and bounding box.
 pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
     profile.validate()?;

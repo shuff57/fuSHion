@@ -34,7 +34,7 @@ mod slant;
 
 pub use fit::{FitReport, SlantOutline, TopBrick, fit, fit_below, fit_under, slant_outline};
 pub use mesh::{MeshReport, analyze_stl};
-pub use plan::{BBOX_TOL_MM, Plan, Stage, VOLUME_TOL, plan};
+pub use plan::{BBOX_TOL_MM, Plan, Stage, VOLUME_TOL, fused_units, plan};
 pub use profile::{
     FUSED_RIB_OFFSET, MIN_FIN_SECTION, MIN_POCKET_FLOOR, RIB_GAP, RIB_THICKNESS, SLANT_CAP,
     StudProfile, StudStyle, WALL_RIB_LEAD_IN, WALL_RIB_WIDTH,

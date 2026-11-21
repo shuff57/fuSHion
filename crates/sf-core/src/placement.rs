@@ -1,5 +1,6 @@
 //! A part placed on the grid, and its mapping to LDraw.
 
+use crate::print::CustomDef;
 use crate::{Cell, ColorId, LDU_PER_PLATE, LDU_PER_STUD, PartDef, parts};
 use serde::{Deserialize, Serialize};
 
@@ -47,6 +48,9 @@ pub struct Placement {
     pub origin: Cell,
     #[serde(default)]
     pub rot: Rot,
+    /// A printed part designed for this model (then `part` is its id and `def()` is `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom: Option<Box<CustomDef>>,
 }
 
 fn matmul(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
@@ -61,48 +65,102 @@ fn matmul(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
 
 impl Placement {
     pub fn new(part: &str, color: ColorId, origin: Cell, rot: Rot) -> Self {
-        Self { part: part.to_string(), color, origin, rot }
+        Self { part: part.to_string(), color, origin, rot, custom: None }
+    }
+
+    /// A printed part at a grid position.
+    pub fn printed(def: CustomDef, color: ColorId, origin: Cell, rot: Rot) -> Self {
+        Self { part: def.id.clone(), color, origin, rot, custom: Some(Box::new(def)) }
+    }
+
+    /// Size `[x, z]` of the unrotated part, in studs.
+    pub fn size(&self) -> [u8; 2] {
+        match (&self.custom, self.def()) {
+            (Some(c), _) => c.size(),
+            (None, Some(d)) => d.size,
+            (None, None) => [1, 1],
+        }
+    }
+
+    /// A human name: the catalog name, or a printed part's description.
+    pub fn name(&self) -> String {
+        match (&self.custom, self.def()) {
+            (Some(c), _) => c.describe(),
+            (None, Some(d)) => d.name.to_string(),
+            (None, None) => self.part.clone(),
+        }
+    }
+
+    /// Fraction of the bounding volume that is solid (for mass).
+    pub fn fill_fraction(&self) -> f32 {
+        match (&self.custom, self.def()) {
+            (Some(c), _) => {
+                let [x, z] = c.size();
+                c.cells.len() as f32 / (x as f32 * z as f32).max(1.0)
+            }
+            (None, Some(d)) => d.fill_fraction(),
+            (None, None) => 1.0,
+        }
     }
 
     /// The catalog definition. Panics never; unknown ids return `None`.
     pub fn def(&self) -> Option<&'static PartDef> {
+        if self.custom.is_some() {
+            return None;
+        }
         parts::part(&self.part)
     }
 
     /// Footprint `[x, z]` on the grid after rotation.
     pub fn footprint(&self) -> [i32; 2] {
-        let d = self.def().map(|d| d.size).unwrap_or([1, 1]);
+        let d = self.size();
         if self.rot.turns() % 2 == 1 { [d[1] as i32, d[0] as i32] } else { [d[0] as i32, d[1] as i32] }
     }
 
     pub fn height(&self) -> i32 {
-        self.def().map(|d| d.height as i32).unwrap_or(1)
+        match (&self.custom, self.def()) {
+            (Some(c), _) => c.plates as i32,
+            (None, Some(d)) => d.height as i32,
+            (None, None) => 1,
+        }
     }
 
     /// Map a local column `(lx, lz)` of the unrotated part to grid `(x, z)`.
     pub fn local_to_grid(&self, lx: u8, lz: u8) -> (i32, i32) {
-        let d = self.def().map(|d| d.size).unwrap_or([1, 1]);
+        let d = self.size();
         let (sx, sz) = (d[0] as i32, d[1] as i32);
         let [fx, fz] = self.footprint();
         let (u, v) = self.rot.apply(2 * lx as i32 + 1 - sx, 2 * lz as i32 + 1 - sz);
         (self.origin.x + (u + fx - 1) / 2, self.origin.z + (v + fz - 1) / 2)
     }
 
-    /// Every grid cell inside the bounding box.
+    /// Every grid cell the part fills: its bounding box, or a printed part's own columns.
     pub fn cells(&self) -> impl Iterator<Item = Cell> + '_ {
-        let [fx, fz] = self.footprint();
         let h = self.height();
         let o = self.origin;
-        (0..h).flat_map(move |dy| (0..fz).flat_map(move |dz| (0..fx).map(move |dx| Cell::new(o.x + dx, o.y + dy, o.z + dz))))
+        let cols: Vec<(i32, i32)> = match &self.custom {
+            Some(c) => c.cells.iter().map(|&(lx, lz)| self.local_to_grid(lx, lz)).collect(),
+            None => {
+                let [fx, fz] = self.footprint();
+                (0..fz).flat_map(|dz| (0..fx).map(move |dx| (o.x + dx, o.z + dz))).collect()
+            }
+        };
+        (0..h).flat_map(move |dy| cols.clone().into_iter().map(move |(x, z)| Cell::new(x, o.y + dy, z)))
     }
 
     /// Grid `(x, z)` columns with a stud on top (studs sit at `y = top()`).
     pub fn top_studs(&self) -> Vec<(i32, i32)> {
+        if let Some(c) = &self.custom {
+            return c.studs.iter().map(|&(lx, lz)| self.local_to_grid(lx, lz)).collect();
+        }
         self.columns(|d, lx, lz| d.stud_on_top(lx, lz))
     }
 
     /// Grid `(x, z)` columns that accept studs from below (at `y = origin.y`).
     pub fn bottom_sockets(&self) -> Vec<(i32, i32)> {
+        if let Some(c) = &self.custom {
+            return c.sockets.iter().map(|&(lx, lz)| self.local_to_grid(lx, lz)).collect();
+        }
         self.columns(|d, lx, lz| d.connects_below(lx, lz))
     }
 

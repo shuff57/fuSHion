@@ -1,7 +1,9 @@
 //! A finished brick model.
 
+use crate::print::{DetailMesh, DetailSource};
 use crate::{Cell, Placement};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -17,10 +19,19 @@ pub struct Model {
     pub title: String,
     pub mode: ModelMode,
     pub placements: Vec<Placement>,
+    /// Designed to be 3D printed: only printable parts, fused-stud rule kept.
+    #[serde(default)]
+    pub printable: bool,
     /// Build steps as indices into `placements`, in order. Empty until
     /// computed by the engine.
     #[serde(default)]
     pub steps: Vec<Vec<usize>>,
+    /// Display meshes of detail parts, by `CustomKind::Detail::mesh`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub meshes: BTreeMap<String, DetailMesh>,
+    /// Print sources of detail parts, by the same key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub details: BTreeMap<String, DetailSource>,
 }
 
 impl Model {

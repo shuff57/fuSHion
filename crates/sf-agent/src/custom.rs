@@ -181,3 +181,67 @@ pub fn make_part_from_commands(batch: &Value, out: &Path, name: &str) -> Result<
 pub fn make_needed_parts(needs: &[CustomNeed], palette: &Palette, out: &Path) -> Result<(Vec<PathBuf>, Vec<String>)> {
     imp::for_needs(needs, palette, out)
 }
+
+#[cfg(all(test, feature = "custom"))]
+mod tests {
+    use sf_core::{CATALOG, print};
+    use sf_custom::{CustomShape, StudProfile, fused_units};
+
+    /// `sf-core`'s unit rule (used by the packer) matches the one `sf-custom` prints with.
+    #[test]
+    fn core_units_match_custom_units() {
+        let mut checked = 0;
+        for d in CATALOG.iter().filter(|d| print::printable(d)) {
+            let Some(shape) = super::imp::shape_for(d.id) else {
+                panic!("{} is printable but has no shape", d.id)
+            };
+            let theirs = fused_units(&shape, &StudProfile::fused())
+                .unwrap_or_else(|e| panic!("{}: {e}", d.id));
+            let ours = print::units_local(d).unwrap();
+            let mut a: Vec<usize> = ours.iter().map(Vec::len).collect();
+            let mut b: Vec<usize> = theirs.iter().map(Vec::len).collect();
+            a.sort_unstable();
+            b.sort_unstable();
+            assert_eq!(a, b, "{}: unit sizes", d.id);
+            if matches!(shape, CustomShape::Box { .. }) {
+                // Boxes map straight: custom (i, j) = local (lx, lz).
+                let norm = |u: Vec<Vec<(i32, i32)>>| {
+                    let mut v: Vec<Vec<(i32, i32)>> = u
+                        .into_iter()
+                        .map(|mut g| {
+                            g.sort();
+                            g
+                        })
+                        .collect();
+                    v.sort();
+                    v
+                };
+                let ours: Vec<Vec<(i32, i32)>> = ours
+                    .iter()
+                    .map(|g| g.iter().map(|&(x, z)| (x as i32, z as i32)).collect())
+                    .collect();
+                assert_eq!(norm(ours), norm(theirs), "{}: unit cells", d.id);
+            }
+            checked += 1;
+        }
+        assert!(checked >= 20, "checked only {checked} parts");
+    }
+
+    /// Every catalog part sf-core calls unprintable is one sf-custom refuses (or can't shape).
+    #[test]
+    fn unprintable_parts_are_refused_by_custom() {
+        // Tiles are excluded: the old export maps them to studded boxes (no smooth top yet).
+        for d in CATALOG
+            .iter()
+            .filter(|d| !print::printable(d) && d.shape != sf_core::Shape::Tile)
+        {
+            if let Some(shape) = super::imp::shape_for(d.id) {
+                assert!(
+                    fused_units(&shape, &StudProfile::fused()).is_err(),
+                    "{} should be refused",
+                    d.id
+                );
+            }
+        }
+    }
+}
