@@ -1313,7 +1313,7 @@ mod tests {
     use std::time::Instant;
 
     fn printed(json: &str, res: u32) -> BuildResult {
-        let opts = BuildOptions { resolution: Some(res), print: true, ..Default::default() };
+        let opts = BuildOptions { resolution: Some(res), print: true, curves: true, ..Default::default() };
         build(&Spec::from_json(json).unwrap(), &opts, None).unwrap()
     }
 

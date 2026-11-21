@@ -34,7 +34,8 @@ pub struct BuildOptions {
     /// Detail designs the spec's `details` may use, by name.
     pub details: BTreeMap<String, DetailDesign>,
     /// In print mode, exposed brick surfaces follow the true shape (smooth, no studs on
-    /// exposed tops) instead of stair-stepping.
+    /// exposed tops) instead of stair-stepping. Off by default: straight bricks step around
+    /// curves and only details get custom shapes.
     pub curves: bool,
 }
 
@@ -48,7 +49,7 @@ impl Default for BuildOptions {
             slopes: true,
             print: false,
             details: BTreeMap::new(),
-            curves: true,
+            curves: false,
         }
     }
 }

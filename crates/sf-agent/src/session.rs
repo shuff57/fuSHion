@@ -5,7 +5,7 @@
 //! Files: `source.png`, `spec.json`, `model.json`, `report.json`,
 //! `report.txt`, `render.png`, `conversation.json`, `history/NNN-spec.json`,
 //! `budget.txt`, `print.txt` ("1"/"0", build for 3D printing; missing means on),
-//! `curves.txt` ("1"/"0", printed bricks follow curved surfaces; missing means on) and
+//! `curves.txt` ("1"/"0", printed bricks follow curved surfaces; missing means off) and
 //! `details/<name>.json` (detail designs) with `details/<name>.png` (their pictures).
 
 use anyhow::{Context, Result, bail};
@@ -40,7 +40,8 @@ pub struct Session {
     pub budget: Option<u32>,
     /// Build for 3D printing: every brick designed for its place (default on).
     pub print: bool,
-    /// Printed bricks follow the true curved surface (default on).
+    /// Printed bricks follow the true curved surface (default off: straight bricks step
+    /// around curves, and only details get custom shapes).
     pub curves: bool,
     source_mtime: Option<std::time::SystemTime>,
 }
@@ -100,7 +101,7 @@ impl Session {
             report: None,
             budget: None,
             print: true,
-            curves: true,
+            curves: false,
             source_mtime: None,
         };
         s.reload()?;
@@ -122,7 +123,7 @@ impl Session {
             self.budget = t.trim().parse().ok();
         }
         self.print = std::fs::read_to_string(self.dir.join("print.txt")).map(|t| t.trim() != "0").unwrap_or(true);
-        self.curves = std::fs::read_to_string(self.dir.join("curves.txt")).map(|t| t.trim() != "0").unwrap_or(true);
+        self.curves = std::fs::read_to_string(self.dir.join("curves.txt")).map(|t| t.trim() == "1").unwrap_or(false);
         if let Ok(t) = std::fs::read_to_string(self.dir.join("model.json")) {
             self.model = serde_json::from_str(&t).ok();
         }

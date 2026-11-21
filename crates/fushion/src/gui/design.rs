@@ -149,12 +149,12 @@ impl App {
             self.set_status(e, true);
         }
         let r = ui
-            .add_enabled(!busy && self.print_mode, egui::Checkbox::new(&mut self.curves, "Smooth curves"))
+            .add_enabled(!busy && self.print_mode, egui::Checkbox::new(&mut self.curves, "Cut bricks to curves"))
             .on_hover_text(
-                "On: printed bricks are trimmed to the true curved surface (round bodies, \
-                 domes), and studs stay only where the top is flat. Bricks marked SUPPORTS \
-                 in the print list overhang.\n\
-                 Off: every printed brick is a square block (faster export).",
+                "Off (normal): the body is built from straight bricks that step around \
+                 curves, like real LEGO. Only details (petals, leaves, eyes, beaks) get \
+                 custom shapes.\n\
+                 On: body bricks are also cut to the true curved surface (slower export).",
             );
         if r.changed()
             && let Err(e) = self.session_curves_sync()

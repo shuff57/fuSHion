@@ -199,9 +199,9 @@ fn read_print_mode(dir: &Path) -> bool {
     std::fs::read_to_string(dir.join(PRINT_FILE)).map_or(true, |t| t.trim() != "0")
 }
 
-/// Whether printed bricks follow curves in this session (on when the file is missing).
+/// Whether printed bricks follow curves in this session (off when the file is missing).
 fn read_curves(dir: &Path) -> bool {
-    std::fs::read_to_string(dir.join("curves.txt")).map_or(true, |t| t.trim() != "0")
+    std::fs::read_to_string(dir.join("curves.txt")).map_or(false, |t| t.trim() == "1")
 }
 
 fn mtime(p: &Path) -> Option<SystemTime> {
@@ -300,7 +300,7 @@ impl App {
             source_tex: None,
             budget: sf_engine::DEFAULT_BUDGET,
             print_mode: true,
-            curves: true,
+            curves: false,
             backend: Backend::Api,
             api_status: Ok(()),
             cc_status: None,
