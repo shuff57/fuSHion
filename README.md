@@ -169,6 +169,10 @@ bottom chamfer against elephant's foot, and 0.4 mm rounded vertical edges. With
 either side of it. The long walls are left to the fins. Off-centre, a rib meets a
 turned brick's fin about as a round stud would, at most 0.06 mm against a
 0.45 mm flex; a centred rib would take 0.50 mm.
+Those slots and the 0.25 mm pocket band suit a 0.2–0.25 mm nozzle. For a
+0.4 mm nozzle use `StudProfile::fused_nozzle04()` (or the export example's
+`nozzle04` option): a 0.6 mm slot grown inward and a 0.45 mm band, both at least one
+line wide, with the same fin and grip.
 Print the files yourself or upload them to a print service.
 
 ## Workspace

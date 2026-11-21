@@ -357,6 +357,25 @@ pub(crate) fn contains(l: &[Seg], p: P2) -> bool {
     inside
 }
 
+/// How far [`off_outline`] steps off a piece's midpoint, in mm.
+const OFF_OUTLINE: f64 = 1e-7;
+
+/// The point [`OFF_OUTLINE`] to the left of `s` at fraction `t` (`h` is the fraction step
+/// used for the tangent). A piece's midpoint can lie at exactly the height of a vertex of the
+/// other outline (a slot's end line level with a pocket's root corner, say), where the ray
+/// in [`contains`] passes through the vertex and can miscount; a point just off the outline
+/// can't, and still lies on the same side of the other outline, which never runs this close.
+fn off_outline(s: &Seg, t: f64, h: f64) -> P2 {
+    let (p, q) = (s.at((t - h).max(0.0)), s.at((t + h).min(1.0)));
+    let d = sub(q, p);
+    let n = len(d);
+    let m = s.at(t);
+    if n < 1e-15 {
+        return m;
+    }
+    [m[0] - d[1] / n * OFF_OUTLINE, m[1] + d[0] / n * OFF_OUTLINE]
+}
+
 /// The pieces of `a`'s outline (split where `b` crosses it) whose midpoints lie inside `b`.
 fn pieces_inside(a: &[Seg], b: &[Seg]) -> f64 {
     let mut total = 0.0;
@@ -371,7 +390,7 @@ fn pieces_inside(a: &[Seg], b: &[Seg]) -> f64 {
             if s1 - s0 < 1e-12 {
                 continue;
             }
-            if contains(b, s.at((s0 + s1) / 2.0)) {
+            if contains(b, off_outline(s, (s0 + s1) / 2.0, (s1 - s0) * 1e-3)) {
                 total += s.piece(s0, s1).green();
             }
         }

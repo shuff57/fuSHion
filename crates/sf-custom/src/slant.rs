@@ -1310,6 +1310,51 @@ mod tests {
         );
     }
 
+    /// The slot's groove area matches sampling for any pocket band, not only the default half
+    /// slot: a slot whose end line is level with the pocket's root corner once fooled the area
+    /// routine's inside test (the 0.4 mm nozzle profile's groove came out 0.27 mm² too big).
+    #[test]
+    fn slot_outside_pocket_any_margin() {
+        let set = |p: &mut StudProfile, so: f64, sw: f64, hr: f64, pm: f64| {
+            if let StudStyle::SlantV2 {
+                slot_offset,
+                slot_width,
+                hook_radius,
+                pocket_margin,
+                ..
+            } = &mut p.stud_style
+            {
+                (*slot_offset, *slot_width, *hook_radius, *pocket_margin) = (so, sw, hr, pm);
+            }
+        };
+        let mut cases = vec![StudProfile::fused(), StudProfile::fused_nozzle04()];
+        for (so, sw, hr, pm) in [
+            (0.25, 0.5, 1.2, 0.3),
+            (0.25, 0.5, 1.2, 0.38),
+            (0.15, 0.6, 1.3, 0.3),
+        ] {
+            let mut p = StudProfile::fused();
+            set(&mut p, so, sw, hr, pm);
+            cases.push(p);
+        }
+        for p in cases {
+            let l = Lobe::new(&p).unwrap();
+            let (lo, hi) = geom::bbox(&l.slot);
+            let outside = sampled(
+                |q| geom::contains(&l.slot, q) && !geom::contains(&l.pocket, q),
+                lo,
+                hi,
+                0.002,
+            );
+            assert!(
+                (l.slot_outside_pocket() - outside).abs() < 2e-3,
+                "{:?}: {} vs {outside}",
+                p.stud_style,
+                l.slot_outside_pocket()
+            );
+        }
+    }
+
     #[test]
     fn the_fin_hangs_over_its_pocket_and_the_rest_does_not() {
         let l = lobe();

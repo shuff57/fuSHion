@@ -250,6 +250,30 @@ impl StudProfile {
         }
     }
 
+    /// [`StudProfile::fused`] for a 0.4 mm nozzle: the slot is 0.6 mm wide and the pocket
+    /// band 0.45 mm, so both are at least one extrusion line wide (the default 0.25 mm band
+    /// is narrower than a 0.4 mm nozzle's line and would close up). The slot grows inward
+    /// (offset 0.15 mm, hook radius 1.3 mm), so the fin, its 0.63 mm root and its 0.15 mm
+    /// grip are exactly those of [`StudProfile::fused`]; the pocket leaves a 0.6 mm rim to
+    /// the brick's outside face.
+    pub fn fused_nozzle04() -> Self {
+        let mut p = Self::fused();
+        if let StudStyle::SlantV2 {
+            slot_offset,
+            slot_width,
+            hook_radius,
+            pocket_margin,
+            ..
+        } = &mut p.stud_style
+        {
+            *slot_offset = 0.15;
+            *slot_width = 0.6;
+            *hook_radius = 1.3;
+            *pocket_margin = 0.45;
+        }
+        p
+    }
+
     /// The old name of [`StudProfile::slant_v2_experimental`].
     #[deprecated(note = "renamed to `slant_v2_experimental`")]
     pub fn compliant_v2_experimental() -> Self {
