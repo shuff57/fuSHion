@@ -23,7 +23,7 @@ pub use model::{Model, ModelMode};
 pub use parts::{PartDef, Shape, CATALOG};
 pub use placement::{Placement, Rot};
 pub use print::{CustomDef, CustomKind, DetailDesign, DetailMesh, DetailSource, Kit, KitPart, KitPose, KitStep, Trim, TrimBox, TrimKind, TrimOp, TrimShape};
-pub use stem::{Hub, HubHole, MountKind, StemAttach, StemBar, StemDef, StemMount, StemPlacement};
+pub use stem::{Hub, HubHole, MountKind, StemAttach, StemBar, StemBranch, StemDef, StemMount, StemPlacement, StemStyle, StemTip, StyleBranch};
 
 /// LDraw units per stud (horizontal pitch).
 pub const LDU_PER_STUD: i32 = 20;

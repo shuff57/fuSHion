@@ -11,7 +11,16 @@
 //!   hub; its flat is on the same side as the stem's (it prints flat too) and sets which way
 //!   the stem's bend and leaves face;
 //! - at the tip, a LEGO bar ([`BAR_D`], `tip_bar` long) that goes into the head's bar hole;
-//! - optional bar sections ([`BAR_D`]) where leaves clip on.
+//! - optional bar sections ([`BAR_D`]) where leaves clip on;
+//! - optional side branches in the same plane (so the whole stem still prints flat as one
+//!   piece), each ending in a bar for another head, a bud, a flat blade, or nothing.
+//!
+//! # Each flower its own stem
+//! Like LEGO's bouquet, each kind of flower has its own stem: a rose on a plain stem with
+//! leaves, daisies as a forked sprig of several heads, lavender as a brown stem branching into
+//! many thin sprigs, a snapdragon stalk with buds along the top, grass as a fan of blades. A
+//! head design suggests its stem with [`StemStyle`] (`DetailDesign::stem`); the engine turns
+//! that into a concrete [`StemDef`] sized for each use.
 //!
 //! # Frames
 //! A stem's own frame is in LDU with LDraw axes (`-Y` up), like a part's: origin at the base
@@ -57,6 +66,99 @@ pub struct StemDef {
     /// Bar sections for leaves to clip on.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub bars: Vec<StemBar>,
+    /// Rod diameter, mm (default [`STEM_D`]; never below [`MIN_STEM_D`]).
+    #[serde(default = "default_stem_d")]
+    pub diameter: f32,
+    /// What the main stem ends in when it carries no head (`tip_bar` 0): a bud, a blade.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tip: Option<StemTip>,
+    /// Side branches, all in the stem's plane.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<StemBranch>,
+    /// The style's name, for parts lists and pages ("rose stem", "daisy sprig").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub style: String,
+}
+
+fn default_stem_d() -> f32 {
+    STEM_D
+}
+
+/// Thinnest rod a stem or branch may have, mm.
+pub const MIN_STEM_D: f32 = 3.5;
+
+/// A side branch of a stem, in the stem's plane. It leaves the main stem at `at` mm from
+/// the base, turned `angle` degrees from the main stem's direction there (positive toward
+/// local `+X`), and runs `length` mm as an arc bending `bend` degrees (positive toward `+X`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StemBranch {
+    pub at: f32,
+    pub angle: f32,
+    pub length: f32,
+    #[serde(default)]
+    pub bend: f32,
+    /// Rod diameter, mm (default: the main stem's, less 1 mm, at least [`MIN_STEM_D`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diameter: Option<f32>,
+    /// Length of a bar at its end for a head, mm (0: no head; see `tip`).
+    #[serde(default)]
+    pub tip_bar: f32,
+    /// What it ends in when it carries no head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tip: Option<StemTip>,
+}
+
+/// A stem or branch end that is part of the printed stem itself (it prints flat with it).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StemTip {
+    /// A closed bud: a pointed oval `length` × `width` mm, flat underneath.
+    Bud { length: f32, width: f32 },
+    /// A flat blade (grass, a pine needle bunch, a sepal): tapering to a point, `length` ×
+    /// `width` mm, as thick as the stem's flat allows (about 1.6 mm).
+    Blade { length: f32, width: f32 },
+}
+
+/// A head design's suggested stem: the engine scales it to each use. Lengths and positions
+/// are fractions of the main stem's length so one style fits any stem.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StemStyle {
+    /// "rose stem", "daisy sprig", "lavender sprig", "snapdragon stalk", "grass".
+    pub name: String,
+    /// Rod diameter, mm.
+    #[serde(default = "default_stem_d")]
+    pub diameter: f32,
+    /// Default stem colour name ("Dark Green"; "Reddish Brown" for lavender).
+    pub color: String,
+    /// Whether the main stem's tip carries the head (false: it ends in `tip` or bare, and
+    /// only branches carry heads).
+    #[serde(default = "yes")]
+    pub head_on_tip: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tip: Option<StemTip>,
+    pub branches: Vec<StyleBranch>,
+    /// Suggested leaf positions along the main stem (fractions of its length from the base).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leaves: Vec<f32>,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// A branch of a [`StemStyle`]: `at` and `length` are fractions of the main stem's length.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StyleBranch {
+    pub at: f32,
+    pub angle: f32,
+    pub length: f32,
+    #[serde(default)]
+    pub bend: f32,
+    /// Carries a head (the same design as the stem's head unless the spec says otherwise).
+    #[serde(default)]
+    pub head: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tip: Option<StemTip>,
 }
 
 /// A [`BAR_D`] bar section along a stem.
@@ -86,6 +188,37 @@ impl StemDef {
     pub fn tangent(&self, s: f32) -> [f32; 3] {
         let a = self.bend.to_radians() * (s / self.length.max(1e-3));
         [a.sin(), -a.cos(), 0.0]
+    }
+
+    /// Branch `i`'s centreline point at distance `u` mm from where it leaves the main stem
+    /// (0 ≤ u ≤ its length), in the stem's own frame (LDU).
+    pub fn branch_point(&self, i: usize, u: f32) -> [f32; 3] {
+        let b = &self.branches[i];
+        let p0 = self.point(b.at);
+        let (x0, up0) = (p0[0] / LDU_PER_MM, -p0[1] / LDU_PER_MM);
+        let a0 = self.bend.to_radians() * (b.at / self.length.max(1e-3)) + b.angle.to_radians();
+        let k = b.bend.to_radians() / b.length.max(1e-3);
+        let (x, up) = if k.abs() < 1e-6 {
+            (x0 + u * a0.sin(), up0 + u * a0.cos())
+        } else {
+            let a = a0 + k * u;
+            (x0 + (a0.cos() - a.cos()) / k, up0 + (a.sin() - a0.sin()) / k)
+        };
+        [x * LDU_PER_MM, -up * LDU_PER_MM, 0.0]
+    }
+
+    /// Branch `i`'s unit tangent at distance `u` from where it leaves the main stem.
+    pub fn branch_tangent(&self, i: usize, u: f32) -> [f32; 3] {
+        let b = &self.branches[i];
+        let a = self.bend.to_radians() * (b.at / self.length.max(1e-3))
+            + b.angle.to_radians()
+            + b.bend.to_radians() * (u / b.length.max(1e-3));
+        [a.sin(), -a.cos(), 0.0]
+    }
+
+    /// Branch `i`'s rod diameter, mm.
+    pub fn branch_diameter(&self, i: usize) -> f32 {
+        self.branches[i].diameter.unwrap_or(self.diameter - 1.0).max(MIN_STEM_D)
     }
 }
 
@@ -129,6 +262,10 @@ pub struct StemAttach {
     /// For a leaf: the index into [`StemDef::bars`] it clips onto.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bar: Option<usize>,
+    /// For a head on a branch's tip bar: the index into [`StemDef::branches`] (`None`: the
+    /// main stem's tip).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<usize>,
 }
 
 /// A stem in the model, with what is attached to it.
@@ -143,6 +280,9 @@ pub struct StemPlacement {
     pub hub: String,
     pub hole: u32,
     pub head: Option<StemAttach>,
+    /// Heads on branch tips (each with `branch` set).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branch_heads: Vec<StemAttach>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub leaves: Vec<StemAttach>,
 }

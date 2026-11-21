@@ -201,6 +201,10 @@ pub struct DetailDesign {
     /// can go on one. A design may have both sockets and a mount.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mount: Option<crate::stem::StemMount>,
+    /// The stem this head suggests (its own look, as in LEGO's bouquet: a forked daisy
+    /// sprig, a brown lavender stem, a snapdragon stalk with buds). `None`: a plain stem.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stem: Option<crate::stem::StemStyle>,
 }
 
 /// A detail built from separate printed parts, like the flowers of LEGO's Botanical
