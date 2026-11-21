@@ -48,6 +48,23 @@ pub enum CustomShape {
         /// Height in plates.
         plates: u32,
     },
+    /// A body part designed for one spot in a model: any edge-connected set of cells,
+    /// extruded, with fused studs **only** in the given units (so a brick pushed on never
+    /// ends on a waist) and the rest of the top flat. Bottom tubes wherever a full 2×2 block
+    /// of cells meets; centre ribs when the cells are a 2-wide rectangle. The cells are
+    /// moved so the smallest `i` and `j` are 0. Optionally its `label` (an id such as
+    /// `"B017"`) is engraved under the top, inside the hollow, to read from below.
+    Printed {
+        /// The cells, as `(i, j)` stud positions (X, Y).
+        cells: Vec<(i32, i32)>,
+        /// Height in plates.
+        plates: u32,
+        /// The fused units: each 2 or 3 neighbouring cells of one row, in order along it.
+        units: Vec<Vec<(i32, i32)>>,
+        /// Engraved under the top (digits, `-` and the capitals in [`crate::LABEL_CHARS`]).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
 }
 
 impl CustomShape {
@@ -57,7 +74,8 @@ impl CustomShape {
             Self::Box { plates, .. }
             | Self::Slope45 { plates, .. }
             | Self::Curve { plates, .. }
-            | Self::Footprint { plates, .. } => *plates,
+            | Self::Footprint { plates, .. }
+            | Self::Printed { plates, .. } => *plates,
         }
     }
 
@@ -70,6 +88,16 @@ impl CustomShape {
             Self::Footprint { cells, plates } => {
                 format!("footprint {} cells x{plates}", cells.len())
             }
+            Self::Printed {
+                cells,
+                plates,
+                label,
+                ..
+            } => format!(
+                "printed {}{} cells x{plates}",
+                label.as_deref().map(|l| format!("{l} ")).unwrap_or_default(),
+                cells.len()
+            ),
         }
     }
 }
@@ -167,7 +195,7 @@ impl Footprint {
 /// Traces the boundary of a set of unit cells into closed loops with the material on the left.
 /// Where two loops pinch at one grid point (cells touching only at a corner), the trace turns
 /// left, so each loop hugs its own cells and the loops separate when offset into the material.
-fn trace_loops(cells: &BTreeSet<(i32, i32)>) -> Result<Vec<Vec<(i32, i32)>>> {
+pub(crate) fn trace_loops(cells: &BTreeSet<(i32, i32)>) -> Result<Vec<Vec<(i32, i32)>>> {
     // Directed boundary edges, keyed by start point.
     let mut out: BTreeMap<(i32, i32), Vec<(i32, i32)>> = BTreeMap::new();
     let mut count = 0usize;

@@ -70,7 +70,7 @@ impl CustomDef {
         match &self.kind {
             CustomKind::Brick => format!(
                 "printed {} {}, {} stud{} area, {} plate{}",
-                if self.plates % 3 == 0 {
+                if self.plates.is_multiple_of(3) {
                     "brick"
                 } else {
                     "plate"
@@ -218,6 +218,9 @@ pub fn units_local(def: &PartDef) -> Option<Vec<Vec<(u8, u8)>>> {
     None
 }
 
+/// Fused units (each a row of grid columns) and the columns left flat.
+pub type StudLayout = (Vec<Vec<(i32, i32)>>, Vec<(i32, i32)>);
+
 /// Groups a part's stud columns into fused units (rows of pairs, one triple per odd run)
 /// so that **no unit straddles an edge of what sits on it**: `above(x, z)` names the part
 /// over each column (`None` when nothing is there). Runs are split wherever the part above
@@ -229,7 +232,7 @@ pub fn stud_layout(
     studs: &[(i32, i32)],
     along_x: bool,
     above: impl Fn(i32, i32) -> Option<usize>,
-) -> (Vec<Vec<(i32, i32)>>, Vec<(i32, i32)>) {
+) -> StudLayout {
     let key = |c: &(i32, i32)| if along_x { (c.1, c.0) } else { (c.0, c.1) };
     let mut order = studs.to_vec();
     order.sort_by_key(key);

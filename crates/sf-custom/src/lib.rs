@@ -10,6 +10,12 @@
 //!   with leaf-spring fins, and 0.4 mm rounded vertical edges. [`StudProfile::standard_fdm`]
 //!   (Slant 3D's plain FDM brick) stays as the model of a standard brick for fit checks.
 //! * [`CustomShape`]: a brick or plate, a 45° slope, a curved slope or any footprint of cells.
+//!   [`CustomShape::Printed`] is a body part designed for one spot in a model: any footprint,
+//!   fused studs only in the units the packer chose, its id engraved underneath.
+//! * [`detail_template`] and [`detail_from_commands`]: shaped detail parts (flower heads,
+//!   petals, leaves, domes, cones, round plates, or Claude's own SolidCraft batch) on a socket
+//!   base, returned as an `sf_core::DetailDesign` with a display mesh; [`rebuild_detail`]
+//!   makes the print again from the design's recorded source.
 //! * [`commands`]: the SolidCraft batch for a shape, with an `expect` check computed by hand.
 //! * [`build`]: runs that batch, checks every stage's volume against its closed form, and
 //!   exports STL and 3MF.
@@ -23,8 +29,11 @@
 
 #![warn(missing_docs)]
 
+mod detail;
 mod fit;
+mod flower;
 mod geom;
+mod label;
 mod mesh;
 mod plan;
 mod profile;
@@ -32,7 +41,13 @@ mod run;
 mod shape;
 mod slant;
 
+pub use detail::{
+    BASE_HEIGHT, DISPLAY_TRIANGLES, Detail, OVERHANG_MARGIN, SINK, SUPPORT_AREA_MM2, TEMPLATES,
+    decimate, detail_from_commands, detail_template, overhang_area, rebuild, rebuild_detail,
+};
+pub use flower::SPECIES;
 pub use fit::{FitReport, SlantOutline, TopBrick, fit, fit_below, fit_under, slant_outline};
+pub use label::{LABEL_CHARS, LABEL_DEPTH, engravable};
 pub use mesh::{MeshReport, analyze_stl};
 pub use plan::{BBOX_TOL_MM, Plan, Stage, VOLUME_TOL, fused_units, plan};
 pub use profile::{

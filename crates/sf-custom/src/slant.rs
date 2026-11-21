@@ -1047,6 +1047,66 @@ pub(crate) fn layout(cells: &BTreeSet<(i32, i32)>, studs: &[(i32, i32)]) -> Resu
     )))
 }
 
+/// Fused units given from outside (by the packer, which chose them for the part's spot), as
+/// [`Unit`]s: each must be 2 or 3 neighbouring cells of one row, inside `cells`, and no two
+/// may share a cell. Fins face a side where neither end cell has a neighbour in `cells`, the
+/// positive side when both are open, as in [`layout`]; a unit hemmed in on both sides has
+/// none.
+pub(crate) fn units_from(
+    cells: &BTreeSet<(i32, i32)>,
+    given: &[Vec<(i32, i32)>],
+) -> Result<Vec<Unit>> {
+    let bad = |why: String| Err(CustomError::InvalidShape(why));
+    let mut used: BTreeSet<(i32, i32)> = BTreeSet::new();
+    let mut out = Vec::new();
+    for (k, u) in given.iter().enumerate() {
+        if !(u.len() == 2 || u.len() == 3) {
+            return bad(format!(
+                "unit {k} has {} studs; fused units are pairs or triples",
+                u.len()
+            ));
+        }
+        let mut u = u.clone();
+        u.sort_unstable();
+        let step = (u[1].0 - u[0].0, u[1].1 - u[0].1);
+        if !(step == (1, 0) || step == (0, 1))
+            || u.windows(2).any(|w| (w[1].0 - w[0].0, w[1].1 - w[0].1) != step)
+        {
+            return bad(format!(
+                "unit {k} {u:?} is not a row of neighbouring cells"
+            ));
+        }
+        for c in &u {
+            if !cells.contains(c) {
+                return bad(format!("unit {k}: cell {c:?} is not part of the footprint"));
+            }
+            if !used.insert(*c) {
+                return bad(format!("unit {k}: cell {c:?} is in two units"));
+            }
+        }
+        let cross = (step.1, step.0);
+        let ends = [u[0], u[u.len() - 1]];
+        let open = |d: (i32, i32)| {
+            ends.iter()
+                .all(|q| !cells.contains(&(q.0 + d.0, q.1 + d.1)))
+        };
+        let fin = if open(cross) {
+            Some(cross)
+        } else if open((-cross.0, -cross.1)) {
+            Some((-cross.0, -cross.1))
+        } else {
+            None
+        };
+        out.push(Unit {
+            first: u[0],
+            step,
+            n: u.len(),
+            fin,
+        });
+    }
+    Ok(out)
+}
+
 /// The units of `set` in rows along Y (or X), or the studs left alone in their row.
 fn layout_along(
     cells: &BTreeSet<(i32, i32)>,

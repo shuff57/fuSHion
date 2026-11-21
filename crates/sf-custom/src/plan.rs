@@ -26,7 +26,8 @@ use crate::profile::{
     FUSED_RIB_OFFSET, RIB_GAP, RIB_THICKNESS, StudProfile, StudStyle, WALL_RIB_WIDTH,
 };
 use crate::shape::{CustomShape, Footprint, P2, signed_area};
-use crate::slant::{self, Lobe};
+use crate::label::{self, Keepout, LABEL_DEPTH};
+use crate::slant::{self, Lobe, Unit};
 use crate::{CustomError, MAX_PART_MM, Result};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -71,6 +72,8 @@ pub struct Plan {
     pub volume_mm3: f64,
     /// Finished bounding box `(min, max)`, mm.
     pub bbox_mm: ([f64; 3], [f64; 3]),
+    /// The text engraved under the top (a [`CustomShape::Printed`] label), if any.
+    pub label: Option<String>,
 }
 
 impl Plan {
@@ -280,7 +283,7 @@ impl Corner {
 /// refused. `sf-core` keeps its own copy of this rule for the packer; a test in `sf-agent`
 /// checks the two agree.
 pub fn fused_units(shape: &CustomShape, profile: &StudProfile) -> Result<Vec<Vec<(i32, i32)>>> {
-    let (cells, studs): (BTreeSet<(i32, i32)>, Vec<(i32, i32)>) = match shape {
+    let (cells, studs): (BTreeSet<(i32, i32)>, Cells) = match shape {
         CustomShape::Box { w, d, .. } => {
             let (w, d) = dims(*w, *d, 1)?;
             let studs = grid(0..w, 0..d);
@@ -333,6 +336,11 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
     let mut cells: BTreeSet<(i32, i32)> = BTreeSet::new();
     let mut outline: Vec<Vec<P2>> = Vec::new();
     let mut ribs: Option<Ribs> = None;
+    // Units given by the caller (printed parts), the hollow's outline (for placing a label)
+    // and the label to engrave.
+    let mut given: Option<Vec<Unit>> = None;
+    let mut hollow_loops: Vec<Vec<P2>> = Vec::new();
+    let mut label_text: Option<&str> = None;
     let (studs, tubes, bbox_xy, roof): (Cells, Cells, Extent2, Option<Roof>) = match shape {
         CustomShape::Box { w, d, .. } => {
             let (w, d) = dims(*w, *d, 1)?;
@@ -405,6 +413,63 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
             }
             let studs: Vec<(i32, i32)> = f.cells.iter().copied().collect();
             cells.clone_from(&f.cells);
+            outline = outer;
+            (studs, f.full_corners(), (lo, hi), None)
+        }
+        CustomShape::Printed {
+            cells: list,
+            units,
+            label,
+            ..
+        } => {
+            // Move the cells (and units) so the smallest i and j are 0.
+            let i0 = list.iter().map(|c| c.0).min().unwrap_or(0);
+            let j0 = list.iter().map(|c| c.1).min().unwrap_or(0);
+            let shift = |c: &(i32, i32)| (c.0 - i0, c.1 - j0);
+            let list: Vec<(i32, i32)> = list.iter().map(shift).collect();
+            let units: Vec<Vec<(i32, i32)>> =
+                units.iter().map(|u| u.iter().map(shift).collect()).collect();
+            let f = Footprint::new(&list)?;
+            let outer = f.offset_loops(p.pitch, p.clearance);
+            let inner = f.offset_loops(p.pitch, p.clearance + p.wall);
+            let area: f64 = outer.iter().map(|l| signed_area(l)).sum();
+            let inner_area: f64 = inner.iter().map(|l| signed_area(l)).sum();
+            let mut block = vec![sketch("BlockSketch", "XY", 0.0)];
+            block.extend(outer.iter().map(|l| polyline(l)));
+            block.push(finish());
+            block.push(extrude("BlockSketch", "Block", h, "new"));
+            b.stage("Block", block, area * h);
+            let mut hollow = vec![sketch("HollowSketch", "XY", -OVERRUN)];
+            hollow.extend(inner.iter().map(|l| polyline(l)));
+            hollow.push(finish());
+            hollow.push(extrude("HollowSketch", "Hollow", hollow_h + OVERRUN, "cut"));
+            b.stage("Hollow", hollow, -inner_area * hollow_h);
+            let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+            for q in outer.iter().flatten() {
+                for k in 0..2 {
+                    lo[k] = lo[k].min(q[k]);
+                    hi[k] = hi[k].max(q[k]);
+                }
+            }
+            cells.clone_from(&f.cells);
+            let given_units = slant::units_from(&f.cells, &units)?;
+            let studs: Vec<(i32, i32)> = given_units.iter().flat_map(Unit::cells).collect();
+            // A 2-wide rectangle gets centre ribs, as a box does.
+            let (w, d) = (
+                f.cells.iter().map(|c| c.0).max().unwrap_or(0) + 1,
+                f.cells.iter().map(|c| c.1).max().unwrap_or(0) + 1,
+            );
+            let rect = f.cells.len() == (w * d) as usize;
+            if rect && p.center_ribs && w.min(d) == 2 && w.max(d) >= 3 && hollow_h - RIB_GAP >= 0.4
+            {
+                ribs = Some(Ribs {
+                    along_y: d > w,
+                    long: w.max(d),
+                });
+            }
+            given = Some(given_units);
+            hollow_loops = inner;
+            label_text = label.as_deref();
             outline = outer;
             (studs, f.full_corners(), (lo, hi), None)
         }
@@ -517,8 +582,75 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
         );
     }
 
+    let along_y = match &given {
+        Some(units) => {
+            let ys = units.iter().filter(|u| u.step == (0, 1)).count();
+            if p.wall_ribs && ys != 0 && ys != units.len() {
+                return Err(CustomError::InvalidShape(
+                    "wall ribs need every fused unit to run the same way".into(),
+                ));
+            }
+            Some(ys == units.len())
+        }
+        None => None,
+    };
     if p.wall_ribs {
-        wall_ribs(&mut b, p, &cells, &studs, hollow_h, roof.as_ref())?;
+        wall_ribs(&mut b, p, &cells, &studs, along_y, hollow_h, roof.as_ref())?;
+    }
+
+    // The stud units, the stud profile's lobe and its finned lobes' frames.
+    let slant_parts = match p.stud_style {
+        StudStyle::SlantV2 { .. } => {
+            let lobe = Lobe::new(p)?;
+            let units = match &given {
+                Some(u) => u.clone(),
+                None => slant::layout(&cells, &studs)?,
+            };
+            let lobes: Vec<_> = units.iter().flat_map(|q| q.lobe_frames(p.pitch)).collect();
+            Some((lobe, units, lobes))
+        }
+        StudStyle::Solid => None,
+    };
+
+    // Label: engraved into the ceiling where it is bare (see `label`).
+    let mut engraved = None;
+    if let Some(text) = label_text {
+        let tube_centres: Vec<P2> = tubes
+            .iter()
+            .map(|&(i, j)| [f64::from(i) * p.pitch, f64::from(j) * p.pitch])
+            .collect();
+        let mut rects: Vec<(P2, P2)> = ribs.map(|r| r.bars(p)).unwrap_or_default();
+        if p.wall_ribs {
+            rects.extend(
+                wall_rib_sites(p, &cells, &studs, along_y)?
+                    .into_iter()
+                    .map(|s| (s.lo, s.hi)),
+            );
+        }
+        let cuts: Vec<Loop> = slant_parts
+            .as_ref()
+            .map(|(lobe, _, lobes)| {
+                lobes
+                    .iter()
+                    .flat_map(|f| [f.map_loop(&lobe.pocket), f.map_loop(&lobe.slot)])
+                    .collect()
+            })
+            .unwrap_or_default();
+        let keep = Keepout {
+            hollow: &hollow_loops,
+            tubes: &tube_centres,
+            tube_radius: p.tube_outer_diameter / 2.0,
+            rects: &rects,
+            cuts: &cuts,
+        };
+        if let Some(e) = label::engrave(text, &keep) {
+            let mut c = vec![sketch("LabelSketch", "XY", hollow_h - OVERRUN)];
+            c.extend(e.loops.iter().map(|l| polyline(l)));
+            c.push(finish());
+            c.push(extrude("LabelSketch", "Label", OVERRUN + LABEL_DEPTH, "cut"));
+            b.stage("Label", c, -e.area * LABEL_DEPTH);
+            engraved = Some(e.text);
+        }
     }
 
     let rs = p.stud_diameter / 2.0;
@@ -529,6 +661,7 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
         ]
     };
     match p.stud_style {
+        StudStyle::Solid if studs.is_empty() => {}
         StudStyle::Solid => {
             let mut c = vec![sketch("StudSketch", "XY", h)];
             c.extend(studs.iter().map(|q| circle(centre(q), p.stud_diameter)));
@@ -541,9 +674,12 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
             );
         }
         StudStyle::SlantV2 { .. } => {
-            let lobe = Lobe::new(p)?;
-            let units = slant::layout(&cells, &studs)?;
-            let lobes: Vec<_> = units.iter().flat_map(|q| q.lobe_frames(p.pitch)).collect();
+            let Some((lobe, units, lobes)) = slant_parts else {
+                unreachable!("worked out above for fused studs")
+            };
+            if units.is_empty() {
+                // A printed part with no studs at all (a flat top).
+            } else {
             if !lobes.is_empty() {
                 // Pockets first, into the bare top, so nothing above them is cut.
                 let mut c = vec![sketch("PocketSketch", "XY", h - lobe.pocket_depth)];
@@ -591,6 +727,7 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
                     -lobe.slot_volume(p.stud_height) * lobes.len() as f64,
                 );
             }
+            }
         }
     }
 
@@ -611,15 +748,17 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
         b.stage("Roof", c, -roof.wedge_area() * len + rounded);
     }
 
+    let top = if studs.is_empty() { h } else { h + p.stud_height };
     let bbox = (
         [bbox_xy.0[0], bbox_xy.0[1], 0.0],
-        [bbox_xy.1[0], bbox_xy.1[1], h + p.stud_height],
+        [bbox_xy.1[0], bbox_xy.1[1], top],
     );
     let volume = b.volume;
     Ok(Plan {
         stages: b.stages,
         volume_mm3: volume,
         bbox_mm: bbox,
+        label: engraved,
     })
 }
 
@@ -726,6 +865,7 @@ pub(crate) fn wall_rib_sites(
     p: &StudProfile,
     cells: &BTreeSet<(i32, i32)>,
     studs: &[(i32, i32)],
+    along: Option<bool>,
 ) -> Result<Vec<RibSite>> {
     let t = p.wall_rib_protrusion();
     let hw = WALL_RIB_WIDTH / 2.0;
@@ -736,9 +876,12 @@ pub(crate) fn wall_rib_sites(
     let (offsets, edges): (Vec<f64>, [bool; 2]) = match p.stud_style {
         StudStyle::Solid => (vec![0.0], [true, true]),
         StudStyle::SlantV2 { .. } => {
-            let along_y = slant::layout(cells, studs)?
-                .first()
-                .is_none_or(|u| u.step == (0, 1));
+            let along_y = match along {
+                Some(a) => a,
+                None => slant::layout(cells, studs)?
+                    .first()
+                    .is_none_or(|u| u.step == (0, 1)),
+            };
             (
                 vec![-FUSED_RIB_OFFSET, FUSED_RIB_OFFSET],
                 [!along_y, along_y],
@@ -813,6 +956,7 @@ fn wall_ribs(
     p: &StudProfile,
     cells: &BTreeSet<(i32, i32)>,
     studs: &[(i32, i32)],
+    along: Option<bool>,
     hollow_h: f64,
     roof: Option<&Roof>,
 ) -> Result<()> {
@@ -821,7 +965,7 @@ fn wall_ribs(
     let mut sk = vec![sketch("WallRibSketch", "XY", 0.0)];
     let mut picks = Vec::new();
     let (mut added, mut count) = (0.0, 0usize);
-    for site in wall_rib_sites(p, cells, studs)? {
+    for site in wall_rib_sites(p, cells, studs, along)? {
         let (ya, yb) = site.y_span();
         let low = ceil(ya).min(ceil(yb)).min(ceil((ya + yb) / 2.0));
         if low < p.stud_height {
@@ -867,6 +1011,26 @@ struct Ribs {
 }
 
 impl Ribs {
+    /// The bars' rectangles in plan, `(lo, hi)` mm.
+    fn bars(&self, p: &StudProfile) -> Vec<(P2, P2)> {
+        let t = RIB_THICKNESS;
+        let mid = (p.tube_outer_diameter + p.tube_inner_diameter) / 4.0;
+        let x0 = p.clearance + p.wall / 2.0;
+        let x1 = 2.0 * p.pitch - x0;
+        let mut out = Vec::new();
+        for k in (2..self.long).step_by(2) {
+            let y = f64::from(k) * p.pitch;
+            for (s0, s1) in [(x0, p.pitch - mid), (p.pitch + mid, x1)] {
+                out.push(if self.along_y {
+                    ([s0, y - t / 2.0], [s1, y + t / 2.0])
+                } else {
+                    ([y - t / 2.0, s0], [y + t / 2.0, s1])
+                });
+            }
+        }
+        out
+    }
+
     /// Each rib is two bars, from inside each long wall to the middle of the tube wall, from
     /// [`RIB_GAP`] above the floor into the top.
     fn stage(&self, b: &mut Builder, p: &StudProfile, hollow_h: f64) {

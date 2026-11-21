@@ -209,7 +209,7 @@ const FILE_KEYS: &[&str] = &[
     "dir",
 ];
 
-fn check_step(step: &Value) -> std::result::Result<(), String> {
+pub(crate) fn check_step(step: &Value) -> std::result::Result<(), String> {
     let Some(o) = step.as_object() else {
         return Err("a step is {\"command\": id, \"params\": {...}}".into());
     };
@@ -305,7 +305,7 @@ fn volume_off(measured: f64, expected: f64) -> Option<String> {
     })
 }
 
-fn run_step(s: &mut Session, stage: &str, index: usize, step: &Value) -> Result<Value> {
+pub(crate) fn run_step(s: &mut Session, stage: &str, index: usize, step: &Value) -> Result<Value> {
     let id = step
         .get("command")
         .and_then(Value::as_str)
@@ -330,14 +330,14 @@ fn run_step(s: &mut Session, stage: &str, index: usize, step: &Value) -> Result<
 }
 
 /// What `inspect.measure` reports for the whole design.
-struct Measured {
-    bodies: usize,
-    open: usize,
-    volume: f64,
-    bbox: ([f64; 3], [f64; 3]),
+pub(crate) struct Measured {
+    pub bodies: usize,
+    pub open: usize,
+    pub volume: f64,
+    pub bbox: ([f64; 3], [f64; 3]),
 }
 
-fn measure(s: &mut Session, stage: &str) -> Result<Measured> {
+pub(crate) fn measure(s: &mut Session, stage: &str) -> Result<Measured> {
     let r = s
         .execute("inspect.measure", &json!({}))
         .map_err(|e| CustomError::Engine {
@@ -399,7 +399,7 @@ fn bbox_off(got: ([f64; 3], [f64; 3]), want: ([f64; 3], [f64; 3]), tol: f64) -> 
 }
 
 /// The common end of a build: closed bodies, size limit, expected box, export and mesh checks.
-fn finish(
+pub(crate) fn finish(
     s: &mut Session,
     stage: &str,
     volume: Option<f64>,

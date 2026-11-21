@@ -378,7 +378,7 @@ fn features(p: &StudProfile, top: &TopBrick, ribs: bool) -> Result<Vec<Feature>>
             .flat_map(|i| (0..d).map(move |j| (top.at.0 + i, top.at.1 + j)))
             .collect();
         let all: Vec<(i32, i32)> = cells.iter().copied().collect();
-        for site in plan::wall_rib_sites(p, &cells, &all)? {
+        for site in plan::wall_rib_sites(p, &cells, &all, None)? {
             out.push(Feature::Rib {
                 at: (site.lo, site.hi),
                 n: site.n,
