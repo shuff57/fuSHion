@@ -105,6 +105,31 @@ impl MeshLibrary {
         mesh
     }
 
+    /// The mesh for a placement, with the key it is cached under: a catalog part's id, or
+    /// for a printed part a key from its content ([`crate::printed::brick_key`],
+    /// [`crate::printed::detail_key`]), since printed ids repeat across models. A detail
+    /// whose mesh is missing from `model.meshes` has none.
+    pub fn placement_mesh(&self, p: &sf_core::Placement, model: &sf_core::Model) -> Option<(String, Arc<PartMesh>)> {
+        use crate::printed::{brick_key, custom_mesh, detail_key, detail_mesh};
+        let Some(def) = &p.custom else {
+            return self.mesh(&p.part).map(|m| (p.part.clone(), m));
+        };
+        let (key, make): (String, Box<dyn FnOnce() -> PartMesh>) = match &def.kind {
+            sf_core::CustomKind::Brick => (brick_key(def), Box::new(|| custom_mesh(def))),
+            sf_core::CustomKind::Detail { mesh, .. } => {
+                let d = model.meshes.get(mesh)?;
+                (detail_key(d), Box::new(|| detail_mesh(d)))
+            }
+        };
+        let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(Some(m)) = cache.meshes.get(&key) {
+            return Some((key, m.clone()));
+        }
+        let m = Arc::new(make());
+        cache.meshes.insert(key.clone(), Some(m.clone()));
+        Some((key, m))
+    }
+
     /// Subfile references that could not be found so far.
     pub fn missing_files(&self) -> Vec<String> {
         let cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());

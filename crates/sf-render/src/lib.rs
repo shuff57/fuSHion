@@ -228,8 +228,7 @@ pub fn render_view(model: &Model, palette: &Palette, meshes: &MeshLibrary, view:
 }
 
 fn draw_model(target: &mut Target, cam: &Camera, model: &Model, palette: &Palette, meshes: &MeshLibrary, edges: bool) {
-    let mut projected: HashMap<(&str, u8), Option<Arc<Projected>>> = HashMap::new();
-    let mut mesh_cache: HashMap<&str, Option<Arc<PartMesh>>> = HashMap::new();
+    let mut projected: HashMap<(String, u8), Option<Arc<Projected>>> = HashMap::new();
     let mut colors = Colors::new(palette);
     let mut warned: Vec<&str> = Vec::new();
     // Edges are drawn after all faces so later parts can't overwrite them.
@@ -237,11 +236,11 @@ fn draw_model(target: &mut Target, cam: &Camera, model: &Model, palette: &Palett
 
     for pl in &model.placements {
         let (pos, m) = pl.ldraw_transform();
-        let key = (pl.part.as_str(), pl.rot.turns());
+        let key = (mesh_key(pl), pl.rot.turns());
         let proj = projected
             .entry(key)
             .or_insert_with(|| {
-                let mesh = mesh_cache.entry(pl.part.as_str()).or_insert_with(|| meshes.mesh(&pl.part)).clone()?;
+                let (_, mesh) = meshes.placement_mesh(pl, model)?;
                 Some(Arc::new(project_mesh(cam, &mesh, m, edges)))
             })
             .clone();
@@ -264,6 +263,18 @@ fn draw_model(target: &mut Target, cam: &Camera, model: &Model, palette: &Palett
         for e in &proj.edges {
             target.line(add(e[0], *o), add(e[1], *o), *rgb, alpha, bias);
         }
+    }
+}
+
+/// What a placement's mesh is cached under within one draw: the part id for catalog parts,
+/// the content key for printed bricks, the design name for details (fixed within a model).
+fn mesh_key(pl: &Placement) -> String {
+    match pl.custom.as_deref() {
+        None => pl.part.clone(),
+        Some(def) => match &def.kind {
+            sf_core::CustomKind::Brick => sf_ldraw::brick_key(def),
+            sf_core::CustomKind::Detail { mesh, .. } => format!("detail:{mesh}"),
+        },
     }
 }
 
@@ -404,12 +415,30 @@ pub fn render_grid(grid: &VoxelGrid, palette: &Palette, view: View, opts: &Rende
     to_image(&target)
 }
 
-/// Render a single placement at the origin (handy for part thumbnails).
+/// Render a single placement at the origin (handy for part thumbnails). A detail part
+/// needs its model's meshes: use [`render_part_in`].
 pub fn render_part(placement: &Placement, palette: &Palette, meshes: &MeshLibrary, view: View, opts: &RenderOptions) -> RgbaImage {
+    render_part_in(&Model::default(), placement, palette, meshes, view, opts)
+}
+
+/// Render a single placement of `model` at the origin, using the model's detail meshes.
+pub fn render_part_in(
+    model: &Model,
+    placement: &Placement,
+    palette: &Palette,
+    meshes: &MeshLibrary,
+    view: View,
+    opts: &RenderOptions,
+) -> RgbaImage {
     let mut p = placement.clone();
     p.origin = sf_core::Cell::new(0, 0, 0);
-    let model = Model { placements: vec![p], ..Default::default() };
-    render_view(&model, palette, meshes, view, opts)
+    let mut one = Model { placements: vec![p], ..Default::default() };
+    if let Some(sf_core::CustomKind::Detail { mesh, .. }) = placement.custom.as_deref().map(|d| &d.kind)
+        && let Some(m) = model.meshes.get(mesh)
+    {
+        one.meshes.insert(mesh.clone(), m.clone());
+    }
+    render_view(&one, palette, meshes, view, opts)
 }
 
 fn to_image(t: &Target) -> RgbaImage {

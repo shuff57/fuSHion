@@ -137,3 +137,97 @@ fn grid_render_draws_voxels() {
     // A cell is 20 wide, 8 tall.
     assert!(b.2 - b.0 > 2 * (b.3 - b.1));
 }
+
+fn printed(def: sf_core::CustomDef, color: ColorId, at: Cell) -> Placement {
+    Placement::printed(def, color, at, Rot(0))
+}
+
+fn l_brick() -> sf_core::CustomDef {
+    sf_core::CustomDef {
+        id: "B001".into(),
+        kind: sf_core::CustomKind::Brick,
+        // An L: a row of four along x and one more at (0, 1).
+        cells: vec![(0, 0), (1, 0), (2, 0), (3, 0), (0, 1)],
+        plates: 3,
+        studs: vec![(0, 0), (1, 0), (2, 0), (3, 0)],
+        units: vec![vec![(0, 0), (1, 0)], vec![(2, 0), (3, 0)]],
+        sockets: vec![(0, 0), (1, 0), (2, 0), (3, 0), (0, 1)],
+    }
+}
+
+/// A box detail 2 × 1 studs, 2 plates tall, in the catalog frame (top centre, -y up).
+fn box_detail() -> (sf_core::CustomDef, sf_core::DetailMesh) {
+    let (hx, hz, h) = (20.0f32, 10.0f32, 16.0f32);
+    let p = |x: f32, y: f32, z: f32| [x * hx, y * h, z * hz];
+    let positions = vec![
+        p(-1., 0., -1.), p(1., 0., -1.), p(1., 1., -1.), p(-1., 1., -1.),
+        p(-1., 0., 1.), p(1., 0., 1.), p(1., 1., 1.), p(-1., 1., 1.),
+    ];
+    let indices = vec![0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 2, 3, 7, 2, 7, 6, 1, 2, 6, 1, 6, 5, 0, 4, 7, 0, 7, 3];
+    let design = sf_core::DetailDesign {
+        name: "boxy".into(),
+        label: "box".into(),
+        cells: vec![(0, 0), (1, 0)],
+        plates: 2,
+        sockets: vec![(0, 0), (1, 0)],
+        studs: vec![],
+        mesh: sf_core::DetailMesh { positions, indices },
+        source: sf_core::DetailSource { source: serde_json::Value::Null },
+    };
+    (design.instance("D001"), design.mesh)
+}
+
+#[test]
+fn printed_bricks_and_details_render() {
+    let lib = MeshLibrary::procedural();
+    let (detail, mesh) = box_detail();
+    let mut m = model(vec![
+        printed(l_brick(), RED, Cell::new(0, 0, 0)),
+        // The detail sits on the studs of the L's row, at x 2..4.
+        printed(detail, BLUE, Cell::new(2, 3, 0)),
+    ]);
+    m.meshes.insert("boxy".into(), mesh);
+    let top = render_view(&m, &Palette::builtin(), &lib, View::Top, &opts(96));
+    let red = bbox_of(&top, reddish).expect("brick drawn");
+    let blue = bbox_of(&top, bluish).expect("detail drawn");
+    // From the top (front at the bottom), the detail covers the right half of the row.
+    assert!(cx(blue) > cx(red), "{blue:?} vs {red:?}");
+    // The L's notch at (1..4, 1) is empty: no red there.
+    let (x0, y0, x1, y1) = red;
+    let notch = (x0 + (x1 - x0) * 5 / 8, y0 + (y1 - y0) / 6);
+    assert!(!reddish(top.get_pixel(notch.0, notch.1).0[..3].try_into().unwrap()), "notch filled at {notch:?} in {red:?}");
+    // The front view shows the detail standing on the brick.
+    let front = render_view(&m, &Palette::builtin(), &lib, View::Front, &opts(96));
+    let (r, b) = (bbox_of(&front, reddish).unwrap(), bbox_of(&front, bluish).unwrap());
+    assert!(cy(b) < cy(r), "detail above the brick: {b:?} {r:?}");
+    // A detail without its mesh is skipped, not a panic.
+    let mut bare = m.clone();
+    bare.meshes.clear();
+    let img = render_view(&bare, &Palette::builtin(), &lib, View::Top, &opts(32));
+    assert!(bbox_of(&img, bluish).is_none());
+    // Thumbnails of a detail find the model's mesh.
+    let thumb = render_part_in(&m, &m.placements[1], &Palette::builtin(), &lib, View::Iso, &opts(48));
+    assert!(bbox_of(&thumb, bluish).is_some());
+}
+
+#[test]
+fn printed_brick_sheet_png() {
+    // Not an assertion test: writes a review image when FUSHION_RENDER_PNG is set.
+    let Ok(path) = std::env::var("FUSHION_RENDER_PNG") else { return };
+    let lib = MeshLibrary::procedural();
+    let (detail, mesh) = box_detail();
+    let mut tri = l_brick();
+    tri.id = "B002".into();
+    tri.cells = (0..5).map(|x| (x, 0)).collect();
+    tri.studs = tri.cells.clone();
+    tri.units = vec![vec![(0, 0), (1, 0)], vec![(2, 0), (3, 0), (4, 0)]];
+    tri.sockets = tri.cells.clone();
+    let mut m = model(vec![
+        printed(l_brick(), RED, Cell::new(0, 0, 0)),
+        printed(detail, BLUE, Cell::new(2, 3, 0)),
+        printed(tri, 14, Cell::new(0, 0, 3)),
+    ]);
+    m.meshes.insert("boxy".into(), mesh);
+    let o = RenderOptions { view_size: 320, edges: true, background: [236, 238, 241] };
+    render_sheet(&m, &Palette::builtin(), &lib, &[View::Iso, View::Top, View::Front, View::Right], &o).save(path).unwrap();
+}
