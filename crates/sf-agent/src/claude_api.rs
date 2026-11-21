@@ -84,7 +84,11 @@ spec's `details`. For flowers, follow LEGO's Botanical bouquets (10280 Flower Bo
 Bouquet): each head is a hub with petals around it, often two staggered layers and a separate centre; spike \
 flowers (snapdragon, lupin, lavender, larkspur) stack rings of florets up a stem; foliage is separate leaves \
 and fronds. Match the picture's species, petal count, colours and size; replicate the picture as closely \
-as you can.\n\n\
+as you can. A cut flower or a bouquet goes on printed stems with the spec's `bouquet` (see the guide's \
+\"Bouquets\" section): build the vase from body shapes with a flat studded top, give every flower its own \
+stem (each design suggests its own stem style, like LEGO's: a forked daisy sprig, brown lavender sprigs, a \
+snapdragon stalk with buds, a grass fan), lean the stems out in a fan, size heads to the bouquet (about 6-8 \
+studs across in a bouquet 30 studs wide), and never build stems or flowers on brick columns.\n\n\
 Detail templates and their parameters (mm, degrees; base in studs):\n{}\n\n\
 Use at most {} builds per request, then \
 reply with two or three plain sentences: what you built, what you changed last, and anything the \

@@ -184,6 +184,7 @@ pub(crate) fn compile(
         map: crate::GridMap::Relief { depth, shift: [0; 3] },
         details: Vec::new(),
         surface: Vec::new(),
+        bouquet: None,
     })
 }
 

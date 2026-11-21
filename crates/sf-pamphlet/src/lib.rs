@@ -10,6 +10,9 @@
 //!    printed parts (a flower from a hub, petals and a centre) gets a **sub-build** first,
 //!    LEGO style: a tinted box headed "Build ×N" with an exploded picture and the kit's own
 //!    steps; the main step then adds the finished detail, pointing back to that page.
+//!    Bouquet stems get the same treatment: a "Build ×N" page per kind of stem (head pushed
+//!    on, leaves clipped on), then main steps plugging the stems into the hub's numbered
+//!    holes, right after the step that places the hub.
 //! 5. **Finished**: the model from two corners.
 //!
 //! Rendering uses sf-render's CPU renderer; the PDF is written by a small built-in writer
@@ -19,6 +22,7 @@ pub mod kit;
 pub mod pdf;
 #[doc(hidden)]
 pub mod sample;
+pub mod stem;
 pub mod view;
 
 use anyhow::{Context, Result};
@@ -30,6 +34,7 @@ use sf_render::{RenderOptions, View, render_part};
 use std::collections::BTreeMap;
 use std::path::Path;
 use kit::{KitRenderer, SubBuild};
+use stem::MainStep;
 use view::ScratchPalette;
 
 /// Settings for [`write_pamphlet`].
@@ -49,6 +54,8 @@ pub struct PamphletOptions {
     pub jpeg_quality: u8,
     /// A step adding more kinds of part than this gets a page of its own. Default 5.
     pub max_kinds_half_page: usize,
+    /// Stems plugged into the hub per main step. Default 1.
+    pub stems_per_step: usize,
 }
 
 impl Default for PamphletOptions {
@@ -61,6 +68,7 @@ impl Default for PamphletOptions {
             thumb_px: 200,
             jpeg_quality: 85,
             max_kinds_half_page: 5,
+            stems_per_step: 1,
         }
     }
 }
@@ -91,6 +99,14 @@ pub struct PamphletInfo {
     pub sub_build_pages: Vec<usize>,
     /// Page (1-based) of each main build step.
     pub step_pages: Vec<usize>,
+    /// Stems: how many, distinct print ids, and distinct builds (identical stems share one).
+    pub stems: usize,
+    pub stem_ids: usize,
+    pub stem_builds: usize,
+    /// Page (1-based) of each stem build, in order.
+    pub stem_build_pages: Vec<usize>,
+    /// The main step (1-based) each stem (by index in `Model::stems`) is plugged in.
+    pub stem_steps: Vec<usize>,
 }
 
 /// Write the instructions for `model` to `out` (a `.pdf`).
@@ -119,6 +135,8 @@ pub fn pamphlet_bytes(model: &Model, palette: &Palette, meshes: &MeshLibrary, op
         .unwrap_or_else(|| "fuSHion model".to_string());
     let mut b = Builder { doc: Pdf::default(), palette, meshes, opts, title, thumbs: BTreeMap::new() };
     let steps = steps_of(model);
+    let seq = stem::sequence(model, &steps, opts.stems_per_step);
+    let groups = stem::groups(model);
     let subs = kit::sub_builds(model, &steps, palette);
     // Each placement's parts-list key: a kit use goes under its sub-build.
     let mut keys: Vec<(String, ColorId)> = model.placements.iter().map(|p| (p.part.clone(), p.color)).collect();
@@ -127,9 +145,15 @@ pub fn pamphlet_bytes(model: &Model, palette: &Palette, meshes: &MeshLibrary, op
             keys[i] = (sb.key(g), sb.main);
         }
     }
-    let entries = b.entries(model, &keys, &subs)?;
+    let entries = b.entries(model, &keys, &subs, &groups)?;
 
-    let mut info = PamphletInfo { steps: steps.len(), sub_builds: subs.len(), ..Default::default() };
+    let mut info = PamphletInfo {
+        steps: seq.len(),
+        sub_builds: subs.len(),
+        stems: model.stems.len(),
+        stem_builds: groups.len(),
+        ..Default::default()
+    };
     for e in entries.values() {
         match e.kind {
             Kind::Printed => {
@@ -145,8 +169,10 @@ pub fn pamphlet_bytes(model: &Model, palette: &Palette, meshes: &MeshLibrary, op
             Kind::KitPart => info.kit_parts += e.count,
             Kind::Kit => info.kit_uses += e.count,
             Kind::Catalog => info.catalog_parts += e.count,
+            Kind::Stem | Kind::StemBuild => {}
         }
     }
+    info.stem_ids = distinct(entries.values().filter(|e| e.kind == Kind::Stem));
     // Designs are counted per part id, not per colour.
     info.printed_designs = distinct(entries.values().filter(|e| e.kind == Kind::Printed));
     info.detail_designs = distinct(entries.values().filter(|e| e.kind == Kind::Detail));
@@ -155,13 +181,15 @@ pub fn pamphlet_bytes(model: &Model, palette: &Palette, meshes: &MeshLibrary, op
     designs.dedup();
     info.kit_designs = designs.len();
 
-    b.cover(model, &info, steps.len())?;
+    b.cover(model, &info, seq.len())?;
     b.before_you_build(&info);
     b.parts_pages(&entries, true);
     b.parts_pages(&entries, false);
-    let (sub_pages, step_pages) = b.step_pages(model, &steps, &entries, &keys, &subs)?;
-    info.sub_build_pages = sub_pages;
-    info.step_pages = step_pages;
+    let pages = b.step_pages(model, &steps, &seq, &entries, &keys, &subs, &groups)?;
+    info.sub_build_pages = pages.sub_builds;
+    info.step_pages = pages.steps;
+    info.stem_build_pages = pages.stem_builds;
+    info.stem_steps = pages.stem_steps;
     b.finished(model)?;
     b.footers();
 
@@ -221,6 +249,10 @@ enum Kind {
     /// A finished kit detail placed on the model (not printed as one piece).
     Kit,
     Catalog,
+    /// A printed stem (its own section of the print list).
+    Stem,
+    /// A finished stem with its head and leaves (step callouts only).
+    StemBuild,
 }
 
 fn kind(p: &Placement) -> Kind {
@@ -290,7 +322,13 @@ impl Builder<'_> {
 
     /// Every part × colour in the model, with a thumbnail each; kit uses as one entry per
     /// sub-build, plus one per kit piece × colour.
-    fn entries(&mut self, model: &Model, keys: &[(String, ColorId)], subs: &[SubBuild]) -> Result<BTreeMap<(String, ColorId), Entry>> {
+    fn entries(
+        &mut self,
+        model: &Model,
+        keys: &[(String, ColorId)],
+        subs: &[SubBuild],
+        groups: &[Vec<usize>],
+    ) -> Result<BTreeMap<(String, ColorId), Entry>> {
         let mut samples: BTreeMap<(String, ColorId), (Placement, usize)> = BTreeMap::new();
         for (p, k) in model.placements.iter().zip(keys) {
             if !k.0.starts_with("kit#") {
@@ -303,8 +341,7 @@ impl Builder<'_> {
         let thumb_model = |p: &Placement| -> RgbaImage {
             let mut p = p.clone();
             p.rot = Rot(0);
-            let mut m = model.clone();
-            m.steps.clear();
+            let mut m = stem::blank(model);
             m.placements = vec![p];
             let opts = RenderOptions { view_size: size, edges: true, background: [255, 255, 255] };
             let img = if m.placements[0].custom.is_some() {
@@ -325,6 +362,10 @@ impl Builder<'_> {
             let name = match trim {
                 Some(_) => curved_name(&p.name()),
                 None => p.name(),
+            };
+            let name = match hub_holes(model, p) {
+                Some(n) => format!("{name}, {n} stem holes"),
+                None => name,
             };
             out.insert(
                 k.clone(),
@@ -350,7 +391,7 @@ impl Builder<'_> {
             let key = (sb.key(g), sb.main);
             out.insert(
                 key.clone(),
-                Entry { kind: Kind::Kit, part: key.0.clone(), title: sb.label.clone(), color: sb.main, count: sb.uses.len(), name: sb.label.clone(), thumb, supports: false, curved: false },
+                Entry { kind: Kind::Kit, part: key.0.clone(), title: sb.label.clone(), color: sb.main, count: sb.count(), name: sb.label.clone(), thumb, supports: false, curved: false },
             );
         }
         // (design, part index) and count for each piece × colour.
@@ -359,7 +400,7 @@ impl Builder<'_> {
             let kit = &model.kits[&sb.design];
             for (pi, part) in kit.parts.iter().enumerate() {
                 let key = (format!("{}/{}", sb.design, part.key), sb.part_colors[pi]);
-                pieces.entry(key).or_insert_with(|| (sb.design.clone(), pi, 0, sb.label.clone())).2 += part.copies.len() * sb.uses.len();
+                pieces.entry(key).or_insert_with(|| (sb.design.clone(), pi, 0, sb.label.clone())).2 += part.copies.len() * sb.count();
             }
         }
         let pkeys: Vec<(String, ColorId)> = pieces.keys().cloned().collect();
@@ -387,6 +428,53 @@ impl Builder<'_> {
                     curved: false,
                 },
             );
+        }
+
+        // Stems: a row per print id and colour, drawn lying flat as printed.
+        let mut stem_rows: BTreeMap<(String, ColorId), (usize, usize)> = BTreeMap::new();
+        for (si, sp) in model.stems.iter().enumerate() {
+            stem_rows.entry((format!("stem:{}", sp.def.id), sp.color)).or_insert((si, 0)).1 += 1;
+        }
+        let skeys: Vec<(String, ColorId)> = stem_rows.keys().cloned().collect();
+        let imgs: Vec<RgbaImage> = parallel_map(&skeys, |k| {
+            let sp = &model.stems[stem_rows[k].0];
+            stem::flat_thumb(&sp.def, sp.color, palette, meshes, size * 2)
+        });
+        for (k, img) in skeys.into_iter().zip(imgs) {
+            let (si, count) = stem_rows[&k];
+            let def = &model.stems[si].def;
+            let thumb = self.add(&img)?;
+            let e = Entry { kind: Kind::Stem, part: k.0.clone(), title: stem::title(def), color: k.1, count, name: stem::describe(def), thumb, supports: false, curved: false };
+            out.insert(k, e);
+        }
+        // Each stem build, finished, for step callouts.
+        let imgs: Vec<RgbaImage> = parallel_map(groups, |g| square(&stem::finished_thumb(model, &model.stems[g[0]], palette, meshes, size)));
+        for (gi, (g, img)) in groups.iter().zip(imgs).enumerate() {
+            let sp = &model.stems[g[0]];
+            let thumb = self.add(&img)?;
+            let key = (format!("stems#{gi}"), sp.color);
+            let e = Entry { kind: Kind::StemBuild, part: key.0.clone(), title: sp.def.id.clone(), color: sp.color, count: g.len(), name: String::new(), thumb, supports: false, curved: false };
+            out.insert(key, e);
+        }
+        // Heads and leaves printed in one piece (kits are sub-builds, above).
+        let mut plain: BTreeMap<(String, ColorId), (String, usize, bool)> = BTreeMap::new();
+        for sp in &model.stems {
+            let heads = sp.head.iter().chain(&sp.branch_heads).map(|a| (a, true));
+            for (a, head) in heads.chain(sp.leaves.iter().map(|a| (a, false))) {
+                if !model.kits.contains_key(&a.design) {
+                    plain.entry((format!("design:{}", a.design), a.color)).or_insert((a.design.clone(), 0, head)).1 += 1;
+                }
+            }
+        }
+        let pkeys: Vec<(String, ColorId)> = plain.keys().cloned().collect();
+        let imgs: Vec<RgbaImage> = parallel_map(&pkeys, |k| square(&stem::design_thumb(model, &plain[k].0, k.1, palette, meshes, size)));
+        for (k, img) in pkeys.into_iter().zip(imgs) {
+            let (design, count, head) = &plain[&k];
+            let thumb = self.add(&img)?;
+            self.thumbs.insert(k.clone(), thumb);
+            let name = if *head { "Printed head, pushes onto a stem's tip" } else { "Printed leaf, clips onto a stem" };
+            let e = Entry { kind: Kind::Detail, part: k.0.clone(), title: stem::humanize(design), color: k.1, count: *count, name: name.into(), thumb, supports: false, curved: false };
+            out.insert(k, e);
         }
         Ok(out)
     }
@@ -432,6 +520,14 @@ impl Builder<'_> {
                 d as f32 * 8.0,
                 h as f32 * 3.2
             ));
+            // Stems reach above the bricks: give the bouquet's full height too.
+            if let Some((top, _)) = sf_render::stems_bounds(model) {
+                // LDraw -Y is up; 2.5 LDU to the millimetre.
+                let tall = (-(lo.y as f32) * 8.0 - top[1]) / 2.5;
+                if tall > h as f32 * 3.2 + 1.0 {
+                    facts.push(format!("{tall:.0} mm tall with its stems"));
+                }
+            }
         }
         let mut parts: Vec<String> = Vec::new();
         if info.printed_parts > 0 {
@@ -442,6 +538,9 @@ impl Builder<'_> {
         }
         if info.kit_parts > 0 {
             parts.push(format!("{} printed kit pieces for {} sub-builds", info.kit_parts, info.kit_uses));
+        }
+        if info.stems > 0 {
+            parts.push(format!("{} printed stem{}", info.stems, if info.stems == 1 { "" } else { "s" }));
         }
         if info.catalog_parts > 0 {
             parts.push(format!("{} LEGO parts", info.catalog_parts));
@@ -463,7 +562,8 @@ impl Builder<'_> {
     }
 
     fn before_you_build(&mut self, info: &PamphletInfo) {
-        let printed = info.printed_parts + info.detail_parts + info.kit_parts > 0;
+        let printed = info.printed_parts + info.detail_parts + info.kit_parts + info.stems > 0;
+        let stems = info.stems > 0;
         let kits = info.sub_builds > 0;
         let numbers = self.opts.numbers_on_parts;
         let settings = self.opts.print_settings.clone();
@@ -511,6 +611,19 @@ impl Builder<'_> {
                 }
                 y = page.paragraph(MARGIN, y, w, 11.0, Font::Regular, INK, &line) + 4.0;
             }
+            if stems {
+                y = page.paragraph(
+                    MARGIN,
+                    y,
+                    w,
+                    11.0,
+                    Font::Regular,
+                    INK,
+                    "Stems are long printed rods. Each one gets its head and leaves on a \"Build\" page, then plugs into a \
+                     numbered hole in the hub. The flat on a stem's peg matches the flat in its hole, so it only goes in \
+                     one way round.",
+                ) + 4.0;
+            }
             if kits {
                 page.fill_rect(MARGIN, y, w, 40.0, TINT);
                 page.stroke_rect(MARGIN, y, w, 40.0, 0.75, TINT_EDGE);
@@ -529,11 +642,14 @@ impl Builder<'_> {
             y += 6.0;
 
             y = section(page, y, "Print settings");
-            let lines = if settings.is_empty() {
+            let mut lines = if settings.is_empty() {
                 vec!["Use the settings you print LEGO-compatible bricks with. Print studs up.".to_string()]
             } else {
                 settings
             };
+            if stems {
+                lines.push("Print stems lying flat, as laid out in the file, with the flat side down.".to_string());
+            }
             for l in lines {
                 page.text(MARGIN + 4.0, y + 11.0, 11.0, Font::Regular, ACCENT, "•");
                 y = page.paragraph(MARGIN + 16.0, y + 11.0, w - 16.0, 11.0, Font::Regular, INK, &l) - 11.0 + 4.0;
@@ -574,9 +690,12 @@ impl Builder<'_> {
 
     /// "What to print" (printed bricks and details) or "What to buy" (catalog parts).
     fn parts_pages(&mut self, entries: &BTreeMap<(String, ColorId), Entry>, printed: bool) {
-        let rows: Vec<&Entry> =
-            entries.values().filter(|e| e.kind != Kind::Kit && (e.kind != Kind::Catalog) == printed).collect();
-        if rows.is_empty() {
+        let rows: Vec<&Entry> = entries
+            .values()
+            .filter(|e| !matches!(e.kind, Kind::Kit | Kind::Stem | Kind::StemBuild) && (e.kind != Kind::Catalog) == printed)
+            .collect();
+        let stems: Vec<&Entry> = if printed { entries.values().filter(|e| e.kind == Kind::Stem).collect() } else { Vec::new() };
+        if rows.is_empty() && stems.is_empty() {
             return;
         }
         // Group by colour, biggest colour first; within a colour by kind, then id.
@@ -589,8 +708,8 @@ impl Builder<'_> {
         for (_, v) in &mut groups {
             v.sort_by(|a, b| (a.kind, &a.part).cmp(&(b.kind, &b.part)));
         }
-        let total: usize = groups.iter().flat_map(|(_, v)| v.iter().map(|e| e.count)).sum();
-        let kinds: usize = groups.iter().map(|(_, v)| v.len()).sum();
+        let total: usize = groups.iter().flat_map(|(_, v)| v.iter().map(|e| e.count)).sum::<usize>() + stems.iter().map(|e| e.count).sum::<usize>();
+        let kinds: usize = groups.iter().map(|(_, v)| v.len()).sum::<usize>() + stems.len();
         let (title, sub) = if printed {
             ("What to print", format!("{total} parts, {kinds} kinds. Tick each one when it's printed."))
         } else {
@@ -667,30 +786,116 @@ impl Builder<'_> {
             }
             y += 6.0;
         }
+        if stems.is_empty() {
+            return;
+        }
+        // Stems: full-width rows below both columns.
+        const STEM_ROW: f32 = 50.0;
+        if col == 1 || y + HEAD_H + STEM_ROW > bottom {
+            let page = self.new_page();
+            y = Self::heading(page, &format!("{title} (continued)"), "");
+        }
+        let full_w = PAGE_W - 2.0 * MARGIN;
+        let n_stems: usize = stems.iter().map(|e| e.count).sum();
+        {
+            let page = self.doc.pages.last_mut().expect("page");
+            page.text(MARGIN, y + 19.0, 12.0, Font::Bold, INK, &format!("Stems · {n_stems}"));
+            page.text(MARGIN + 80.0, y + 19.0, 8.5, Font::Regular, MUTED, "Shown lying flat, as they print. Each stem's number is under its peg.");
+            page.line(MARGIN, y + HEAD_H - 1.0, MARGIN + full_w, y + HEAD_H - 1.0, 0.75, RULE);
+        }
+        y += HEAD_H;
+        for e in stems {
+            if y + STEM_ROW > bottom {
+                let page = self.new_page();
+                y = Self::heading(page, &format!("{title} (continued)"), "");
+            }
+            let page = self.doc.pages.last_mut().expect("page");
+            let x = MARGIN;
+            page.stroke_rect(x + 1.0, y + 19.0, 10.0, 10.0, 0.9, INK);
+            page.image(e.thumb, x + 18.0, y + 4.0, 200.0, 42.0);
+            page.text(x + 230.0, y + 20.0, 11.5, Font::Bold, INK, &e.title);
+            page.text(x + 230.0, y + 33.0, 8.5, Font::Regular, MUTED, &pdf::fit(&e.name, Font::Regular, 8.5, 170.0));
+            page.fill_rect(x + 410.0, y + 14.0, 9.0, 9.0, palette.rgb(e.color));
+            page.stroke_rect(x + 410.0, y + 14.0, 9.0, 9.0, 0.4, MUTED);
+            page.text(x + 424.0, y + 22.0, 8.5, Font::Regular, MUTED, &pdf::fit(&palette.name(e.color), Font::Regular, 8.5, 60.0));
+            page.text_right(x + full_w, y + 22.0, 13.0, Font::Bold, INK, &format!("×{}", e.count));
+            page.line(x + 18.0, y + STEM_ROW - 0.5, x + full_w, y + STEM_ROW - 0.5, 0.25, RULE);
+            y += STEM_ROW;
+        }
     }
 
-    /// The main build steps, each kit sub-build just before the step that adds it. Returns
-    /// the page (1-based) where each sub-build starts and the page of each main step.
+    /// The main build steps, each kit sub-build and stem build just before the step that
+    /// first needs it.
+    #[allow(clippy::too_many_arguments)]
     fn step_pages(
         &mut self,
         model: &Model,
         steps: &[Vec<usize>],
+        seq: &[MainStep],
         entries: &BTreeMap<(String, ColorId), Entry>,
         keys: &[(String, ColorId)],
         subs: &[SubBuild],
-    ) -> Result<(Vec<usize>, Vec<usize>)> {
-        if steps.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
+        groups: &[Vec<usize>],
+    ) -> Result<StepPages> {
+        let mut out = StepPages {
+            sub_builds: vec![0; subs.len()],
+            stem_builds: vec![0; groups.len()],
+            stem_steps: vec![0; model.stems.len()],
+            steps: Vec::with_capacity(seq.len()),
+        };
+        if seq.is_empty() {
+            return Ok(out);
         }
-        // Render every step (in parallel): the picture and the corner it was seen from.
         let size = self.opts.step_image_px.max(64);
         let (palette, meshes) = (self.palette, self.meshes);
-        let idx: Vec<usize> = (0..steps.len()).collect();
-        let rendered: Vec<(RgbaImage, u8)> = parallel_map(&idx, |&k| {
+        // Which hubs each main step shows the numbered holes of, and which holes it fills.
+        let hubs_of = |j: usize| -> (Vec<usize>, Vec<u32>) {
+            let mut hubs: Vec<usize> = Vec::new();
+            let mut lit = Vec::new();
+            match &seq[j] {
+                MainStep::Parts(k) => {
+                    for sp in &model.stems {
+                        if let Some(h) = stem::hub_index(model, sp)
+                            && steps[*k].contains(&h)
+                            && !hubs.contains(&h)
+                        {
+                            hubs.push(h);
+                        }
+                    }
+                }
+                MainStep::Stems(list) => {
+                    for &si in list {
+                        let sp = &model.stems[si];
+                        lit.push(sp.hole);
+                        if let Some(h) = stem::hub_index(model, sp)
+                            && !hubs.contains(&h)
+                        {
+                            hubs.push(h);
+                        }
+                    }
+                }
+            }
+            (hubs, lit)
+        };
+        // Render every main step (in parallel): the picture, the corner it was seen from,
+        // and where the hub's hole numbers go in it.
+        let idx: Vec<usize> = (0..seq.len()).collect();
+        let rendered: Vec<StepPic> = parallel_map(&idx, |&j| {
             let mut pal = ScratchPalette::new(palette);
-            let (m, new) = view::step_model(model, steps, k, &mut pal, true);
+            let (m, new) = stem::scene(model, steps, seq, j, &mut pal, palette, true);
             let turn = view::best_turn(&m, &new, meshes);
-            (view::trim(&view::render_turned(&m, &pal.palette, meshes, turn, size), 10), turn)
+            let (img, ox, oy) = view::trim_at(&view::render_turned(&m, &pal.palette, meshes, turn, size), 10);
+            let (hubs, lit) = hubs_of(j);
+            let mut holes = Vec::new();
+            for h in hubs {
+                let Some(id) = model.placements[h].custom.as_deref().map(|c| c.id.clone()) else { continue };
+                let Some(in_scene) = m.placements.iter().position(|p| p.custom.as_deref().is_some_and(|c| c.id == id)) else { continue };
+                let list: Vec<(u32, [f32; 3])> = model.stems.iter().filter(|s| s.hub == id).map(|s| (s.hole, s.pose.position)).collect();
+                for (n, x, y) in stem::hole_points(&m, in_scene, &list, turn, meshes, size) {
+                    holes.push((n, x - ox as f32, y - oy as f32, lit.contains(&n)));
+                }
+            }
+            StepPic { img, turn, holes }
         });
         // Sub-build pictures: the exploded kit, then each of its steps.
         let kr = KitRenderer { palette, meshes, size: (size * 3 / 4).max(64) };
@@ -698,27 +903,89 @@ impl Builder<'_> {
             let kit = &model.kits[&sb.design];
             (kr.exploded(kit, &sb.colors), kr.steps(kit, &sb.colors))
         });
-        // The main step each sub-build is first used in.
-        let step_of: Vec<usize> =
-            subs.iter().map(|sb| steps.iter().position(|s| s.contains(&sb.uses[0])).unwrap_or(0)).collect();
-
-        let mut sub_pages = vec![0; subs.len()];
-        let mut step_pages = Vec::with_capacity(steps.len());
         let mut sub_imgs: Vec<Option<(RgbaImage, Vec<RgbaImage>)>> = sub_imgs.into_iter().map(Some).collect();
-        let mut slot_free = false; // the lower half of the current page is free
-        for (k, (img, turn)) in rendered.into_iter().enumerate() {
-            for g in (0..subs.len()).filter(|&g| step_of[g] == k) {
-                let (exploded, kit_steps) = sub_imgs[g].take().expect("each sub-build once");
-                sub_pages[g] = self.doc.pages.len() + 1;
-                self.sub_build(model, g, &subs[g], k, &exploded, &kit_steps, entries)?;
-                slot_free = false;
+        // Stem build pictures, and the main steps each kind of stem goes in.
+        let stem_imgs: Vec<Vec<RgbaImage>> =
+            parallel_map(groups, |g| stem::build_pictures(model, &model.stems[g[0]], palette, meshes, (size * 3 / 4).max(64)));
+        let mut stem_imgs: Vec<Option<Vec<RgbaImage>>> = stem_imgs.into_iter().map(Some).collect();
+        let mut group_of = vec![0; model.stems.len()];
+        for (g, list) in groups.iter().enumerate() {
+            for &si in list {
+                group_of[si] = g;
             }
-            let id = self.add(&img)?;
-            // This step's parts, grouped.
+        }
+        for (j, ms) in seq.iter().enumerate() {
+            if let MainStep::Stems(list) = ms {
+                for &si in list {
+                    out.stem_steps[si] = j + 1;
+                }
+            }
+        }
+        let many_hubs = {
+            let mut h: Vec<&str> = model.stems.iter().map(|s| s.hub.as_str()).collect();
+            h.sort_unstable();
+            h.dedup();
+            h.len() > 1
+        };
+
+        let mut slot_free = false; // the lower half of the current page is free
+        for (j, pic) in rendered.into_iter().enumerate() {
+            // Sub-builds first: kits this step places, then (for stems) the kits on them and
+            // the stems themselves.
+            match &seq[j] {
+                MainStep::Parts(k) => {
+                    for g in 0..subs.len() {
+                        if sub_imgs[g].is_some() && subs[g].uses.iter().any(|u| steps[*k].contains(u)) {
+                            let (exploded, kit_steps) = sub_imgs[g].take().expect("checked");
+                            out.sub_builds[g] = self.doc.pages.len() + 1;
+                            self.sub_build(model, &subs[g], &format!("for step {}", j + 1), &exploded, &kit_steps, entries)?;
+                            slot_free = false;
+                        }
+                    }
+                }
+                MainStep::Stems(list) => {
+                    for &si in list {
+                        let g = group_of[si];
+                        let Some(pics) = stem_imgs[g].take() else { continue };
+                        let sp = &model.stems[si];
+                        for a in stem::attachments(sp) {
+                            if let Some(k) = kit::of_attach(subs, model, a, palette)
+                                && let Some((exploded, kit_steps)) = sub_imgs[k].take()
+                            {
+                                out.sub_builds[k] = self.doc.pages.len() + 1;
+                                let what = format!("for stem {}", sp.def.id);
+                                self.sub_build(model, &subs[k], &what, &exploded, &kit_steps, entries)?;
+                            }
+                        }
+                        out.stem_builds[g] = self.doc.pages.len() + 1;
+                        let when: Vec<usize> = groups[g].iter().map(|&s| out.stem_steps[s]).collect();
+                        self.stem_build(model, &groups[g], &when, &pics, entries, subs, &out.sub_builds)?;
+                        slot_free = false;
+                    }
+                }
+            }
+            let id = self.add(&pic.img)?;
+            // This step's rows: parts grouped by key, or stems by build.
             let mut group: BTreeMap<(String, ColorId), usize> = BTreeMap::new();
-            for &i in &steps[k] {
-                if let Some(key) = keys.get(i) {
-                    *group.entry(key.clone()).or_default() += 1;
+            let mut lines: Vec<String> = Vec::new();
+            match &seq[j] {
+                MainStep::Parts(k) => {
+                    for &i in &steps[*k] {
+                        if let Some(key) = keys.get(i) {
+                            *group.entry(key.clone()).or_default() += 1;
+                        }
+                    }
+                    if !pic.holes.is_empty() {
+                        lines.push("The hub's holes are numbered in the picture: each stem goes in its own hole.".into());
+                    }
+                }
+                MainStep::Stems(list) => {
+                    for &si in list {
+                        let sp = &model.stems[si];
+                        *group.entry((format!("stems#{}", group_of[si]), sp.color)).or_default() += 1;
+                        let hub = if many_hubs { format!(" of hub {}", sp.hub) } else { String::new() };
+                        lines.push(format!("Plug {} into hole {}{hub}.", sp.def.id, sp.hole));
+                    }
                 }
             }
             let full = group.len() > self.opts.max_kinds_half_page;
@@ -736,51 +1003,235 @@ impl Builder<'_> {
                 slot_free = true;
                 (MARGIN, PAGE_H / 2.0 - MARGIN - 10.0)
             };
-            step_pages.push(self.doc.pages.len());
+            out.steps.push(self.doc.pages.len());
             let page = self.doc.pages.last_mut().expect("page");
-            page.text(MARGIN, y0 + 30.0, 32.0, Font::Bold, INK, &format!("{}", k + 1));
-            if turn != 0 {
-                page.text(MARGIN, y0 + 46.0, 9.0, Font::Regular, ACCENT, &format!("Seen from the {}", corner(turn)));
+            page.text(MARGIN, y0 + 30.0, 32.0, Font::Bold, INK, &format!("{}", j + 1));
+            if pic.turn != 0 {
+                page.text(MARGIN, y0 + 46.0, 9.0, Font::Regular, ACCENT, &format!("Seen from the {}", corner(pic.turn)));
             }
             let rows: Vec<(&Entry, usize, Option<String>)> = group
                 .iter()
                 .filter_map(|(key, &n)| {
                     let e = entries.get(key)?;
-                    let note = key.0.strip_prefix("kit#").and_then(|g| g.parse::<usize>().ok()).map(|g| format!("Built on page {}", sub_pages[g]));
+                    let num = |p: &str| key.0.strip_prefix(p).and_then(|g| g.parse::<usize>().ok());
+                    let note = num("kit#")
+                        .map(|g| format!("Built on page {}", out.sub_builds[g]))
+                        .or_else(|| num("stems#").map(|g| format!("Built on page {}", out.stem_builds[g])));
                     Some((e, n, note))
                 })
                 .collect();
-            if full {
+            let text_w = |w: f32| -> Vec<String> { lines.iter().flat_map(|l| pdf::wrap(l, Font::Regular, 9.0, w)).collect() };
+            let pic_box = if full {
                 // Picture across the page, callout grid below it.
                 let cols = 3usize;
                 let n_rows = rows.len().div_ceil(cols);
-                let call_h = 14.0 + n_rows as f32 * 46.0;
+                let cw = PAGE_W - 2.0 * MARGIN;
+                let wrapped = text_w(cw - 16.0);
+                let call_h = 14.0 + n_rows as f32 * 46.0 + wrapped.len() as f32 * 12.0;
                 let pic_top = y0 + 54.0;
                 let pic_h = h - 54.0 - call_h - 12.0;
-                page.image(id, MARGIN, pic_top, PAGE_W - 2.0 * MARGIN, pic_h);
                 let cy = pic_top + pic_h + 12.0;
-                let cw = PAGE_W - 2.0 * MARGIN;
                 page.fill_rect(MARGIN, cy, cw, call_h, PANEL);
                 page.stroke_rect(MARGIN, cy, cw, call_h, 0.75, RULE);
-                for (j, (e, n, note)) in rows.iter().enumerate() {
-                    let x = MARGIN + 8.0 + (j % cols) as f32 * (cw - 16.0) / cols as f32;
-                    let y = cy + 7.0 + (j / cols) as f32 * 46.0;
+                for (r, (e, n, note)) in rows.iter().enumerate() {
+                    let x = MARGIN + 8.0 + (r % cols) as f32 * (cw - 16.0) / cols as f32;
+                    let y = cy + 7.0 + (r / cols) as f32 * 46.0;
                     callout_row(page, x, y, (cw - 16.0) / cols as f32 - 8.0, e, *n, note.as_deref(), self.palette);
                 }
+                for (l, line) in wrapped.iter().enumerate() {
+                    page.text(MARGIN + 8.0, cy + 14.0 + n_rows as f32 * 46.0 + l as f32 * 12.0, 9.0, Font::Bold, INK, line);
+                }
+                (MARGIN, pic_top, PAGE_W - 2.0 * MARGIN, pic_h)
             } else {
                 let call_w = 170.0;
-                let call_h = 14.0 + rows.len() as f32 * 46.0;
+                let wrapped = text_w(call_w - 16.0);
+                let call_h = 14.0 + rows.len() as f32 * 46.0 + wrapped.len() as f32 * 12.0;
                 let cx = PAGE_W - MARGIN - call_w;
-                page.image(id, MARGIN + 44.0, y0 + 4.0, cx - MARGIN - 52.0, h - 8.0);
                 let cy = y0 + 10.0;
                 page.fill_rect(cx, cy, call_w, call_h, PANEL);
                 page.stroke_rect(cx, cy, call_w, call_h, 0.75, RULE);
-                for (j, (e, n, note)) in rows.iter().enumerate() {
-                    callout_row(page, cx + 8.0, cy + 7.0 + j as f32 * 46.0, call_w - 16.0, e, *n, note.as_deref(), self.palette);
+                for (r, (e, n, note)) in rows.iter().enumerate() {
+                    callout_row(page, cx + 8.0, cy + 7.0 + r as f32 * 46.0, call_w - 16.0, e, *n, note.as_deref(), self.palette);
+                }
+                for (l, line) in wrapped.iter().enumerate() {
+                    page.text(cx + 8.0, cy + 14.0 + rows.len() as f32 * 46.0 + l as f32 * 12.0, 9.0, Font::Bold, INK, line);
+                }
+                (MARGIN + 44.0, y0 + 4.0, cx - MARGIN - 52.0, h - 8.0)
+            };
+            page.image(id, pic_box.0, pic_box.1, pic_box.2, pic_box.3);
+            // Hole numbers over the picture; the holes filled in this step stand out.
+            let (ix, iy, sc) = id.fit(pic_box.0, pic_box.1, pic_box.2, pic_box.3);
+            for &(n, x, y, lit) in &pic.holes {
+                let (px, py) = (ix + x * sc, iy + y * sc);
+                let (fill, ink) = if lit { (ACCENT, [255, 255, 255]) } else { ([255, 255, 255], INK) };
+                page.circle(px, py, 6.5, Some(fill), Some((INK, 0.6)));
+                page.text_center(px, py + 2.6, 7.5, Font::Bold, ink, &n.to_string());
+            }
+        }
+        Ok(out)
+    }
+
+    /// A stem build page (tinted, like a kit's): "Build ×N stem S03", what one stem needs,
+    /// then the head pushed on, each leaf clipped on, and the finished stem, three across.
+    #[allow(clippy::too_many_arguments)]
+    fn stem_build(
+        &mut self,
+        model: &Model,
+        group: &[usize],
+        when: &[usize],
+        pics: &[RgbaImage],
+        entries: &BTreeMap<(String, ColorId), Entry>,
+        subs: &[SubBuild],
+        sub_pages: &[usize],
+    ) -> Result<()> {
+        let sp = &model.stems[group[0]];
+        let palette = self.palette;
+        let ids: Vec<ImageId> = pics.iter().map(|i| self.add(i)).collect::<Result<_>>()?;
+        let n = group.len();
+        let mut when: Vec<usize> = when.to_vec();
+        when.sort_unstable();
+        when.dedup();
+        let for_steps = match when.as_slice() {
+            [one] => format!("for step {one}"),
+            [first, .., last] => format!("for steps {first}–{last}"),
+            [] => String::new(),
+        };
+        let title = format!("{}, {}", stem::title(&sp.def), palette.name(sp.color));
+        let box_page = |b: &mut Self, cont: bool| -> f32 {
+            let page = b.new_page();
+            let (x, y, w, h) = (MARGIN - 10.0, MARGIN - 12.0, PAGE_W - 2.0 * MARGIN + 20.0, PAGE_H - 52.0 - (MARGIN - 12.0));
+            page.fill_rect(x, y, w, h, TINT);
+            page.stroke_rect(x, y, w, h, 1.0, TINT_EDGE);
+            let head = format!("Build ×{n}");
+            page.text(MARGIN + 2.0, MARGIN + 16.0, 24.0, Font::Bold, TINT_INK, &head);
+            let hx = MARGIN + 14.0 + pdf::text_width(&head, Font::Bold, 24.0);
+            page.fill_rect(hx, MARGIN + 4.0, 12.0, 12.0, palette.rgb(sp.color));
+            page.stroke_rect(hx, MARGIN + 4.0, 12.0, 12.0, 0.5, MUTED);
+            let what = format!("{title}{}", if cont { " (continued)" } else { "" });
+            page.text(hx + 18.0, MARGIN + 14.5, 13.0, Font::Bold, TINT_INK, &what);
+            page.text_right(PAGE_W - MARGIN - 2.0, MARGIN + 14.0, 9.0, Font::Regular, TINT_INK, &for_steps);
+            MARGIN + 30.0
+        };
+        let mut y = box_page(self, false);
+        let inner_w = PAGE_W - 2.0 * MARGIN - 4.0;
+        let x0 = MARGIN + 2.0;
+
+        // What one stem needs: the stem, its head, its leaves.
+        let kit_page = |a: &sf_core::StemAttach| kit::of_attach(subs, model, a, palette).map(|k| (k, sub_pages[k]));
+        let attach_entry = |a: &sf_core::StemAttach| -> Option<&Entry> {
+            match kit::of_attach(subs, model, a, palette) {
+                Some(k) => entries.get(&(subs[k].key(k), subs[k].main)),
+                None => entries.get(&(format!("design:{}", a.design), a.color)),
+            }
+        };
+        let mut need: Vec<(&Entry, usize, String)> = Vec::new();
+        for a in stem::attachments(sp) {
+            let Some(e) = attach_entry(a) else { continue };
+            match need.iter_mut().find(|(x, ..)| std::ptr::eq(*x, e)) {
+                Some(r) => r.1 += 1,
+                None => {
+                    let note = match kit_page(a) {
+                        Some((_, page)) if page > 0 => format!("built on page {page}"),
+                        _ => palette.name(a.color),
+                    };
+                    need.push((e, 1, note));
                 }
             }
         }
-        Ok((sub_pages, step_pages))
+        {
+            let page = self.doc.pages.last_mut().expect("page");
+            page.fill_rect(x0, y, inner_w, 64.0, [255, 255, 255]);
+            page.stroke_rect(x0, y, inner_w, 64.0, 0.6, TINT_EDGE);
+            page.text(x0 + 8.0, y + 13.0, 8.5, Font::Regular, MUTED, "For each stem you need");
+            if let Some(e) = entries.get(&(format!("stem:{}", sp.def.id), sp.color)) {
+                page.image(e.thumb, x0 + 8.0, y + 18.0, 150.0, 40.0);
+                page.text(x0 + 164.0, y + 36.0, 11.0, Font::Bold, INK, &format!("{} ×1", sp.def.id));
+                let what = if sp.def.style.trim().is_empty() { "stem" } else { sp.def.style.trim() };
+                page.text(x0 + 164.0, y + 48.0, 8.5, Font::Regular, MUTED, &pdf::fit(&format!("{:.0} mm {what}", sp.def.length), Font::Regular, 8.5, 70.0));
+            }
+            let mut x = x0 + 236.0;
+            for (e, count, note) in &need {
+                if x + 90.0 > x0 + inner_w {
+                    break;
+                }
+                page.image(e.thumb, x, y + 18.0, 38.0, 38.0);
+                page.text(x + 42.0, y + 34.0, 10.0, Font::Bold, INK, &pdf::fit(&format!("{} ×{count}", e.title), Font::Bold, 10.0, 66.0));
+                page.text(x + 42.0, y + 46.0, 8.0, Font::Regular, MUTED, &pdf::fit(note, Font::Regular, 8.0, 66.0));
+                x += 116.0;
+            }
+        }
+        y += 74.0;
+
+        // The steps of the build, as the pictures go: head, leaves, finished.
+        // One line per step of the plan (as the pictures go), then the finished stem.
+        let mut texts: Vec<String> = Vec::new();
+        for slots in stem::plan(sp) {
+            let Some(a) = slots.first().and_then(|&s| stem::slot(sp, s)) else { continue };
+            let name = attach_entry(a).map(|e| e.title.clone()).unwrap_or_else(|| stem::humanize(&a.design));
+            if let stem::Slot::Leaf(i) = slots[0] {
+                let (bar, at, side) = stem::leaf_place(model, sp, i);
+                let place = match (bar, at) {
+                    (Some(b), Some(at)) => format!(" onto bar {b} ({at:.0} mm up the stem)"),
+                    _ => String::new(),
+                };
+                texts.push(format!("Clip a {name}{place}, {side}."));
+                continue;
+            }
+            let first = match kit_page(a) {
+                Some((_, page)) if page > 0 && slots.len() > 1 => format!("Take {} {name}s you built on page {page}. ", slots.len()),
+                Some((_, page)) if page > 0 => format!("Take a {name} you built on page {page}. "),
+                _ => String::new(),
+            };
+            let on_tip = slots.contains(&stem::Slot::Head);
+            let text = match (slots.len(), slots[0]) {
+                (1, stem::Slot::Branch(b)) => {
+                    format!("Push the {name} onto the bar at the end of branch {}, its face pointing {} as shown.", b + 1, stem::facing(sp, a))
+                }
+                (1, _) => format!("Push the {name} onto the bar at the tip of the stem, its face pointing {} as shown.", stem::facing(sp, a)),
+                (n, _) if on_tip => format!("Push a {name} onto each of the {n} bar ends (the stem's tip and {} branch ends), faces as shown.", n - 1),
+                (n, _) => format!("Push a {name} onto each of the {n} branch ends, faces as shown."),
+            };
+            texts.push(format!("{first}{text}"));
+        }
+        let heads = usize::from(sp.head.is_some()) + sp.branch_heads.len();
+        let mut on: Vec<String> = Vec::new();
+        match heads {
+            0 => {}
+            1 => on.push("its head".into()),
+            n => on.push(format!("its {n} heads")),
+        }
+        match sp.leaves.len() {
+            0 => {}
+            1 => on.push(if on.is_empty() { "its leaf".into() } else { "leaf".into() }),
+            n => on.push(if on.is_empty() { format!("its {n} leaves") } else { format!("{n} leaves") }),
+        }
+        let extras = if on.is_empty() { String::new() } else { format!(" with {}", on.join(" and ")) };
+        texts.push(format!("Stem {}{extras}, ready to plug in.", sp.def.id));
+
+        const CELL_H: f32 = 270.0;
+        let cell_w = (inner_w - 20.0) / 3.0;
+        let bottom = PAGE_H - 60.0;
+        for (k, (id, text)) in ids.iter().zip(&texts).enumerate() {
+            let col = k % 3;
+            if col == 0 && y + CELL_H > bottom {
+                y = box_page(self, true);
+            }
+            let x = x0 + col as f32 * (cell_w + 10.0);
+            let page = self.doc.pages.last_mut().expect("page");
+            page.fill_rect(x, y, cell_w, CELL_H, [255, 255, 255]);
+            page.stroke_rect(x, y, cell_w, CELL_H, 0.6, TINT_EDGE);
+            page.text(x + 8.0, y + 22.0, 18.0, Font::Bold, TINT_INK, &format!("{}", k + 1));
+            page.image(*id, x + 8.0, y + 30.0, cell_w - 16.0, 180.0);
+            let mut ty = y + 226.0;
+            for line in pdf::wrap(text, Font::Regular, 8.5, cell_w - 16.0).into_iter().take(4) {
+                page.text(x + 8.0, ty, 8.5, Font::Regular, INK, &line);
+                ty += 11.0;
+            }
+            if col == 2 {
+                y += CELL_H + 10.0;
+            }
+        }
+        Ok(())
     }
 
     /// A tinted sub-build box: "Build ×N", the exploded kit, then the kit's steps two
@@ -789,9 +1240,8 @@ impl Builder<'_> {
     fn sub_build(
         &mut self,
         model: &Model,
-        g: usize,
         sb: &SubBuild,
-        main_step: usize,
+        for_what: &str,
         exploded: &RgbaImage,
         kit_steps: &[RgbaImage],
         entries: &BTreeMap<(String, ColorId), Entry>,
@@ -800,7 +1250,7 @@ impl Builder<'_> {
         let exploded = self.add(exploded)?;
         let step_ids: Vec<ImageId> = kit_steps.iter().map(|i| self.add(i)).collect::<Result<_>>()?;
         let palette = self.palette;
-        let n = sb.uses.len();
+        let n = sb.count();
         let label = sb.label.clone();
         let box_page = |b: &mut Self, cont: bool| -> f32 {
             let page = b.new_page();
@@ -813,8 +1263,7 @@ impl Builder<'_> {
             page.stroke_rect(hx, MARGIN + 4.0, 12.0, 12.0, 0.5, MUTED);
             let what = format!("{label}, {}{}", palette.name(sb.main), if cont { " (continued)" } else { "" });
             page.text(hx + 18.0, MARGIN + 14.5, 13.0, Font::Bold, TINT_INK, &what);
-            page.text_right(PAGE_W - MARGIN - 2.0, MARGIN + 14.0, 9.0, Font::Regular, TINT_INK, &format!("for step {}", main_step + 1));
-            let _ = g;
+            page.text_right(PAGE_W - MARGIN - 2.0, MARGIN + 14.0, 9.0, Font::Regular, TINT_INK, for_what);
             MARGIN + 30.0
         };
         let mut y = box_page(self, false);
@@ -914,6 +1363,29 @@ impl Builder<'_> {
             page.text_right(PAGE_W - MARGIN, y, 8.5, Font::Regular, MUTED, &format!("page {} of {n}", i + 1));
         }
     }
+}
+
+/// Where each kind of build went: 1-based pages, and the main step of each stem.
+struct StepPages {
+    sub_builds: Vec<usize>,
+    stem_builds: Vec<usize>,
+    stem_steps: Vec<usize>,
+    steps: Vec<usize>,
+}
+
+/// A main step's picture: the corner it was seen from, and the hub's hole numbers in it
+/// (number, x, y in the picture's pixels, filled in this step).
+struct StepPic {
+    img: RgbaImage,
+    turn: u8,
+    holes: Vec<(u32, f32, f32, bool)>,
+}
+
+/// How many stem holes a hub placement has (its design's source is `{"hub": Hub}`).
+fn hub_holes(model: &Model, p: &Placement) -> Option<usize> {
+    let CustomKind::Detail { mesh, .. } = &p.custom.as_deref()?.kind else { return None };
+    let hub = model.details.get(mesh)?.source.get("hub")?;
+    hub.get("holes")?.as_array().map(Vec::len)
 }
 
 /// A trimmed brick's description: "printed brick …" becomes "curved brick …".

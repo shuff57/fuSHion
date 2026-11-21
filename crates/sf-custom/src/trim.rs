@@ -958,6 +958,7 @@ fn build_trimmed_once(shape: &CustomShape, p: &StudProfile, jitter: f64) -> Resu
             Some(plan.volume_mm3),
             Some(plan.bbox_mm),
             false,
+            crate::MAX_PART_MM,
         )
     });
     let untrimmed = match quick {
@@ -971,6 +972,7 @@ fn build_trimmed_once(shape: &CustomShape, p: &StudProfile, jitter: f64) -> Resu
                 Some(plan.volume_mm3),
                 Some(plan.bbox_mm),
                 false,
+                crate::MAX_PART_MM,
             )?
         }
     };

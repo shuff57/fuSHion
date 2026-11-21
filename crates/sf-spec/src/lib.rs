@@ -82,9 +82,150 @@ pub struct Spec {
     /// body under `at`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub details: Vec<DetailUse>,
+    /// A bouquet: printed stems from a hub on the vase top, each with a head on its tip and
+    /// leaves clipped along it (see [`Bouquet`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bouquet: Option<Bouquet>,
     /// Free-form notes Claude keeps between rounds (ignored by the compiler).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+}
+
+/// A bouquet of printed stems gathered in a hub on top of a brick-built vase.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Bouquet {
+    /// The centre of the vase's top surface, in spec units. The engine puts the hub on the
+    /// highest body surface under it.
+    pub hub: [f32; 3],
+    pub stems: Vec<StemSpec>,
+}
+
+/// One stem: from a hole in the hub to `tip`, one printed piece.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct StemSpec {
+    /// The head's design (with a stem mount), or `null` for a bare stem.
+    #[serde(default)]
+    pub head: Option<String>,
+    /// Where the head sits (the mouth of its bar hole), or the end of a bare stem; spec units.
+    pub tip: [f32; 3],
+    /// Total bend in degrees, outward, away from the bouquet's middle (0: straight).
+    #[serde(default)]
+    pub bend: f32,
+    /// Stem colour (default: the stem style's, else Dark Green).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    /// The stem's look: `"auto"` (the default: the head design's own stem, e.g. a daisy
+    /// sprig) or a style object (name, diameter, color, head_on_tip, tip, branches, leaves)
+    /// to change it.
+    #[serde(default, skip_serializing_if = "StyleSpec::is_auto")]
+    pub style: StyleSpec,
+    /// Heads for the branches that carry one, in order (repeating); default: `head`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branch_heads: Vec<String>,
+    /// What a stem without a head ends in: `{"kind": "bud", "length": mm, "width": mm}` or
+    /// `{"kind": "blade", …}` (grass).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tip_shape: Option<sf_core::StemTip>,
+    /// The head's main colour (default: the design's own, else `default_color`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_color: Option<String>,
+    /// Colours of the head's other roles.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub head_colors: std::collections::BTreeMap<String, String>,
+    /// Turn of the head about the stem, degrees (default: its front toward the viewer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spin: Option<f32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leaves: Vec<LeafSpec>,
+}
+
+/// A stem's look: `"auto"`, or a style written out.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum StyleSpec {
+    #[default]
+    #[serde(with = "auto")]
+    Auto,
+    Custom(sf_core::StemStyle),
+}
+
+impl StyleSpec {
+    pub fn is_auto(&self) -> bool {
+        matches!(self, StyleSpec::Auto)
+    }
+}
+
+/// `"auto"` as a unit variant of an untagged enum.
+mod auto {
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str("auto")
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<(), D::Error> {
+        let v = String::deserialize(d)?;
+        if v == "auto" { Ok(()) } else { Err(serde::de::Error::custom("`style` is \"auto\" or a style object")) }
+    }
+}
+
+/// A leaf clipped onto a stem.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LeafSpec {
+    pub design: String,
+    /// Where along the stem, as a fraction of its length from the base (0–1).
+    pub at: f32,
+    /// Which way it faces around the stem, degrees (0: outward, away from the bouquet's
+    /// middle; 90: a quarter turn).
+    #[serde(default)]
+    pub side: f32,
+    /// Leaf colour (default Green).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub colors: std::collections::BTreeMap<String, String>,
+}
+
+/// A bouquet mapped into the model's LDU frame (the frame of `Placement::ldraw_transform`
+/// and of stems): `X = 20·x`, `Y = −8·y` (up is `−Y`), `Z = 20·z` for grid position
+/// `(x, y, z)` in studs, plates, studs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GridBouquet {
+    pub hub: [f32; 3],
+    pub stems: Vec<GridStem>,
+    /// The spec's `default_color`, for heads without a colour of their own.
+    pub default_color: ColorId,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GridStem {
+    pub head: Option<String>,
+    /// LDU.
+    pub tip: [f32; 3],
+    pub bend: f32,
+    /// `None`: the style's colour, else Dark Green.
+    pub color: Option<ColorId>,
+    /// `None`: the head design's own stem style.
+    pub style: Option<sf_core::StemStyle>,
+    pub branch_heads: Vec<String>,
+    pub tip_shape: Option<sf_core::StemTip>,
+    pub head_color: Option<ColorId>,
+    pub head_colors: std::collections::BTreeMap<String, ColorId>,
+    pub spin: Option<f32>,
+    pub leaves: Vec<GridLeaf>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct GridLeaf {
+    pub design: String,
+    pub at: f32,
+    pub side: f32,
+    pub color: ColorId,
+    pub colors: std::collections::BTreeMap<String, ColorId>,
+}
+
+/// Spec point → model LDU.
+fn to_ldu(map: &GridMap, p: [f32; 3]) -> [f32; 3] {
+    let g = map.to_grid(p);
+    [20.0 * g[0], -8.0 * g[1], 20.0 * g[2]]
 }
 
 /// One use of a detail design in a spec.
@@ -248,6 +389,8 @@ pub struct Compiled {
     /// The spec's `add` and `subtract` primitives in spec order, in grid-mm (empty for
     /// reliefs). `paint` adds nothing and is left out.
     pub surface: Vec<SurfaceShape>,
+    /// The spec's bouquet, in the model's LDU frame.
+    pub bouquet: Option<GridBouquet>,
 }
 
 impl Compiled {
@@ -285,7 +428,15 @@ pub fn compile(spec: &Spec, palette: &Palette, opts: &CompileOptions) -> Result<
         relief::compile(relief, palette, opts, default_color, &mut warnings)?
     } else {
         let res = opts.resolution.or(spec.resolution).unwrap_or(24).clamp(2, 160);
-        let (c, p) = compile_shapes(&spec.shapes, palette, res, default_color, &mut warnings)?;
+        // A bouquet's hub and stem tips count toward the model's size, so `resolution` is
+        // the whole bouquet's longest side, not just the vase's.
+        let extra: Vec<[f32; 3]> = spec
+            .bouquet
+            .iter()
+            .flat_map(|b| std::iter::once(b.hub).chain(b.stems.iter().map(|s| s.tip)))
+            .filter(|p| p.iter().all(|v| v.is_finite()))
+            .collect();
+        let (c, p) = compile_shapes(&spec.shapes, palette, res, default_color, &mut warnings, &extra)?;
         prims = p;
         c
     };
@@ -317,6 +468,57 @@ pub fn compile(spec: &Spec, palette: &Palette, opts: &CompileOptions) -> Result<
         }
         let at = out.map.to_grid(d.at);
         out.details.push(GridDetail { design: d.design.clone(), at, turn: d.turn % 4, color, colors });
+    }
+    if let Some(b) = &spec.bouquet {
+        let finite = |p: &[f32; 3]| p.iter().all(|v| v.is_finite());
+        if !finite(&b.hub) {
+            bail!("bouquet: `hub` must be three finite numbers");
+        }
+        if b.stems.is_empty() {
+            bail!("bouquet: give it at least one stem");
+        }
+        let colours = |name: &Option<String>, default: &str, warnings: &mut Vec<String>| {
+            resolve_color(palette, name.as_deref().unwrap_or(default), warnings)
+        };
+        let mut stems = Vec::new();
+        for (i, s) in b.stems.iter().enumerate() {
+            if !finite(&s.tip) || !s.bend.is_finite() || s.spin.is_some_and(|v| !v.is_finite()) {
+                bail!("bouquet stem {}: `tip`, `bend` and `spin` must be finite numbers", i + 1);
+            }
+            let roles = |m: &std::collections::BTreeMap<String, String>, warnings: &mut Vec<String>| {
+                m.iter().map(|(r, c)| (r.clone(), resolve_color(palette, c, warnings))).collect::<std::collections::BTreeMap<_, _>>()
+            };
+            let mut leaves = Vec::new();
+            for l in &s.leaves {
+                if !l.at.is_finite() || !(0.0..=1.0).contains(&l.at) {
+                    warnings.push(format!("bouquet stem {}: leaf `at` is a fraction of the stem (0–1); clamped", i + 1));
+                }
+                leaves.push(GridLeaf {
+                    design: l.design.clone(),
+                    at: if l.at.is_finite() { l.at.clamp(0.0, 1.0) } else { 0.5 },
+                    side: if l.side.is_finite() { l.side } else { 0.0 },
+                    color: colours(&l.color, "Green", &mut warnings),
+                    colors: roles(&l.colors, &mut warnings),
+                });
+            }
+            stems.push(GridStem {
+                head: s.head.clone(),
+                tip: to_ldu(&out.map, s.tip),
+                bend: s.bend,
+                color: s.color.as_ref().map(|c| resolve_color(palette, c, &mut warnings)),
+                style: match &s.style {
+                    StyleSpec::Auto => None,
+                    StyleSpec::Custom(st) => Some(st.clone()),
+                },
+                branch_heads: s.branch_heads.clone(),
+                tip_shape: s.tip_shape,
+                head_color: s.head_color.as_ref().map(|c| resolve_color(palette, c, &mut warnings)),
+                head_colors: roles(&s.head_colors, &mut warnings),
+                spin: s.spin,
+                leaves,
+            });
+        }
+        out.bouquet = Some(GridBouquet { hub: to_ldu(&out.map, b.hub), stems, default_color });
     }
     if let GridMap::Shapes { origin, ups, upp, shift } = &out.map {
         // spec → grid-mm: uniform scale 8 / ups (a plate is 0.4 studs both ways).
@@ -359,11 +561,18 @@ fn compile_shapes(
     resolution: u32,
     default_color: ColorId,
     warnings: &mut Vec<String>,
+    extra: &[[f32; 3]],
 ) -> Result<(Compiled, Vec<geom::Prim>)> {
     let prims = geom::flatten(shapes, palette, default_color, warnings)?;
-    let Some((lo, hi)) = geom::bounds(&prims) else {
+    let Some((mut lo, mut hi)) = geom::bounds(&prims) else {
         bail!("the spec adds no volume (every shape is subtract or paint)");
     };
+    for p in extra {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
     let ext = [hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]];
     let longest = ext[0].max(ext[1]).max(ext[2]);
     if longest <= 0.0 || !longest.is_finite() {
@@ -512,6 +721,7 @@ fn compile_shapes(
         map: GridMap::Shapes { origin, ups, upp, shift: [0; 3] },
         details: Vec::new(),
         surface: Vec::new(),
+        bouquet: None,
     };
     crop(&mut out);
     Ok((out, prims))
@@ -710,5 +920,55 @@ mod tests {
         );
         let c = compile(&r, &Palette::builtin(), &CompileOptions::default()).unwrap();
         assert_eq!(c.details[0].at, [2.5, 1.0, 2.5]);
+    }
+
+    #[test]
+    fn bouquet_maps_into_ldu_with_defaults() {
+        let s = spec(
+            r#"{"shapes":[{"shape":"box","center":[0,2,0],"size":[4,4,4],"color":"White"}],
+            "bouquet":{"hub":[0,4,0],"stems":[
+                {"head":"rose","tip":[0,12,0],"bend":10,"head_colors":{"centre":"Yellow"},
+                 "leaves":[{"design":"leaf","at":1.5,"side":90}]},
+                {"tip":[3,10,-2],"color":"Green"}]}}"#,
+        );
+        let c = compile(&s, &Palette::builtin(), &CompileOptions { resolution: Some(12), image: None }).unwrap();
+        let b = c.bouquet.as_ref().unwrap();
+        assert_eq!(b.stems.len(), 2);
+        // 12 units tall at 12 studs: 1 unit = 1 stud = 20 LDU across, 2.5 plates = 20 LDU up.
+        let up = b.hub[1] - b.stems[0].tip[1];
+        assert!((up - 8.0 * 20.0).abs() < 1e-3, "{up}");
+        assert!((b.stems[1].tip[0] - b.hub[0] - 60.0).abs() < 1e-3 && (b.stems[1].tip[2] - b.hub[2] + 40.0).abs() < 1e-3);
+        let p = Palette::builtin();
+        assert_eq!(b.stems[0].color, None);
+        assert_eq!(b.stems[1].color, p.resolve("Green"));
+        assert_eq!(b.stems[0].leaves[0].color, p.resolve("Green").unwrap());
+        assert_eq!(b.stems[0].leaves[0].at, 1.0);
+        assert!(c.warnings.iter().any(|w| w.contains("fraction")));
+        assert_eq!(b.stems[0].head_colors.get("centre"), p.resolve("Yellow").as_ref());
+        assert_eq!(b.stems[1].head, None);
+    }
+
+    #[test]
+    fn stem_style_is_auto_or_written_out() {
+        let s = spec(
+            r#"{"shapes":[{"shape":"box","center":[0,2,0],"size":[4,4,4]}],
+            "bouquet":{"hub":[0,4,0],"stems":[
+                {"head":"daisy","tip":[0,12,0],"style":"auto","branch_heads":["daisy_pink"]},
+                {"head":null,"tip":[2,10,0],"tip_shape":{"kind":"blade","length":30,"width":4},
+                 "style":{"name":"grass","color":"Green","head_on_tip":false,
+                          "branches":[{"at":0.3,"angle":20,"length":0.5,"tip":{"kind":"blade","length":25,"width":4}}]}}]}}"#,
+        );
+        let st = &s.bouquet.as_ref().unwrap().stems;
+        assert!(st[0].style.is_auto() && st[0].branch_heads == ["daisy_pink"]);
+        let StyleSpec::Custom(g) = &st[1].style else { panic!("a written-out style") };
+        assert!(!g.head_on_tip && g.branches.len() == 1 && g.diameter == sf_core::stem::STEM_D);
+        assert!(matches!(st[1].tip_shape, Some(sf_core::StemTip::Blade { .. })));
+        let c = compile(&s, &Palette::builtin(), &CompileOptions { resolution: Some(12), image: None }).unwrap();
+        let b = c.bouquet.unwrap();
+        assert!(b.stems[0].style.is_none() && b.stems[1].style.as_ref().is_some_and(|g| g.name == "grass"));
+        assert!(Spec::from_json(r#"{"shapes":[{"shape":"box","center":[0,0,0],"size":[1,1,1]}],"bouquet":{"hub":[0,0,0],"stems":[{"tip":[0,5,0],"style":"fancy"}]}}"#).is_err());
+        // Round trip keeps "auto" implicit.
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(!json.contains("\"style\":\"auto\"") && json.contains("\"grass\""));
     }
 }

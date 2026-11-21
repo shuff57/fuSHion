@@ -430,7 +430,7 @@ pub(crate) fn finish(
     volume: Option<f64>,
     bbox: Option<([f64; 3], [f64; 3])>,
 ) -> Result<CustomPart> {
-    finish_with(s, stage, volume, bbox, true)
+    finish_with(s, stage, volume, bbox, true, MAX_PART_MM)
 }
 
 /// [`finish`], with the 3MF export left out (empty) unless `three_mf`.
@@ -440,6 +440,7 @@ pub(crate) fn finish_with(
     volume: Option<f64>,
     bbox: Option<([f64; 3], [f64; 3])>,
     want_3mf: bool,
+    max_mm: f64,
 ) -> Result<CustomPart> {
     let m = measure(s, stage)?;
     if m.bodies == 0 {
@@ -461,10 +462,10 @@ pub(crate) fn finish_with(
     ];
     if size
         .iter()
-        .any(|x| !(x.is_finite() && *x <= MAX_PART_MM + BBOX_TOL_MM))
+        .any(|x| !(x.is_finite() && *x <= max_mm + BBOX_TOL_MM))
     {
         return Err(CustomError::TooLarge(format!(
-            "the part measures {:.1} × {:.1} × {:.1} mm; at most {MAX_PART_MM} mm a side",
+            "the part measures {:.1} × {:.1} × {:.1} mm; at most {max_mm} mm a side",
             size[0], size[1], size[2]
         )));
     }

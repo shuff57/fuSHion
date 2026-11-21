@@ -1090,6 +1090,14 @@ pub fn pack_print(
         let placed = details::place_details(uses, designs, &body)?;
         let mut ps = body;
         ps.extend(placed.placements);
+        // A bouquet's hub sits on the vase top like a detail, before studs are laid out.
+        let mut hub_warning = None;
+        if let Some(b) = c.bouquet.as_ref() {
+            match crate::bouquet::plan_hub(b, designs, &ps, &crate::bouquet::hub_id(&ps)) {
+                Ok(plan) => ps.push(plan.placement),
+                Err(e) => hub_warning = Some(e),
+            }
+        }
         assign_studs(&mut ps, &meshes, !curves);
         let small: Vec<Vec<usize>> = if repair {
             small_floating(&ps, ANCHOR_MAX).into_iter().filter(|g| !g.iter().any(|&i| is_detail(&ps[i]))).collect()
@@ -1131,6 +1139,7 @@ pub fn pack_print(
             None => BTreeMap::new(),
         };
         let mut warnings = placed.warnings;
+        warnings.extend(hub_warning);
         if rescued > 0 {
             warnings.push(format!(
                 "re-shaped {rescued} small piece(s) no stud could hold: each joined the part beside it (filled out to its height, in its colour) or grew a second stud's width"
@@ -1285,6 +1294,7 @@ mod tests {
             mesh: DetailMesh { positions: vec![[0.0; 3]; 3], indices: vec![0, 1, 2] },
             kit: None,
             mount: None,
+            stem: None,
             source: DetailSource { source: serde_json::json!({"template": "flower_head"}) },
         }
     }
@@ -1359,6 +1369,7 @@ mod tests {
             ]),
             kit: None,
             mount: None,
+            stem: None,
             source: DetailSource { source: serde_json::json!({"template": "leaf"}) },
         }
     }

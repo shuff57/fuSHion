@@ -6,6 +6,7 @@
 //!   a [`PartMesh`] in LDraw coordinates (LDU, -Y up).
 //! * [`MeshLibrary`]: cached meshes by part id, from an LDraw directory or
 //!   generated procedurally from the catalog when no library is available.
+//! * [`stem`]: display meshes for printed bouquet stems.
 //! * [`printed`]: display meshes for printed parts (merged bricks, SolidCraft details).
 //!
 //! The LDraw parts library is licensed CC BY 4.0 (see `CAreadme.txt` in the
@@ -16,9 +17,11 @@ pub mod library;
 pub mod parse;
 pub mod printed;
 pub mod procedural;
+pub mod stem;
 
 pub use install::{InstallReport, default_cache_dir, default_zip_path, ensure_installed, install_from_zip, is_installed};
 pub use library::{MeshLibrary, parse_ldconfig};
 pub use parse::{MAIN_COLOR, PartMesh, Xform};
 pub use printed::{brick_key, custom_mesh, detail_key, detail_mesh, smooth_mesh, trimmed_key, trimmed_mesh};
 pub use procedural::procedural_mesh;
+pub use stem::{stem_key, stem_mesh};

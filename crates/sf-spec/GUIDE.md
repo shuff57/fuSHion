@@ -116,7 +116,8 @@ smaller toward the tip), `umbel` for cow parsley, and `fern` / `leaf` for foliag
 the petals in the picture and match them; match each flower's colour and its size
 relative to the rest of the model (a LEGO rose head is about 32 mm, a daisy about 16 mm;
 1 stud = 8 mm). A head can stand on its own `stem_height`; tall stems are thin, so keep
-them short on a model that will be handled.
+them short on a model that will be handled. Flowers in a vase go on printed stems
+instead: see "Bouquets" below.
 
 ## Details (printed parts)
 Bricks can't make a petal, an eye, a beak or a leaf. For features like these, design a
@@ -147,6 +148,79 @@ the design's roles.
   it clears it. Its base must cover at
   least two studs in a row, since a fused stud can't stand alone. The report warns when
   a detail is skipped, or has no stud under its base and would fall off.
+
+## Bouquets: stems, heads and leaves
+Flowers in a vase are built like LEGO's Botanical bouquets: every flower is a printed
+**stem** (one long piece, printed flat) plugged into a printed **hub** on the vase top,
+with its **head** pushed onto the stem's tip and **leaves** clipped on along it.
+- Build the **vase** from body shapes: a solid or thick-walled cylinder (or box) with a
+  flat top. The hub sits on the studs of that top, so leave it flat and at least 3–4
+  studs across where the stems come out.
+- Put **every flower on a stem** in `bouquet`. Never build stems from bricks, and don't
+  pile a brick mound for flowers to sit on.
+- Heads and leaves need **stem mounts**: a bar hole under a head, a clip on a leaf. Use
+  the stem versions of the templates; a design without a mount is refused with a note
+  to make one.
+- **Size heads to the model**: a rose about 6–8 studs (48–64 mm) across in a bouquet 30
+  studs wide, smaller flowers in proportion. Tiny heads on long stems look wrong.
+- **Fan the stems out**: the tallest in the middle, others leaning out around it, tips
+  spread so heads and leaves don't touch, a little `bend` on the outer ones. A stem must
+  print in one piece, so keep each at most **240 mm** (30 studs) from the vase top to its
+  head; longer ones are shortened. Lean at the base is limited (60°): with a wide fan,
+  `bend` the stems rather than tilting them at the base.
+- A fan that leans to one side can tip the vase: the report says so. Give the vase a
+  wider or solid base, or lean the stems less.
+- **Each flower brings its own stem**, as in LEGO's bouquet: the head design suggests
+  one, and `"style": "auto"` (the default) uses it. A daisy comes as a forked sprig of
+  three heads, lavender as a brown stem branching into sprigs each tipped with a spike, a
+  snapdragon as a stalk with buds along the top, grass as a headless fan of blades. So one
+  stem entry can carry several heads: count them against the picture.
+- To change a stem's look, write the style out: `"style": {"name": "daisy sprig",
+  "diameter": 4, "color": "Green", "head_on_tip": true, "branches": [{"at": 0.6,
+  "angle": 30, "length": 0.3, "bend": -10, "head": true}], "leaves": [0.3]}`. `at` and
+  `length` are fractions of the stem; `angle` and `bend` degrees; a branch ends in a head
+  (`"head": true`), a `tip` (`{"kind": "bud" | "blade", "length": mm, "width": mm}`) or
+  nothing. `head_on_tip: false` leaves the main stem's end to its `tip` (lavender, grass).
+  `branch_heads: ["daisy_white", "daisy_pink"]` varies the heads on branches.
+  Headless stems (grass) take `"head": null` and `"tip_shape": {"kind": "blade", …}`.
+- Branches stay in the stem's plane, since the whole stem prints flat as one piece; the
+  engine turns that plane so branches fan toward the viewer and sideways, away from other
+  stems. A whole stem must lie within 240 × 200 mm flat; the report gives the largest.
+- A style's suggested leaves appear only when a stem lists no `leaves` and a leaf design
+  named `leaf` exists; otherwise give `leaves` yourself.
+
+```json
+"resolution": 30,
+"shapes": [{"shape": "cylinder", "center": [0, 4, 0], "size": [8, 8, 8], "color": "Sand Blue"}],
+"bouquet": {
+  "hub": [0, 8, 0],
+  "stems": [
+    {"head": "peach_rose", "tip": [0, 26, 1], "head_color": "Coral",
+     "leaves": [{"design": "leaf", "at": 0.35, "side": 90}]},
+    {"head": "peach_rose", "tip": [-7, 22, -2], "bend": 15},
+    {"head": "white_daisy", "tip": [7, 21, -3], "bend": 12, "spin": 20,
+     "head_colors": {"centre": "Yellow"},
+     "leaves": [{"design": "leaf", "at": 0.5, "side": -90, "color": "Dark Green"}]},
+    {"head": "peach_rose", "tip": [2, 19, 7], "bend": 20},
+    {"head": "lavender", "tip": [-4, 24, 5]},
+    {"head": null, "tip": [9, 14, 2], "tip_shape": {"kind": "blade", "length": 40, "width": 5},
+     "style": {"name": "grass", "diameter": 3.5, "color": "Bright Green", "head_on_tip": false,
+               "branches": [{"at": 0.3, "angle": 20, "length": 0.5, "tip": {"kind": "blade", "length": 30, "width": 5}}]}}
+  ]
+}
+```
+- `hub`: the centre of the vase's top, in the shapes' units. The hub goes on the highest
+  surface there.
+- Each stem: `tip` is where its head sits (shapes' units); `head` a design or `null`;
+  `bend` degrees, bowing outward away from the middle (default 0, straight); `color` the
+  stem's (default: its style's, else Dark Green); `style`, `branch_heads`, `tip_shape` as
+  above; `head_color` and `head_colors` (by role) the head's;
+  `spin` degrees to turn the head about the stem (by default its front faces the viewer,
+  `-z`); `leaves`, each a `design` clipped `at` a fraction (0–1) of the stem from its base,
+  turned `side` degrees around the stem (0: outward), `color` default Green.
+- `resolution` measures the whole bouquet, vase and stem tips together.
+- The report lists the stems ("Stems: 7 (longest 182 mm)…") and the hub's holes; build
+  the vase, put on the hub, then plug in the stems by hole number.
 
 ## Building for 3D printing
 When the model is built for printing, every brick is designed for its place: same-colour

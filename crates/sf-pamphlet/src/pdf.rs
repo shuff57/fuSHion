@@ -109,13 +109,42 @@ impl Page {
 
     /// An image scaled into the box `(x, y, w, h)` (top-left corner), keeping its aspect.
     pub fn image(&mut self, id: ImageId, x: f32, y: f32, w: f32, h: f32) {
-        let s = (w / id.w as f32).min(h / id.h as f32);
+        let (ix, iy, s) = id.fit(x, y, w, h);
         let (iw, ih) = (id.w as f32 * s, id.h as f32 * s);
-        let (ix, iy) = (x + (w - iw) / 2.0, y + (h - ih) / 2.0);
         let _ = writeln!(self.ops, "q {} 0 0 {} {} {} cm /Im{} Do Q", f(iw), f(ih), f(ix), f(PAGE_H - iy - ih), id.idx);
         if !self.images.contains(&id) {
             self.images.push(id);
         }
+    }
+
+    /// A circle centred on `(cx, cy)`, filled and/or outlined.
+    pub fn circle(&mut self, cx: f32, cy: f32, r: f32, fill: Option<[u8; 3]>, stroke: Option<([u8; 3], f32)>) {
+        // Four cubic Béziers.
+        let k = 0.552_284_8 * r;
+        let y = PAGE_H - cy;
+        let mut ops = String::new();
+        if let Some(c) = fill {
+            let _ = write!(ops, "{} rg ", rgb(c));
+        }
+        if let Some((c, w)) = stroke {
+            let _ = write!(ops, "{} RG {} w ", rgb(c), f(w));
+        }
+        let _ = write!(
+            ops,
+            "{} {} m {} {} {} {} {} {} c {} {} {} {} {} {} c {} {} {} {} {} {} c {} {} {} {} {} {} c h ",
+            f(cx + r), f(y),
+            f(cx + r), f(y + k), f(cx + k), f(y + r), f(cx), f(y + r),
+            f(cx - k), f(y + r), f(cx - r), f(y + k), f(cx - r), f(y),
+            f(cx - r), f(y - k), f(cx - k), f(y - r), f(cx), f(y - r),
+            f(cx + k), f(y - r), f(cx + r), f(y - k), f(cx + r), f(y),
+        );
+        ops.push_str(match (fill.is_some(), stroke.is_some()) {
+            (true, true) => "B",
+            (true, false) => "f",
+            (false, true) => "S",
+            (false, false) => "n",
+        });
+        let _ = writeln!(self.ops, "{ops}");
     }
 
     /// Wrapped text starting with its first baseline at `y`; returns the y below the last line.
@@ -128,6 +157,21 @@ impl Page {
             yy += lead;
         }
         yy
+    }
+}
+
+impl ImageId {
+    /// Pixel size.
+    pub fn size(self) -> (u32, u32) {
+        (self.w, self.h)
+    }
+
+    /// Where the image lands when fitted into the box `(x, y, w, h)`: its top-left corner and
+    /// points per pixel.
+    pub fn fit(self, x: f32, y: f32, w: f32, h: f32) -> (f32, f32, f32) {
+        let s = (w / self.w as f32).min(h / self.h as f32);
+        let (iw, ih) = (self.w as f32 * s, self.h as f32 * s);
+        (x + (w - iw) / 2.0, y + (h - ih) / 2.0, s)
     }
 }
 

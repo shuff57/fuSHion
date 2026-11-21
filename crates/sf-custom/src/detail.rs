@@ -17,6 +17,8 @@
 //! 4. **Hollow**: the base's hollow cut out (1.8 mm, as a plate), which also clears anything
 //!    the decoration put there.
 //! 5. **Tubes** (2×2 sockets): checked exactly.
+//! 6. **Post** (rarely): cuts that must come after the tubes, such as the seat a stem's rod
+//!    needs where a flower head's bar hole is over a tube.
 //!
 //! The finished part must be one closed body with a watertight mesh. Its occupied cells are
 //! the grid columns its bounding box reaches (by more than [`OCCUPY_TOL`] mm), and its height
@@ -32,6 +34,7 @@
 use crate::mesh::analyze_stl;
 use crate::run::{check_step, finish, measure, run_step};
 use crate::shape::{Footprint, P2, signed_area};
+use crate::stem::MountMm;
 use crate::{CustomError, CustomPart, Result, StudProfile};
 use serde_json::{Value, json};
 use sf_core::{DetailDesign, DetailMesh, DetailSource};
@@ -56,7 +59,7 @@ const OVERRUN: f64 = 1.0;
 pub const TEMPLATES: &[(&str, &str)] = &[
     (
         "flower_head",
-        r#"{"petals": 6 (3-12), "diameter": 15.6 (whole flower, 6-40), "petal_width": 6 (1.5-15), "thickness": 1.4 (0.8-4), "cup": 20 (degrees the petals tilt up, 0-60), "centre_diameter": 5 (2-15), "centre_height": 2 (0-8), "base": [2, 2]}"#,
+        r#"{"petals": 6 (3-12), "diameter": 15.6 (whole flower, 6-40), "petal_width": 6 (1.5-15), "thickness": 1.4 (0.8-4), "cup": 20 (degrees the petals tilt up, 0-60), "centre_diameter": 5 (2-15), "centre_height": 2 (0-8), "mount": true (a bar hole up the centre for a printed stem's tip bar; the centre grows to at least 5.5 mm wide and 9 mm high), "base": [2, 2]}; stem: plain Dark Green Ø5, 1 leaf"#,
     ),
     (
         "petal",
@@ -112,14 +115,23 @@ pub fn overhang_area(stl: &[u8], above: f64) -> f64 {
         return 0.0;
     }
     let n = u32::from_le_bytes([stl[80], stl[81], stl[82], stl[83]]) as usize;
-    let f = |o: usize| f64::from(f32::from_le_bytes([stl[o], stl[o + 1], stl[o + 2], stl[o + 3]]));
+    let f = |o: usize| {
+        f64::from(f32::from_le_bytes([
+            stl[o],
+            stl[o + 1],
+            stl[o + 2],
+            stl[o + 3],
+        ]))
+    };
     let mut area = 0.0;
     for t in 0..n {
         let b = 84 + t * 50 + 12;
         if b + 36 > stl.len() {
             break;
         }
-        let v: Vec<[f64; 3]> = (0..3).map(|k| [f(b + k * 12), f(b + k * 12 + 4), f(b + k * 12 + 8)]).collect();
+        let v: Vec<[f64; 3]> = (0..3)
+            .map(|k| [f(b + k * 12), f(b + k * 12 + 4), f(b + k * 12 + 8)])
+            .collect();
         if v.iter().any(|p| p[2] <= above) {
             continue;
         }
@@ -170,7 +182,11 @@ pub fn decimate(mesh: &DetailMesh, max: usize) -> DetailMesh {
         let mut seen = std::collections::HashSet::new();
         let mut indices = Vec::new();
         for t in mesh.indices.as_chunks::<3>().0 {
-            let tri = [remap[t[0] as usize], remap[t[1] as usize], remap[t[2] as usize]];
+            let tri = [
+                remap[t[0] as usize],
+                remap[t[1] as usize],
+                remap[t[2] as usize],
+            ];
             if tri[0] == tri[1] || tri[1] == tri[2] || tri[0] == tri[2] {
                 continue;
             }
@@ -194,13 +210,19 @@ pub fn decimate(mesh: &DetailMesh, max: usize) -> DetailMesh {
 /// The decorative templates in [`crate::KITS`] are built as **kits** of separately printed
 /// parts (see [`crate::kits`]) unless `params` has `"one_piece": true`.
 pub fn detail_template(name: &str, label: &str, template: &str, params: &Value) -> Result<Detail> {
-    let one_piece = params.get("one_piece").and_then(Value::as_bool).unwrap_or(false);
+    let one_piece = params
+        .get("one_piece")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     if !one_piece && crate::kits::KITS.iter().any(|(n, _)| *n == template) {
         return crate::kits::kit_template(name, label, template, params);
     }
-    let (base, deco, full) = template_commands(template, params)?;
+    let (base, deco, full, post, mount) = template_commands(template, params)?;
+    let style = crate::stem::stem_style(template, &full);
     let source = json!({"template": template, "params": full});
-    assemble(name, label, &base, deco, false, None, source)
+    let mut d = assemble(name, label, &base, deco, &post, false, None, mount, source)?;
+    d.design.stem = style;
+    Ok(d)
 }
 
 /// Builds a detail from Claude's own SolidCraft commands (`{"commands": [...]}` or a bare
@@ -214,6 +236,13 @@ pub fn detail_template(name: &str, label: &str, template: &str, params: &Value) 
 /// files, sane numbers), the result is one closed body with a watertight mesh, and it stays
 /// within `cells` and `plates` (plus [`OVERHANG_MARGIN`]); `sockets` must be at least two
 /// neighbouring cells in a row, all inside `cells`.
+///
+/// The batch may declare how the detail goes on a stem: `"mount": {"kind": "hole"|"clip",
+/// "origin", "axis", "up"}` in the same frame (mm). A hole's `origin` is its mouth and `axis`
+/// points out of it (down for a head on a stem); its bore should be Ø3.48 with three crush
+/// ribs to Ø3.08, [`crate::BAR_MOUNT_DEPTH`] deep. A clip's `origin` is the middle of the bar
+/// in it and `axis` runs along that bar. `up` is the detail's front, square to `axis`. The
+/// mount is refused if the bar's place is solid.
 pub fn detail_from_commands(
     batch: &Value,
     cells: &[(i32, i32)],
@@ -233,9 +262,65 @@ pub fn detail_from_commands(
     if !(1..=16).contains(&plates) {
         return bad("a detail is 1 to 16 plates tall");
     }
-    let limit = Limit { cells: cell_set, plates };
-    let source = json!({"commands": steps, "cells": cells, "plates": plates, "sockets": sockets});
-    assemble(name, label, sockets, steps, true, Some(limit), source)
+    let limit = Limit {
+        cells: cell_set,
+        plates,
+    };
+    // An optional stem mount, declared in the base frame (mm).
+    let mount_v = batch.get("mount").filter(|m| !m.is_null()).cloned();
+    let mount = mount_v
+        .as_ref()
+        .map(crate::stem::mount_from_json)
+        .transpose()?;
+    let mut source =
+        json!({"commands": steps, "cells": cells, "plates": plates, "sockets": sockets});
+    if let Some(m) = &mount_v {
+        source["mount"] = m.clone();
+    }
+    let d = assemble(
+        name,
+        label,
+        sockets,
+        steps,
+        &[],
+        true,
+        Some(limit),
+        mount,
+        source,
+    )?;
+    if let Some(m) = mount {
+        // Where the bar goes must be empty: down the hole from its mouth, or the clip's middle.
+        let probes: Vec<[f64; 3]> = match m.kind {
+            sf_core::MountKind::Hole => (1..=6)
+                .map(|k| {
+                    let t = 0.5 * f64::from(k);
+                    [
+                        m.origin[0] - m.axis[0] * t,
+                        m.origin[1] - m.axis[1] * t,
+                        m.origin[2] - m.axis[2] * t,
+                    ]
+                })
+                .collect(),
+            sf_core::MountKind::Clip => vec![m.origin],
+        };
+        if let Some(q) = probes
+            .iter()
+            .find(|q| crate::trim::inside_mesh(&d.part.stl, **q))
+        {
+            return Err(CustomError::Refused(format!(
+                "the mount's {} is solid at [{:.2}, {:.2}, {:.2}] mm: no room for the stem's bar",
+                if m.kind == sf_core::MountKind::Hole {
+                    "hole"
+                } else {
+                    "clip"
+                },
+                q[0],
+                q[1],
+                q[2]
+            )));
+        }
+    }
+    Ok(d)
 }
 
 /// Rebuilds a detail's print from its [`DetailSource`] (a template or a batch, as the
@@ -262,9 +347,15 @@ pub fn rebuild(source: &Value, name: &str, label: &str) -> Result<Detail> {
         serde_json::from_value(source.get(k).cloned().unwrap_or(Value::Null))
             .map_err(|e| CustomError::InvalidShape(format!("detail source `{k}`: {e}")))
     };
+    if let Some(h) = source.get("hub") {
+        let hub: sf_core::Hub = serde_json::from_value(h.clone())
+            .map_err(|e| CustomError::InvalidShape(format!("hub source: {e}")))?;
+        return crate::stem::hub_detail(name, label, &hub);
+    }
     let plates = source.get("plates").and_then(Value::as_u64).unwrap_or(0) as u32;
+    let batch = json!({"commands": source.get("commands").cloned().unwrap_or(Value::Null), "mount": source.get("mount").cloned().unwrap_or(Value::Null)});
     detail_from_commands(
-        source.get("commands").unwrap_or(&Value::Null),
+        &batch,
         &pairs("cells")?,
         plates,
         &pairs("sockets")?,
@@ -287,9 +378,17 @@ fn batch_steps(batch: &Value) -> Result<Vec<Value>> {
         Value::Array(a) => a.clone(),
         Value::Object(o) => match o.get("commands") {
             Some(Value::Array(a)) => a.clone(),
-            _ => return Err(CustomError::Refused("a batch is {\"commands\": [...]} or an array of steps".into())),
+            _ => {
+                return Err(CustomError::Refused(
+                    "a batch is {\"commands\": [...]} or an array of steps".into(),
+                ));
+            }
         },
-        _ => return Err(CustomError::Refused("a batch is {\"commands\": [...]} or an array of steps".into())),
+        _ => {
+            return Err(CustomError::Refused(
+                "a batch is {\"commands\": [...]} or an array of steps".into(),
+            ));
+        }
     };
     if steps.is_empty() || steps.len() > crate::MAX_COMMANDS {
         return Err(CustomError::Refused(format!(
@@ -372,9 +471,9 @@ pub(crate) fn extrude_sym(sketch: &str, name: &str, thickness: f64) -> Value {
 pub(crate) fn num(params: &Value, key: &str, default: f64, lo: f64, hi: f64) -> Result<f64> {
     let v = match params.get(key) {
         None | Some(Value::Null) => default,
-        Some(x) => x.as_f64().ok_or_else(|| {
-            CustomError::InvalidShape(format!("`{key}` must be a number"))
-        })?,
+        Some(x) => x
+            .as_f64()
+            .ok_or_else(|| CustomError::InvalidShape(format!("`{key}` must be a number")))?,
     };
     if !(v.is_finite() && (lo..=hi).contains(&v)) {
         return bad(&format!("`{key}` = {v} is outside {lo}–{hi}"));
@@ -396,7 +495,11 @@ pub(crate) fn base_param(params: &Value, default: [u32; 2]) -> Result<Vec<(i32, 
         .collect())
 }
 
-pub(crate) fn dir_param(params: &Value, default: &str, allow_up: bool) -> Result<(String, [f64; 2])> {
+pub(crate) fn dir_param(
+    params: &Value,
+    default: &str,
+    allow_up: bool,
+) -> Result<(String, [f64; 2])> {
     let d = params
         .get("direction")
         .and_then(Value::as_str)
@@ -466,7 +569,11 @@ fn blade(
     groove: Option<(f64, f64)>,
 ) -> Vec<Value> {
     let (x, y) = blade_frame(theta, tilt);
-    let normal = [-tilt.sin() * theta.cos(), -tilt.sin() * theta.sin(), tilt.cos()];
+    let normal = [
+        -tilt.sin() * theta.cos(),
+        -tilt.sin() * theta.sin(),
+        tilt.cos(),
+    ];
     // Mid-plane: SINK below the top's thickness centre, so the blade's underside at the root
     // sits SINK into the base and its top surface t above the base top.
     let zc = BASE_HEIGHT + (t - SINK) / 2.0;
@@ -479,7 +586,11 @@ fn blade(
     if let Some((u0, u1)) = groove {
         // A midrib: a 0.6 mm groove 0.4 mm deep down the blade's top face.
         let top = (t + SINK) / 2.0;
-        let og = [o[0] + normal[0] * top, o[1] + normal[1] * top, o[2] + normal[2] * top];
+        let og = [
+            o[0] + normal[0] * top,
+            o[1] + normal[1] * top,
+            o[2] + normal[2] * top,
+        ];
         let gname = format!("Rib{n}");
         c.push(sketch_on(&gname, og, x, y));
         c.push(closed(&[[u0, -0.3], [u1, -0.3], [u1, 0.3], [u0, 0.3]]));
@@ -515,7 +626,14 @@ fn cap(name: &str, at: P2, zb: f64, r: f64, h: f64) -> Vec<Value> {
 }
 
 /// A template's base cells, decoration commands, and parameters with defaults filled in.
-type TemplateParts = (Vec<(i32, i32)>, Vec<Value>, Value);
+/// Base cells, decoration, parameters, post-tube commands and the stem mount.
+type TemplateParts = (
+    Vec<(i32, i32)>,
+    Vec<Value>,
+    Value,
+    Vec<Value>,
+    Option<MountMm>,
+);
 
 /// The base cells, the decoration's commands, and the parameters with defaults filled in.
 #[allow(clippy::needless_late_init)] // each arm sets both, after reading its own parameters
@@ -526,6 +644,8 @@ fn template_commands(template: &str, params: &Value) -> Result<TemplateParts> {
     let mut deco = Vec::new();
     let full;
     let base;
+    let mut post = Vec::new();
+    let mut mount = None;
     match template {
         "flower_head" => {
             let petals = num(params, "petals", 6.0, 3.0, 12.0)?.round() as usize;
@@ -548,31 +668,73 @@ fn template_commands(template: &str, params: &Value) -> Result<TemplateParts> {
             if reach <= rc + 1.0 {
                 return bad("the flower is too small for its centre");
             }
+            // On a stem: a bar hole up the centre, which reaches high enough round it.
+            let with_mount = crate::stem::wants_mount(params);
+            let hm = with_mount.then(|| crate::stem::head_mount(at, &base, false));
+            let ch = match &hm {
+                Some(m) => ch.max(m.top - BASE_HEIGHT - t),
+                None => ch,
+            };
+            if hm.is_some() && rc < crate::stem::MOUNT_COLUMN_R {
+                deco.push(cmd(
+                    "solid.cylinder",
+                    json!({"radius": r6(crate::stem::MOUNT_COLUMN_R), "height": r6(SINK + t + ch), "base": p3([at[0], at[1], BASE_HEIGHT - SINK]), "operation": "join", "name": "MountColumn"}),
+                ));
+            }
             // The centre: a short cylinder with a domed top.
             deco.push(cmd(
                 "solid.cylinder",
                 json!({"radius": r6(rc), "height": r6(SINK + t + ch), "base": p3([at[0], at[1], BASE_HEIGHT - SINK]), "operation": "join", "name": "Centre"}),
             ));
             let top = BASE_HEIGHT + t + ch;
-            deco.extend(cap("CentreCap", at, top - 0.2, rc - 0.15, (rc - 0.15) * 0.6 + 0.2));
+            deco.extend(cap(
+                "CentreCap",
+                at,
+                top - 0.2,
+                rc - 0.15,
+                (rc - 0.15) * 0.6 + 0.2,
+            ));
             for k in 0..petals {
                 // A whisker of difference between petals (well under a print's resolution)
                 // keeps the kernel off the exact coincidences a perfectly symmetric flower
                 // gives it, where its booleans can fail.
                 let theta = 2.0 * PI * k as f64 / petals as f64 + 1e-3 * k as f64;
                 let tk = tilt + 2e-3 * (k % 3) as f64;
-                deco.extend(blade(k, at, theta, tk, t + 0.003 * (k % 2) as f64, petal_outline(u0, reach, pw), None));
+                deco.extend(blade(
+                    k,
+                    at,
+                    theta,
+                    tk,
+                    t + 0.003 * (k % 2) as f64,
+                    petal_outline(u0, reach, pw),
+                    None,
+                ));
             }
-            full = json!({"petals": petals, "diameter": dia, "petal_width": pw, "thickness": t, "cup": cup, "centre_diameter": cd, "centre_height": ch, "base": dims(&base)});
+            if let Some(m) = hm {
+                deco.extend(m.cmds);
+                post = m.post;
+                mount = Some(m.mount);
+            }
+            let ch0 = num(params, "centre_height", 2.0, 0.0, 8.0)?;
+            full = json!({"petals": petals, "diameter": dia, "petal_width": pw, "thickness": t, "cup": cup, "centre_diameter": cd, "centre_height": ch0, "mount": with_mount, "base": dims(&base)});
         }
         "petal" | "leaf" => {
             let leaf = template == "leaf";
-            let len = num(params, "length", if leaf { 14.0 } else { 10.0 }, if leaf { 4.0 } else { 3.0 }, 30.0)?;
+            let len = num(
+                params,
+                "length",
+                if leaf { 14.0 } else { 10.0 },
+                if leaf { 4.0 } else { 3.0 },
+                30.0,
+            )?;
             let w = num(params, "width", 6.0, if leaf { 2.0 } else { 1.5 }, 15.0)?;
             let t = num(params, "thickness", 1.4, 0.8, 4.0)?;
             let tilt = num(params, "tilt", if leaf { 15.0 } else { 25.0 }, 0.0, 80.0)?;
             let (dname, dv) = dir_param(params, "+x", false)?;
-            let midrib = params.get("midrib").and_then(Value::as_bool).unwrap_or(true);
+            let midrib = params
+                .get("midrib")
+                .and_then(Value::as_bool)
+                .unwrap_or(true);
             base = base_param(params, [2, 1])?;
             let at = base_centre(&base);
             let theta = dv[1].atan2(dv[0]);
@@ -617,7 +779,10 @@ fn template_commands(template: &str, params: &Value) -> Result<TemplateParts> {
             } else {
                 let (s, c) = tilt.sin_cos();
                 // Its base circle stands on the base's top (sunk SINK), centred over the base.
-                ([dv[0] * c, dv[1] * c, s], [at[0], at[1], BASE_HEIGHT - SINK + r * c])
+                (
+                    [dv[0] * c, dv[1] * c, s],
+                    [at[0], at[1], BASE_HEIGHT - SINK + r * c],
+                )
             };
             let length = if dname == "up" { len + SINK } else { len };
             let mut p = json!({"radius": r6(r), "height": r6(length), "base": p3(start), "axis": p3(axis), "operation": "join", "name": "Cone"});
@@ -639,10 +804,12 @@ fn template_commands(template: &str, params: &Value) -> Result<TemplateParts> {
             full = json!({"diameter": d, "thickness": t, "base": dims(&base)});
         }
         other if crate::flower::SPECIES.iter().any(|(n, _)| *n == other) => {
-            let (b, d, f) = crate::flower::species(other, params)?;
+            let (b, d, f, pst, m) = crate::flower::species(other, params)?;
             base = b;
             deco = d;
             full = f;
+            post = pst;
+            mount = m;
         }
         other => {
             let names: Vec<&str> = TEMPLATES
@@ -650,10 +817,13 @@ fn template_commands(template: &str, params: &Value) -> Result<TemplateParts> {
                 .chain(crate::flower::SPECIES.iter())
                 .map(|t| t.0)
                 .collect();
-            return bad(&format!("no detail template `{other}` (have {})", names.join(", ")));
+            return bad(&format!(
+                "no detail template `{other}` (have {})",
+                names.join(", ")
+            ));
         }
     }
-    Ok((base, deco, full))
+    Ok((base, deco, full, post, mount))
 }
 
 pub(crate) fn dims(base: &[(i32, i32)]) -> [i32; 2] {
@@ -667,7 +837,12 @@ pub(crate) fn dims(base: &[(i32, i32)]) -> [i32; 2] {
 
 /// Runs base → decoration → trim → hollow → tubes on `sockets` and checks the result: one
 /// closed body, watertight mesh. The base frame: cells from the sockets' coordinates, z up.
-pub(crate) fn build_on_base(sockets: &[(i32, i32)], deco: &[Value], freeform: bool) -> Result<CustomPart> {
+pub(crate) fn build_on_base(
+    sockets: &[(i32, i32)],
+    deco: &[Value],
+    post: &[Value],
+    freeform: bool,
+) -> Result<CustomPart> {
     let p = StudProfile::fused();
     let f = Footprint::new(sockets)?;
     // At least two neighbouring sockets in a row.
@@ -790,9 +965,15 @@ pub(crate) fn build_on_base(sockets: &[(i32, i32)], deco: &[Value], freeform: bo
         if (got - want).abs() > 2e-3 * want + 0.01 {
             return Err(CustomError::Mismatch {
                 stage: "Tubes".into(),
-                details: format!("tubes added {got:.3} mm³, expected {want:.3} (something filled the hollow)"),
+                details: format!(
+                    "tubes added {got:.3} mm³, expected {want:.3} (something filled the hollow)"
+                ),
             });
         }
+    }
+    // 6. Post: what must come after the tubes (a seat for a stem's rod through a tube).
+    for c in post {
+        run(&mut s, "Post", c)?;
     }
     let t_m = std::time::Instant::now();
     let m = measure(&mut s, "Detail")?;
@@ -811,25 +992,46 @@ pub(crate) fn build_on_base(sockets: &[(i32, i32)], deco: &[Value], freeform: bo
     let t_export = std::time::Instant::now();
     let part = finish(&mut s, "Detail", None, None)?;
     if trace {
-        eprintln!("export and mesh checks: {:.2} s", t_export.elapsed().as_secs_f64());
+        eprintln!(
+            "export and mesh checks: {:.2} s",
+            t_export.elapsed().as_secs_f64()
+        );
     }
     Ok(part)
 }
 
 /// Builds a detail on its socket base (see [`build_on_base`]) and works out the design.
+/// A template's or hub's detail: no limits, `post` after the tubes, `mount` in the base frame.
+pub(crate) fn assemble_with(
+    name: &str,
+    label: &str,
+    sockets: &[(i32, i32)],
+    deco: Vec<Value>,
+    post: Vec<Value>,
+    mount: Option<MountMm>,
+    source: Value,
+) -> Result<Detail> {
+    assemble(
+        name, label, sockets, deco, &post, false, None, mount, source,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 fn assemble(
     name: &str,
     label: &str,
     sockets: &[(i32, i32)],
     deco: Vec<Value>,
+    post: &[Value],
     freeform: bool,
     limit: Option<Limit>,
+    mount: Option<MountMm>,
     source: Value,
 ) -> Result<Detail> {
     let p = StudProfile::fused();
     let hollow_h = BASE_HEIGHT - p.top_thickness;
     let trace = std::env::var_os("FUSHION_TRACE").is_some();
-    let part = build_on_base(sockets, &deco, freeform)?;
+    let part = build_on_base(sockets, &deco, post, freeform)?;
     let (lo, hi) = part.bbox_mm;
     // Occupied columns and plates.
     let col = |v: f64| (v / p.pitch).floor() as i32;
@@ -884,7 +1086,10 @@ fn assemble(
     let d = cells_u8.iter().map(|c| c.1).max().unwrap_or(0) as f64 + 1.0;
     let top = f64::from(plates) * p.plate_height;
     // The mesh: base frame (mm) → local frame (cells from 0) → LDU about the top centre.
-    let (ox, oy) = (f64::from(si) * p.pitch + w * 4.0, f64::from(sj) * p.pitch + d * 4.0);
+    let (ox, oy) = (
+        f64::from(si) * p.pitch + w * 4.0,
+        f64::from(sj) * p.pitch + d * 4.0,
+    );
     let mesh = stl_to_ldu(&part.stl, |v| {
         [
             ((v[0] - ox) * 2.5) as f32,
@@ -895,18 +1100,24 @@ fn assemble(
     let t_dec = std::time::Instant::now();
     let mesh = decimate(&mesh, DISPLAY_TRIANGLES);
     if trace {
-        eprintln!("display mesh: {:.2} s, {} triangles", t_dec.elapsed().as_secs_f64(), mesh.indices.len() / 3);
+        eprintln!(
+            "display mesh: {:.2} s, {} triangles",
+            t_dec.elapsed().as_secs_f64(),
+            mesh.indices.len() / 3
+        );
     }
     let design = DetailDesign {
         name: name.into(),
         label: label.into(),
         cells: cells_u8,
-        plates: u8::try_from(plates).map_err(|_| CustomError::InvalidShape("detail too tall".into()))?,
+        plates: u8::try_from(plates)
+            .map_err(|_| CustomError::InvalidShape("detail too tall".into()))?,
         sockets: sockets_u8,
         studs: Vec::new(),
         mesh,
         kit: None,
-        mount: None,
+        mount: mount.map(|m| m.to_ldu([ox, oy, top])),
+        stem: None,
         source: DetailSource { source },
     };
     let overhang_mm2 = overhang_area(&part.stl, hollow_h + 0.05);
@@ -920,10 +1131,18 @@ fn assemble(
 }
 
 fn outer_min(loops: &[Vec<P2>], k: usize) -> f64 {
-    loops.iter().flatten().map(|q| q[k]).fold(f64::MAX, f64::min)
+    loops
+        .iter()
+        .flatten()
+        .map(|q| q[k])
+        .fold(f64::MAX, f64::min)
 }
 fn outer_max(loops: &[Vec<P2>], k: usize) -> f64 {
-    loops.iter().flatten().map(|q| q[k]).fold(f64::MIN, f64::max)
+    loops
+        .iter()
+        .flatten()
+        .map(|q| q[k])
+        .fold(f64::MIN, f64::max)
 }
 
 /// Reads a binary STL into an indexed mesh, each vertex mapped by `map` (shared vertices

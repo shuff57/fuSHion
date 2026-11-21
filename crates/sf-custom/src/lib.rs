@@ -43,21 +43,20 @@ mod run;
 mod shape;
 mod slant;
 mod socket;
+pub mod stem;
 pub mod trim;
 
 pub use detail::{
     BASE_HEIGHT, DISPLAY_TRIANGLES, Detail, OVERHANG_MARGIN, SINK, SUPPORT_AREA_MM2, TEMPLATES,
     decimate, detail_from_commands, detail_template, overhang_area, rebuild, rebuild_detail,
 };
+pub use fit::{FitReport, SlantOutline, TopBrick, fit, fit_below, fit_under, slant_outline};
 pub use flower::SPECIES;
 pub use kit::{
     BAR_D, BuiltKit, ClipFit, ClipSpec, HOLE_D, MAX_STRAIN, MIN_FEATURE, PEG_D, PEG_LEN, PegFit,
     append_posed, assemble_kit, build_kit_part, clip_fit, coupon, peg_fit,
 };
 pub use kits::KITS;
-pub use trim::{TRIM_VOLUME_TOL, Trimmed, brick_overhang, build_trimmed, inside_mesh, inside_trim};
-pub use socket::{Contact, E_PLA_MPA, SocketFit, SocketSpec, TDims, socket_fit, t_dims};
-pub use fit::{FitReport, SlantOutline, TopBrick, fit, fit_below, fit_under, slant_outline};
 pub use label::{LABEL_CHARS, LABEL_DEPTH, engravable};
 pub use mesh::{MeshReport, analyze_stl};
 pub use plan::{BBOX_TOL_MM, Plan, Stage, VOLUME_TOL, fused_units, plan};
@@ -68,6 +67,12 @@ pub use profile::{
 pub use run::{MAX_COMMANDS, build, build_from_commands, build_plan};
 pub use shape::CustomShape;
 pub use slant::SlantDims;
+pub use socket::{Contact, E_PLA_MPA, SocketFit, SocketSpec, TDims, socket_fit, t_dims};
+pub use stem::{
+    BAR_MOUNT_DEPTH, StemFit, build_hub, build_stem, hub_detail, stem_fit, stem_style,
+    stem_volume_bounds,
+};
+pub use trim::{TRIM_VOLUME_TOL, Trimmed, brick_overhang, build_trimmed, inside_mesh, inside_trim};
 
 /// The derived dimensions of `profile`'s Slant v2 stud (an error if it has none, or its
 /// numbers don't make one).

@@ -4,9 +4,10 @@
 //! sf-render has one iso view (from the front-left). The other corners come from turning
 //! the whole model a quarter turn at a time about the vertical axis before rendering.
 //! Ghosting and the visibility test only change colours, through extra palette entries.
+//! Stems (`Model::stems`, drawn by sf-render) turn and change colour with the parts.
 
 use image::RgbaImage;
-use sf_core::{Cell, ColorId, Model, Palette, Placement, Rot, color::Color};
+use sf_core::{Cell, ColorId, KitPose, Model, Palette, Placement, Rot, StemAttach, StemPlacement, color::Color};
 use sf_ldraw::MeshLibrary;
 use sf_render::{RenderOptions, View, render_view};
 use std::collections::HashMap;
@@ -29,11 +30,51 @@ pub fn turn_placement(p: &Placement, turns: u8) -> Placement {
     q
 }
 
-/// The model turned `turns` quarter turns (placements only; steps and meshes kept).
+/// The model turned `turns` quarter turns: placements, and stems with their heads and
+/// leaves (steps and designs kept).
 pub fn turn_model(m: &Model, turns: u8) -> Model {
     let mut out = m.clone();
     out.placements = m.placements.iter().map(|p| turn_placement(p, turns)).collect();
+    // A quarter turn of the grid, (x, z) → (z, -x), is a rotation about the vertical by 90°.
+    let turn = KitPose { rotation: crate::stem::rot_y(90.0 * (turns % 4) as f32), position: [0.0; 3] };
+    for sp in &mut out.stems {
+        sp.pose = sf_render::pose_then(&turn, &sp.pose);
+        for a in sp.head.iter_mut().chain(sp.branch_heads.iter_mut()).chain(sp.leaves.iter_mut()) {
+            a.pose = sf_render::pose_then(&turn, &a.pose);
+        }
+    }
     out
+}
+
+/// Recolour a stem with its head and leaves through `f`: the stem, each design's main colour,
+/// and every colour role of a kit (resolved first, so defaults change too).
+pub fn paint_stem(sp: &mut StemPlacement, model: &Model, palette: &Palette, f: &mut impl FnMut(ColorId) -> ColorId) {
+    sp.color = f(sp.color);
+    for a in sp.head.iter_mut().chain(sp.branch_heads.iter_mut()).chain(sp.leaves.iter_mut()) {
+        paint_attach(a, model, palette, f);
+    }
+}
+
+/// Recolour one head or leaf through `f` (every colour role of a kit).
+pub fn paint_attach(a: &mut StemAttach, model: &Model, palette: &Palette, f: &mut impl FnMut(ColorId) -> ColorId) {
+    if let Some(kit) = model.kits.get(&a.design) {
+        let roles = sf_render::kit_role_colors(kit, a.color, &a.colors, palette);
+        a.colors = roles.into_iter().filter(|(r, _)| r != "main").map(|(r, c)| (r, f(c))).collect();
+    }
+    a.color = f(a.color);
+}
+
+/// What a step adds: indices into a model's placements and its stems.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct New {
+    pub placements: Vec<usize>,
+    pub stems: Vec<usize>,
+}
+
+impl New {
+    pub fn is_empty(&self) -> bool {
+        self.placements.is_empty() && self.stems.is_empty()
+    }
 }
 
 /// A palette with extra entries, handing out fresh codes for made-up colours.
@@ -67,38 +108,21 @@ impl ScratchPalette {
     }
 }
 
-/// The model up to and including step `k`, with parts from earlier steps ghosted.
-/// Returns the model and the indices (into the new model) of this step's parts.
-pub fn step_model(m: &Model, steps: &[Vec<usize>], k: usize, pal: &mut ScratchPalette, ghost: bool) -> (Model, Vec<usize>) {
-    // Everything but the placements and steps (kits, meshes and details are needed to draw
-    // the parts).
-    let mut out = Model { placements: Vec::new(), steps: Vec::new(), ..m.clone() };
-    for s in &steps[..k] {
-        for &i in s {
-            if let Some(p) = m.placements.get(i) {
-                let mut p = p.clone();
-                if ghost {
-                    p.color = pal.ghost(p.color);
-                }
-                out.placements.push(p);
-            }
-        }
-    }
-    let first_new = out.placements.len();
-    out.placements.extend(steps[k].iter().filter_map(|&i| m.placements.get(i).cloned()));
-    let new = (first_new..out.placements.len()).collect();
-    (out, new)
-}
-
-/// Pixels of the `new` parts visible in an iso render of `m` turned `turns` times.
-pub fn visible_new(m: &Model, new: &[usize], turns: u8, meshes: &MeshLibrary, size: u32) -> usize {
+/// Pixels of the `new` parts and stems visible in an iso render of `m` turned `turns` times.
+pub fn visible_new(m: &Model, new: &New, turns: u8, meshes: &MeshLibrary, size: u32) -> usize {
     let mut pal = ScratchPalette::new(&Palette { colors: Vec::new() });
     let red = pal.add([255, 0, 0]);
     let green = pal.add([0, 255, 0]);
     let mut mask = m.clone();
     for (i, p) in mask.placements.iter_mut().enumerate() {
-        p.color = if new.contains(&i) { red } else { green };
+        p.color = if new.placements.contains(&i) { red } else { green };
     }
+    let mut stems = std::mem::take(&mut mask.stems);
+    for (i, sp) in stems.iter_mut().enumerate() {
+        let c = if new.stems.contains(&i) { red } else { green };
+        paint_stem(sp, m, &pal.palette.clone(), &mut |_| c);
+    }
+    mask.stems = stems;
     let img = render_view(&turn_model(&mask, turns), &pal.palette, meshes, View::Iso, &mask_opts(size));
     count_red(&img)
 }
@@ -113,8 +137,8 @@ fn count_red(img: &RgbaImage) -> usize {
 
 /// The quarter turn (0–3) whose iso view shows the most of the `new` parts. Turn 0
 /// (front-left) is kept unless another shows clearly more (25 %).
-pub fn best_turn(m: &Model, new: &[usize], meshes: &MeshLibrary) -> u8 {
-    if new.is_empty() || m.placements.is_empty() {
+pub fn best_turn(m: &Model, new: &New, meshes: &MeshLibrary) -> u8 {
+    if new.is_empty() || m.placements.is_empty() && m.stems.is_empty() {
         return 0;
     }
     let seen: Vec<usize> = (0..4).map(|t| visible_new(m, new, t, meshes, 160)).collect();
@@ -146,6 +170,23 @@ pub fn trim_all(imgs: &[RgbaImage], margin: u32) -> Vec<RgbaImage> {
     let (x0, y0) = (x0.saturating_sub(margin), y0.saturating_sub(margin));
     let (x1, y1) = ((x1 + margin).min(w - 1), (y1 + margin).min(h - 1));
     imgs.iter().map(|i| image::imageops::crop_imm(i, x0, y0, x1 - x0 + 1, y1 - y0 + 1).to_image()).collect()
+}
+
+/// As [`trim`], also returning where the crop starts in the original.
+pub fn trim_at(img: &RgbaImage, margin: u32) -> (RgbaImage, u32, u32) {
+    let (w, h) = img.dimensions();
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+    for (x, y, p) in img.enumerate_pixels() {
+        if p[0] < 250 || p[1] < 250 || p[2] < 250 {
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+        }
+    }
+    if x0 > x1 {
+        return (img.clone(), 0, 0);
+    }
+    let (x0, y0) = (x0.saturating_sub(margin), y0.saturating_sub(margin));
+    let (x1, y1) = ((x1 + margin).min(w - 1), (y1 + margin).min(h - 1));
+    (image::imageops::crop_imm(img, x0, y0, x1 - x0 + 1, y1 - y0 + 1).to_image(), x0, y0)
 }
 
 /// Crop the white border around a render, keeping a small margin.

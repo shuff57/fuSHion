@@ -175,12 +175,26 @@ impl Camera {
 
 /// Model bounds in world units (studs included), or a default box.
 pub fn model_bounds(model: Option<&Model>) -> (V3, V3) {
-    match model.and_then(|m| m.bounds()) {
-        Some((lo, hi)) => (
+    let cells = model.and_then(|m| m.bounds()).map(|(lo, hi)| {
+        (
             [lo.x as f32, lo.y as f32 * PLATE, lo.z as f32],
             [hi.x as f32, hi.y as f32 * PLATE + 0.2, hi.z as f32],
+        )
+    });
+    // Stems and their heads reach well above the bricks (LDU, -Y up → world units).
+    let stems = model.and_then(sf_render::stems_bounds).map(|(lo, hi)| {
+        (
+            [lo[0] / 20.0, -hi[1] / 20.0, lo[2] / 20.0],
+            [hi[0] / 20.0, -lo[1] / 20.0, hi[2] / 20.0],
+        )
+    });
+    match (cells, stems) {
+        (Some((a0, a1)), Some((b0, b1))) => (
+            [0, 1, 2].map(|i| a0[i].min(b0[i])),
+            [0, 1, 2].map(|i| a1[i].max(b1[i])),
         ),
-        None => ([-4.0, 0.0, -4.0], [4.0, 2.0, 4.0]),
+        (Some(b), None) | (None, Some(b)) => b,
+        (None, None) => ([-4.0, 0.0, -4.0], [4.0, 2.0, 4.0]),
     }
 }
 
@@ -296,6 +310,11 @@ fn instance_matrix_posed(p: &Placement, pose: Option<&sf_core::KitPose>) -> [[f3
         }
         m = mr;
     }
+    ldu_instance(m, pos)
+}
+
+/// The instance matrix of a mesh placed in the model's LDU frame by `v ↦ m·v + pos`.
+fn ldu_instance(m: [[f32; 3]; 3], pos: [f32; 3]) -> [[f32; 4]; 4] {
     let s = 1.0 / 20.0;
     // World = S · (R · v + t) with S = diag(s, -s, s).
     let sy = [s, -s, s];
@@ -452,6 +471,59 @@ pub fn build_scene(generation: u64, inp: &SceneInput) -> Scene {
                 color: [rgb[0], rgb[1], rgb[2], 255],
                 flags,
             });
+        }
+    }
+    // Stems, with their heads and leaves. A stem shows (and is ghosted or highlighted in
+    // step mode) with the hub it plugs into.
+    if let Some(model) = inp.model
+        && !model.stems.is_empty()
+    {
+        let hubs: HashMap<&str, usize> = model
+            .placements
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| p.custom.as_deref().map(|d| (d.id.as_str(), i)))
+            .collect();
+        let mut push = |key: String, mesh: Arc<sf_ldraw::PartMesh>, pose: &sf_core::KitPose, code: sf_core::ColorId, flags: u32| {
+            let rgb = inp.palette.rgb(code);
+            let entry = batches.entry(key.clone()).or_insert_with(|| {
+                order.push(key);
+                (mesh, Vec::new())
+            });
+            entry.1.push(Instance {
+                model: ldu_instance(pose.rotation, pose.position),
+                color: [rgb[0], rgb[1], rgb[2], 255],
+                flags,
+            });
+        };
+        for stem in &model.stems {
+            let hub = hubs.get(stem.hub.as_str()).copied();
+            if let Some(i) = hub
+                && !inp.vis.visible.get(i).copied().unwrap_or(true)
+            {
+                continue;
+            }
+            let flags = match hub {
+                Some(i) if inp.selected == Some(i) => gpu::FLAG_SELECTED,
+                Some(i) => inp.vis.flags.get(i).copied().unwrap_or(0),
+                None => 0,
+            };
+            let (key, mesh) = inp.meshes.stem(&stem.def);
+            push(key, mesh, &stem.pose, stem.color, flags);
+            for att in stem.head.iter().chain(&stem.branch_heads).chain(&stem.leaves) {
+                if let Some(kit) = model.kits.get(&att.design) {
+                    for part in &kit.parts {
+                        let (key, mesh) = inp.meshes.detail(&part.mesh);
+                        let code = kit.role_color(&part.role, att.color, &att.colors, |n| inp.palette.resolve(n));
+                        for copy in &part.copies {
+                            push(key.clone(), mesh.clone(), &sf_render::pose_then(&att.pose, copy), code, flags);
+                        }
+                    }
+                } else if let Some(d) = model.meshes.get(&att.design) {
+                    let (key, mesh) = inp.meshes.detail(d);
+                    push(key, mesh, &att.pose, att.color, flags);
+                }
+            }
         }
     }
     if let Some(g) = inp.ghost {

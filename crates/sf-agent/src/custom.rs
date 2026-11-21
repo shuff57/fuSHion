@@ -61,7 +61,7 @@ pub const PLA_G_PER_MM3: f64 = 1.24e-3;
 pub struct PrintRow {
     /// The printed part's id (`"B017"`, `"D003"`), or the LDraw id of a part to buy.
     pub id: String,
-    /// `"brick"`, `"plate"`, `"detail"` or `"buy"`.
+    /// `"brick"`, `"plate"`, `"detail"`, `"kit part"`, `"hub"`, `"stem"` or `"buy"`.
     pub kind: String,
     pub description: String,
     pub colour: String,
@@ -243,19 +243,64 @@ mod imp {
                 None => *buy.entry((p.part.clone(), p.color)).or_default() += 1,
             }
         }
+        // Stems (one print each, by id) and what is attached to them: a kit's parts as for a
+        // kit detail (a leaf clipped on a bar: only its clipped parts, not its mount on a
+        // socket base), a one-piece design's print.
+        let mut stems: BTreeMap<String, (&sf_core::StemDef, ColorId)> = BTreeMap::new();
+        let mut design_uses: BTreeMap<(String, ColorId), usize> = BTreeMap::new();
+        let mut design_ids: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for st in &model.stems {
+            if let Some((prev, _)) = stems.get(&st.def.id)
+                && **prev != st.def
+            {
+                bail!("two different stems share the id {}", st.def.id);
+            }
+            stems.insert(st.def.id.clone(), (&st.def, st.color));
+            for a in st.head.iter().chain(&st.branch_heads).chain(&st.leaves) {
+                let on_bar = a.bar.is_some();
+                if let Some(kit) = model.kits.get(&a.design) {
+                    for (i, part) in kit.parts.iter().enumerate() {
+                        let based = part.source.source.get("kit_part").and_then(|k| k.get("base")).is_some_and(|b| !b.is_null());
+                        if on_bar && based {
+                            continue;
+                        }
+                        let colour = kit.role_color(&part.role, a.color, &a.colors, |n| palette.resolve(n));
+                        *kit_uses.entry((a.design.clone(), i, colour)).or_default() += part.copies.len();
+                    }
+                    let ids = kit_ids.entry(a.design.clone()).or_default();
+                    if !ids.contains(&st.def.id) {
+                        ids.push(st.def.id.clone());
+                    }
+                } else if model.details.contains_key(&a.design) {
+                    *design_uses.entry((a.design.clone(), a.color)).or_default() += 1;
+                    let ids = design_ids.entry(a.design.clone()).or_default();
+                    if !ids.contains(&st.def.id) {
+                        ids.push(st.def.id.clone());
+                    }
+                } else {
+                    bail!("stem {} carries `{}`, which the model has no design for", st.def.id, a.design);
+                }
+            }
+        }
         std::fs::create_dir_all(out)?;
-        // Jobs: each printed part's id, then each kit part (keyed "kit:<design>:<index>").
+        // Jobs: each printed part's id, then each kit part (keyed "kit:<design>:<index>"), each
+        // stem ("stem:<id>") and each one-piece design on a stem ("design:<name>").
         enum Job<'a> {
             Def(&'a sf_core::CustomDef),
             Kit(&'a str, usize),
+            Stem(&'a sf_core::StemDef),
+            Design(&'a str),
         }
         let kit_parts: std::collections::BTreeSet<(String, usize)> =
             kit_uses.keys().map(|(m, i, _)| (m.clone(), *i)).collect();
+        let designs: std::collections::BTreeSet<String> = design_uses.keys().map(|(d, _)| d.clone()).collect();
         let jobs: Vec<Job> = defs
             .values()
             .filter(|d| uses.keys().any(|(id, _)| id == &d.id))
             .map(Job::Def)
             .chain(kit_parts.iter().map(|(m, i)| Job::Kit(m.as_str(), *i)))
+            .chain(stems.values().map(|(d, _)| Job::Stem(d)))
+            .chain(designs.iter().map(|d| Job::Design(d.as_str())))
             .collect();
         let total = jobs.len();
         let results: Mutex<BTreeMap<String, Result<sf_custom::CustomPart>>> = Mutex::new(BTreeMap::new());
@@ -283,6 +328,11 @@ mod imp {
                                 sf_custom::build_kit_part(src).map_err(|e| anyhow::anyhow!("{mesh} {}: {e}", model.kits[*mesh].parts[*i].key)),
                             )
                         }
+                        Job::Stem(d) => (format!("stem:{}", d.id), sf_custom::build_stem(d).map_err(|e| anyhow::anyhow!("{}: {e}", d.id))),
+                        Job::Design(name) => (
+                            format!("design:{name}"),
+                            sf_custom::rebuild_detail(&model.details[*name].source).map_err(|e| anyhow::anyhow!("{name}: {e}")),
+                        ),
                     };
                     results.lock().unwrap_or_else(|e| e.into_inner()).insert(key, r);
                     progress(done.fetch_add(1, Ordering::SeqCst) + 1, total);
@@ -296,9 +346,17 @@ mod imp {
         for ((id, color), count) in &uses {
             let def = &defs[id];
             let colour = palette.name(*color);
+            let hub = match &def.kind {
+                sf_core::CustomKind::Detail { mesh, .. } => model.details.get(mesh).and_then(|d| d.source.get("hub")),
+                _ => None,
+            };
             let (kind, desc) = match &def.kind {
                 sf_core::CustomKind::Brick if def.plates.is_multiple_of(3) => ("brick", def.describe()),
                 sf_core::CustomKind::Brick => ("plate", def.describe()),
+                sf_core::CustomKind::Detail { .. } if hub.is_some() => {
+                    let holes = hub.and_then(|h| h.get("holes")).and_then(Value::as_array).map_or(0, Vec::len);
+                    ("hub", format!("printed hub {}, {holes} keyed holes for the stems' pegs", def.id))
+                }
                 sf_core::CustomKind::Detail { .. } => ("detail", def.describe()),
             };
             let is_detail = matches!(def.kind, sf_core::CustomKind::Detail { .. });
@@ -363,6 +421,79 @@ mod imp {
                 volume_mm3: made_part.volume_mm3,
                 grams: made_part.volume_mm3 * PLA_G_PER_MM3,
                 supports: part.supports,
+                file: made.stl.strip_prefix(out).ok().map(|p| p.to_string_lossy().into_owned()),
+            });
+        }
+        let studs = |mm: f64| (mm / 8.0).ceil().clamp(0.0, 255.0) as u8;
+        for (id, (def, color)) in &stems {
+            let colour = palette.name(*color);
+            let part = match results.get(&format!("stem:{id}")) {
+                Some(Ok(p)) => p,
+                Some(Err(e)) => {
+                    notes.push(format!("{id} in {colour}: {e:#}"));
+                    continue;
+                }
+                None => continue,
+            };
+            let dir = out.join(slug(&colour));
+            let made = write(part, &dir, id)?;
+            files.push(made.stl.clone());
+            files.push(made.three_mf);
+            let (lo, hi) = part.bbox_mm;
+            let mut desc = format!("printed stem {id}, {:.0} mm long", def.length);
+            if !def.style.is_empty() {
+                desc = format!("{desc} ({})", def.style);
+            }
+            if def.bend.abs() > 0.5 {
+                desc.push_str(&format!(", bent {:.0}°", def.bend.abs()));
+            }
+            if !def.branches.is_empty() {
+                desc.push_str(&format!(", {} branches", def.branches.len()));
+            }
+            if !def.bars.is_empty() {
+                desc.push_str(&format!(", {} leaf bars", def.bars.len()));
+            }
+            rows.push(PrintRow {
+                id: id.clone(),
+                kind: "stem".into(),
+                description: desc,
+                colour,
+                count: 1,
+                plates: 0,
+                size_studs: [studs(hi[0] - lo[0]), studs(hi[1] - lo[1])],
+                volume_mm3: part.volume_mm3,
+                grams: part.volume_mm3 * PLA_G_PER_MM3,
+                // Printed lying on its flat: level ceilings (the engraving) bridge.
+                supports: sf_custom::brick_overhang(&part.stl) > sf_custom::SUPPORT_AREA_MM2,
+                file: made.stl.strip_prefix(out).ok().map(|p| p.to_string_lossy().into_owned()),
+            });
+        }
+        for ((name, color), count) in &design_uses {
+            let colour = palette.name(*color);
+            let part = match results.get(&format!("design:{name}")) {
+                Some(Ok(p)) => p,
+                Some(Err(e)) => {
+                    notes.push(format!("{name} in {colour}: {e:#}"));
+                    continue;
+                }
+                None => continue,
+            };
+            let dir = out.join(slug(&colour));
+            let made = write(part, &dir, &slug(name))?;
+            files.push(made.stl.clone());
+            files.push(made.three_mf);
+            let (lo, hi) = part.bbox_mm;
+            rows.push(PrintRow {
+                id: design_ids.get(name).map(|v| v.join(" ")).unwrap_or_default(),
+                kind: "detail".into(),
+                description: format!("{name} (on stems)"),
+                colour,
+                count: *count,
+                plates: ((hi[2] - lo[2]) / 3.2).ceil() as u32,
+                size_studs: [studs(hi[0] - lo[0]), studs(hi[1] - lo[1])],
+                volume_mm3: part.volume_mm3,
+                grams: part.volume_mm3 * PLA_G_PER_MM3,
+                supports: sf_custom::overhang_area(&part.stl, DETAIL_CEILING_MM) > sf_custom::SUPPORT_AREA_MM2,
                 file: made.stl.strip_prefix(out).ok().map(|p| p.to_string_lossy().into_owned()),
             });
         }
@@ -688,6 +819,82 @@ mod tests {
         assert!(csv.contains(",kit part,"), "{csv}");
         // No whole-detail print for a kit.
         assert!(!set.rows.iter().any(|r| r.kind == "detail"));
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// Stems print one file each; a hub prints as a hub; a leaf clipped on a stem prints only
+    /// its clipped part (not its mount); a one-piece head on a stem prints once per colour.
+    #[test]
+    fn print_set_prints_stems_hubs_and_what_they_carry() {
+        use sf_core::{Cell, KitPose, Model, Palette, Placement, Rot, StemAttach, StemBar, StemDef, StemPlacement};
+        let pal = Palette::builtin();
+        let mut model = Model { title: "t".into(), ..Default::default() };
+        // The hub, as the engine stores it.
+        let hub = sf_core::Hub {
+            cells: vec![(0, 0), (1, 0), (0, 1), (1, 1)],
+            height: 13.2,
+            holes: vec![sf_core::HubHole { top: [8.0, 8.0, 13.2], dir: [0.0, 0.0, 1.0], key: [1.0, 0.0, 0.0] }],
+        };
+        let hub_d = sf_custom::hub_detail("bouquet_hub", "hub", &hub).unwrap().design;
+        model.meshes.insert(hub_d.name.clone(), hub_d.mesh.clone());
+        model.details.insert(hub_d.name.clone(), hub_d.source.clone());
+        model.placements = vec![Placement::printed(hub_d.instance("D001"), 15, Cell::new(0, 0, 0), Rot(0))];
+        // A one-piece head and a leaf kit.
+        let head = sf_custom::detail_template("fh", "flower head", "flower_head", &serde_json::json!({})).unwrap().design;
+        model.meshes.insert(head.name.clone(), head.mesh.clone());
+        model.details.insert(head.name.clone(), head.source.clone());
+        let leaf = sf_custom::detail_template("lf", "leaf", "leaf", &serde_json::json!({})).unwrap().design;
+        model.meshes.insert(leaf.name.clone(), leaf.mesh.clone());
+        model.details.insert(leaf.name.clone(), leaf.source.clone());
+        model.kits.insert(leaf.name.clone(), leaf.kit.clone().unwrap());
+        let green = pal.resolve("Green").unwrap();
+        let pose = KitPose { rotation: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], position: [0.0; 3] };
+        let attach = |design: &str, bar: Option<usize>| StemAttach {
+            design: design.into(),
+            color: if bar.is_some() { green } else { pal.resolve("Red").unwrap() },
+            colors: Default::default(),
+            pose,
+            bar,
+            branch: None,
+        };
+        model.stems = vec![StemPlacement {
+            def: StemDef {
+                id: "S01".into(),
+                length: 60.0,
+                bend: 10.0,
+                tip_bar: sf_custom::BAR_MOUNT_DEPTH as f32,
+                bars: vec![StemBar { at: 30.0, length: 5.0 }],
+                diameter: 5.0,
+                tip: None,
+                branches: vec![],
+                style: "rose stem".into(),
+            },
+            color: pal.resolve("Dark Green").unwrap(),
+            pose,
+            hub: "D001".into(),
+            hole: 1,
+            head: Some(attach("fh", None)),
+            branch_heads: vec![],
+            leaves: vec![attach("lf", Some(0))],
+        }];
+        let out = std::env::temp_dir().join(format!("fushion-stem-set-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let set = super::export_print_set(&model, &pal, &out, |_, _| {}).unwrap();
+        assert!(set.notes.is_empty(), "{:?}", set.notes);
+        let dg = super::slug("Dark Green");
+        assert!(out.join(&dg).join("S01.stl").is_file() && out.join(&dg).join("S01.3mf").is_file());
+        let stem = set.rows.iter().find(|r| r.kind == "stem").expect("a stem row");
+        assert!(stem.description.contains("60 mm") && stem.description.contains("rose stem"), "{}", stem.description);
+        assert!(!stem.supports);
+        assert!(set.rows.iter().any(|r| r.kind == "hub" && r.id == "D001"));
+        // The leaf's clipped part, not its mount.
+        let kit_rows: Vec<_> = set.rows.iter().filter(|r| r.kind == "kit part").collect();
+        assert_eq!(kit_rows.len(), 1, "{kit_rows:?}");
+        assert!(kit_rows[0].description.starts_with("leaf") && kit_rows[0].id == "S01");
+        // The head, once.
+        assert!(set.rows.iter().any(|r| r.kind == "detail" && r.description.starts_with("fh") && r.count == 1));
+        let csv = std::fs::read_to_string(&set.list).unwrap();
+        assert!(csv.contains(",stem,") && csv.contains(",hub,"), "{csv}");
         let _ = std::fs::remove_dir_all(&out);
     }
 

@@ -2,6 +2,7 @@
 
 pub mod curves;
 pub mod details;
+pub mod bouquet;
 pub mod pack;
 pub mod physics;
 pub mod print_pack;
@@ -70,6 +71,9 @@ fn build_at(
 ) -> Result<(Compiled, pack::Packed)> {
     let c = compile(spec, &opts.palette, &CompileOptions { resolution: res, image })?;
     details::check_designs(&c.details, &opts.details)?;
+    if let Some(b) = &c.bouquet {
+        bouquet::check_designs(b, &opts.details)?;
+    }
     if opts.print {
         // Curves don't change part counts, so the budget search (no repair) skips them.
         let curves = opts.curves && repair_rounds > 0;
@@ -93,6 +97,12 @@ fn build_at(
         p.warnings.extend(placed.warnings);
         for d in print_pack::unsupported_details(&p.placements) {
             p.warnings.push(format!("detail {d} has no stud under its base and will fall off"));
+        }
+    }
+    if let Some(b) = &c.bouquet {
+        match bouquet::plan_hub(b, &opts.details, &p.placements, &bouquet::hub_id(&p.placements)) {
+            Ok(plan) => p.placements.push(plan.placement),
+            Err(e) => p.warnings.push(e),
         }
     }
     Ok((c, p))
@@ -156,9 +166,15 @@ pub fn build(spec: &Spec, opts: &BuildOptions, image: Option<&image::RgbaImage>)
         ..Default::default()
     };
     details::attach_designs(&mut model, &opts.details);
+    let stems = compiled.bouquet.as_ref().and_then(|b| bouquet::attach(&mut model, b, &opts.details, &opts.palette));
     let analysis = analyze(&model);
     model.steps = steps::order_steps(&model, &analysis);
+    bouquet::hub_last(&mut model);
     let mut report = Report::new(&model, &analysis, &opts.palette, opts.availability.as_ref());
+    if let Some((summary, warnings)) = stems {
+        report.stems = Some(summary);
+        report.warnings.extend(warnings);
+    }
     report.budget = Some(budget);
     report.resolution = resolution;
     if let (Some(p), Some(c)) = (report.printed.as_mut(), packed.curve_stats.take()) {
@@ -245,6 +261,10 @@ pub struct PrintSummary {
     /// Separately printed parts the details are built from (each kit's copies, times the
     /// details using it).
     pub kit_parts: usize,
+    /// A bouquet's stems, and the printed parts of their heads and leaves (each kit's
+    /// parts, or one per design without a kit).
+    pub stems: usize,
+    pub stem_parts: usize,
     /// Details with no stud under their base, as "printed flower head D001 at (x, y, z)".
     pub unsupported_details: Vec<String>,
     /// Body bricks whose exposed surface follows the true shape.
@@ -290,7 +310,14 @@ impl PrintSummary {
             .iter()
             .filter(|p| matches!(p.custom.as_deref().map(|c| &c.kind), Some(CustomKind::Detail { mesh, .. }) if !model.kits.contains_key(mesh)))
             .count();
-        s.total = s.bricks + s.kit_parts + kitless;
+        s.stems = model.stems.len();
+        s.stem_parts = model
+            .stems
+            .iter()
+            .flat_map(|st| st.head.iter().chain(&st.branch_heads).chain(&st.leaves))
+            .map(|a| model.kits.get(&a.design).map_or(1, |k| k.parts.iter().map(|p| p.copies.len()).sum::<usize>()))
+            .sum();
+        s.total = s.bricks + s.kit_parts + kitless + s.stems + s.stem_parts;
         s.unique_bricks = ids.len();
         s.detail_designs = designs.len();
         let held: std::collections::HashSet<usize> = a.connections.iter().map(|&(_, b, _)| b).collect();
@@ -322,6 +349,9 @@ pub struct Report {
     /// Printed parts, when the model has any.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub printed: Option<PrintSummary>,
+    /// The bouquet's stems and hub, when the spec has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stems: Option<bouquet::StemSummary>,
     pub warnings: Vec<String>,
 }
 
@@ -445,6 +475,7 @@ impl Report {
             balance_ok: a.balance.ok,
             custom_candidates: custom,
             printed: PrintSummary::of(model, a),
+            stems: None,
             warnings: Vec::new(),
         }
     }
@@ -477,13 +508,26 @@ impl Report {
                 let _ = writeln!(s, "- {}: {} [{}]", i.kind, i.detail, i.where_);
             }
         }
+        if let Some(b) = &self.stems {
+            let _ = writeln!(
+                s,
+                "Stems: {} (longest {:.0} mm{}), {} heads, {} leaves; each prints as one piece, plug them in by hole number",
+                b.stems,
+                b.longest_mm,
+                if b.clamped > 0 { format!(", {} shortened to fit a print bed", b.clamped) } else { String::new() },
+                b.heads,
+                b.leaves
+            );
+            let _ = writeln!(s, "Hub: {} holes, {} × {} studs on the vase top", b.holes, b.hub_size, b.hub_size);
+        }
         if let Some(p) = &self.printed {
             let kits = if p.kit_parts > 0 { format!(" built from {} kit parts", p.kit_parts) } else { String::new() };
             let _ = writeln!(
                 s,
-                "Printed: {} parts + {} details{kits} ({} to print in all; {} different brick files, {} detail design{})",
+                "Printed: {} parts + {} details{kits}{} ({} to print in all; {} different brick files, {} detail design{})",
                 p.bricks,
                 p.details,
+                if p.stems > 0 { format!(" + {} stems with {} head and leaf parts", p.stems, p.stem_parts) } else { String::new() },
                 p.total,
                 p.unique_bricks,
                 p.detail_designs,

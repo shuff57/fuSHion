@@ -167,7 +167,8 @@ fn view_choice_prefers_the_side_showing_new_parts() {
         ..Default::default()
     };
     let mut pal = ScratchPalette::new(&Palette::builtin());
-    let (sm, new) = view::step_model(&m, &m.steps, 2, &mut pal, true);
+    let seq = stem::sequence(&m, &m.steps, 1);
+    let (sm, new) = stem::scene(&m, &m.steps, &seq, 2, &mut pal, &Palette::builtin(), true);
     let seen0 = view::visible_new(&sm, &new, 0, &meshes(), 160);
     let t = view::best_turn(&sm, &new, &meshes());
     let seen = view::visible_new(&sm, &new, t, &meshes(), 160);
@@ -217,4 +218,98 @@ fn curved_bricks_are_named_and_tagged() {
         assert_eq!(print.matches("SUPPORTS").count(), 3, "{print}");
     }
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The text of each page, via poppler's pdftotext, whitespace collapsed (None when it isn't
+/// installed).
+fn page_texts(bytes: &[u8], name: &str) -> Option<Vec<String>> {
+    let dir = std::env::temp_dir().join(format!("sf-pamphlet-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("p.pdf");
+    std::fs::write(&path, bytes).ok()?;
+    let out = std::process::Command::new("pdftotext").arg(&path).arg("-").output().ok();
+    let _ = std::fs::remove_dir_all(&dir);
+    let out = out?;
+    // Wrapped lines joined back up, so phrases can be matched whole.
+    Some(String::from_utf8_lossy(&out.stdout).split('\u{c}').map(|p| p.split_whitespace().collect::<Vec<_>>().join(" ")).collect())
+}
+
+/// A bouquet: the stems plug in after the hub, each kind of stem gets a build page just
+/// before its first step, identical stems share it, and the print list has them.
+#[test]
+fn bouquet_stems_get_build_pages_and_steps() {
+    let m = crate::sample::bouquet_model();
+    let (bytes, info) =
+        pamphlet_bytes(&m, &Palette::builtin(), &meshes(), &PamphletOptions { step_image_px: 400, thumb_px: 96, ..Default::default() }).unwrap();
+    check_pdf(&bytes, info.pages);
+    // Cover, before, print, buy, steps 1–4 (the hub in 4), the rose kit, S01's page, step 5,
+    // the S02 ×2 page, steps 6–7, finished.
+    assert_eq!(info.pages, 12, "{info:?}");
+    assert_eq!(info.steps, 7);
+    assert_eq!((info.stems, info.stem_ids, info.stem_builds), (3, 2, 2));
+    assert_eq!(info.stem_steps, vec![5, 6, 7]);
+    assert_eq!(info.sub_build_pages, vec![7]);
+    assert_eq!(info.stem_build_pages, vec![8, 10]);
+    assert_eq!(info.step_pages, vec![5, 5, 6, 6, 9, 11, 11]);
+    // The rose (a kit) is built once, for S01: 6 pieces. Printed details: the hub, 2 buds, 4 leaves.
+    assert_eq!((info.kit_uses, info.kit_parts), (1, 6));
+    assert_eq!((info.detail_parts, info.detail_designs), (7, 3));
+    let Some(pages) = page_texts(&bytes, "bouquet") else { return };
+    let has = |p: usize, s: &str| assert!(pages[p - 1].contains(s), "page {p} lacks {s:?}:\n{}", pages[p - 1]);
+    has(2, "Print stems lying flat, as laid out in the file, with the flat side down.");
+    has(2, "numbered hole in the hub");
+    has(3, "Stems · 3");
+    has(3, "S01 rose stem");
+    has(3, "140 mm, 2 leaf bars");
+    has(3, "S02 stem");
+    has(3, "Printed hub, 3 stem holes");
+    has(3, "bud");
+    has(6, "The hub's holes are numbered");
+    has(7, "for stem S01");
+    has(8, "S01 rose stem, Green");
+    has(8, "Take a rose you built on page 7.");
+    has(8, "face pointing up as shown");
+    has(8, "onto bar 1 (50 mm up the stem), on the right side");
+    has(8, "onto bar 2 (85 mm up the stem), on the left side");
+    has(9, "Plug S01 into hole 1.");
+    has(9, "Built on page 8");
+    has(10, "Build ×2");
+    has(10, "for steps 6–7");
+    has(11, "Plug S02 into hole 2.");
+    has(11, "Plug S02 into hole 3.");
+    has(11, "Built on page 10");
+}
+
+/// Heads on branch tips: identical heads go on in one step, and each one is a kit to build,
+/// so the kit's "Build ×N" counts them all.
+#[test]
+fn branch_heads_go_on_together_and_count_as_kits() {
+    use crate::stem::{Slot, compose, plan};
+    let mut m = crate::sample::bouquet_model();
+    let sp = &mut m.stems[0];
+    sp.def.style = "rose sprig".into();
+    sp.def.branches = (0..2)
+        .map(|i| sf_core::stem::StemBranch { at: 100.0, angle: if i == 0 { 35.0 } else { -35.0 }, length: 30.0, bend: 0.0, diameter: None, tip_bar: 8.0, tip: None })
+        .collect();
+    let head = sp.head.clone().unwrap();
+    for i in 0..2 {
+        let end = sp.def.branch_point(i, 30.0);
+        let local = sf_core::KitPose { rotation: crate::stem::rot_z(if i == 0 { 35.0 } else { -35.0 }), position: end };
+        let mut h = head.clone();
+        h.pose = compose(&sp.pose, &local);
+        h.branch = Some(i);
+        sp.branch_heads.push(h);
+    }
+    assert_eq!(plan(&m.stems[0])[0], vec![Slot::Head, Slot::Branch(0), Slot::Branch(1)]);
+    let (bytes, info) =
+        pamphlet_bytes(&m, &Palette::builtin(), &meshes(), &PamphletOptions { step_image_px: 300, thumb_px: 64, ..Default::default() }).unwrap();
+    check_pdf(&bytes, info.pages);
+    assert_eq!((info.kit_uses, info.kit_parts), (3, 18), "{info:?}");
+    let Some(pages) = page_texts(&bytes, "branches") else { return };
+    let all = pages.join("\n");
+    assert!(all.contains("Build ×3"), "{all}");
+    assert!(all.contains("Take 3 roses you built on page 7."), "{all}");
+    assert!(all.contains("Push a rose onto each of the 3 bar ends (the stem's tip and 2 branch ends)"), "{all}");
+    assert!(all.contains("S01 rose sprig"), "{all}");
+    assert!(all.contains("2 branches"), "{all}");
 }

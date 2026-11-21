@@ -137,6 +137,12 @@ impl MeshLibrary {
         self.cached(crate::printed::trimmed_key(d), Box::new(|| crate::printed::trimmed_mesh(d)))
     }
 
+    /// The display mesh of a bouquet stem, with its content key ([`crate::stem::stem_key`]),
+    /// cached.
+    pub fn stem(&self, def: &sf_core::stem::StemDef) -> (String, Arc<PartMesh>) {
+        self.cached(crate::stem::stem_key(def), Box::new(|| crate::stem::stem_mesh(def)))
+    }
+
     fn cached(&self, key: String, make: Box<dyn FnOnce() -> PartMesh + '_>) -> (String, Arc<PartMesh>) {
         let mut cache = self.cache.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(Some(m)) = cache.meshes.get(&key) {

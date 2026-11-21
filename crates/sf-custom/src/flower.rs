@@ -25,8 +25,8 @@
 //! body (`Part`) so the working bodies of a petal ring never swallow anything else.
 
 use crate::detail::{
-    BASE_HEIGHT, SINK, arc3, base_centre, base_param, closed, cmd, dims, dir_param, line, num,
-    p3, r6, sketch_on, sketch_xy,
+    BASE_HEIGHT, SINK, arc3, base_centre, base_param, closed, cmd, dims, dir_param, line, num, p3,
+    r6, sketch_on, sketch_xy,
 };
 use crate::shape::P2;
 use crate::{CustomError, Result};
@@ -34,7 +34,10 @@ use serde_json::{Value, json};
 use std::f64::consts::PI;
 
 /// The species templates and their parameters (millimetres and degrees; `base` `[w, d]` in
-/// studs, 2–16 cells; every head also takes `stem_height`, 0–80 mm, a bare stem under it).
+/// studs, 2–16 cells; every head also takes `stem_height`, 0–80 mm, a bare stem under it, and
+/// `"mount"` (default true): with no `stem_height`, a bar hole up its hub for a printed stem's
+/// tip bar, the hub lifted on a column as far as the hole needs). Each head suggests the stem
+/// its kit template does (see `crate::KITS`).
 pub const SPECIES: &[(&str, &str)] = &[
     (
         "rose",
@@ -78,13 +81,31 @@ pub const SPECIES: &[(&str, &str)] = &[
     ),
 ];
 
-/// A species' base cells, decoration commands and filled-in parameters.
-pub(crate) type Species = (Vec<(i32, i32)>, Vec<Value>, Value);
+/// A species' base cells, decoration commands, filled-in parameters, post-tube commands and
+/// stem mount.
+pub(crate) type Species = (
+    Vec<(i32, i32)>,
+    Vec<Value>,
+    Value,
+    Vec<Value>,
+    Option<crate::stem::MountMm>,
+);
+
+/// The species that are flower heads: on a stem (with `"mount": true`, the default, and no
+/// `stem_height` of their own) the stem's tip bar goes up a bar hole into their hub.
+pub(crate) const HEADS: &[&str] = &["rose", "daisy", "aster", "gerbera", "poppy", "cornflower"];
 
 /// Builds the commands for species `name`.
 pub(crate) fn species(name: &str, params: &Value) -> Result<Species> {
     let mut b = Build::default();
-    let full = match name {
+    let head = HEADS.contains(&name);
+    let with_mount = head && crate::stem::wants_mount(params) && stem_height(params, 0.0)? == 0.0;
+    if with_mount {
+        // The base is read again by the species; the mount needs it first.
+        let base = base_param(params, [2, 2])?;
+        b.lift = Some(crate::stem::head_mount(base_centre(&base), &base, false).top);
+    }
+    let mut full = match name {
         "rose" => rose(&mut b, params)?,
         "daisy" => daisy(&mut b, params)?,
         "aster" => aster(&mut b, params)?,
@@ -97,7 +118,17 @@ pub(crate) fn species(name: &str, params: &Value) -> Result<Species> {
         "stem" => stem_template(&mut b, params)?,
         other => return Err(CustomError::InvalidShape(format!("no species `{other}`"))),
     };
-    Ok((b.base, b.c, full))
+    let (mut post, mut mount) = (Vec::new(), None);
+    if head {
+        full["mount"] = json!(with_mount);
+    }
+    if let (true, Some(at)) = (with_mount, b.mount_at) {
+        let m = crate::stem::head_mount(at, &b.base, false);
+        b.c.extend(m.cmds);
+        post = m.post;
+        mount = Some(m.mount);
+    }
+    Ok((b.base, b.c, full, post, mount))
 }
 
 #[derive(Default)]
@@ -108,6 +139,10 @@ struct Build {
     n: usize,
     /// Floret primitives added (for tests).
     florets: usize,
+    /// For a stem mount: how high the hub's solid must reach on its axis (it is lifted on a
+    /// column if it doesn't), and where the hub went.
+    lift: Option<f64>,
+    mount_at: Option<P2>,
 }
 
 impl Build {
@@ -203,11 +238,27 @@ impl Build {
             let h = ((r_top - STEM_R) * 1.15).max(0.2);
             self.cone([at[0], at[1], zs], [0.0, 0.0, 1.0], h + 0.01, STEM_R, r_top);
             zs + h
+        } else if let Some(need) = self.lift {
+            // On a stem: a column round the bar hole up to where it needs, the hub on top.
+            let z0 = BASE_HEIGHT - SINK;
+            self.rod(
+                [at[0], at[1], z0],
+                [0.0, 0.0, 1.0],
+                need - z0,
+                r_hub.max(crate::stem::MOUNT_COLUMN_R),
+            );
+            self.mount_at = Some(at);
+            (need - hub_h).max(z0)
         } else {
             BASE_HEIGHT - SINK
         };
         let top = z + hub_h;
-        self.rod([at[0], at[1], z - 0.01], [0.0, 0.0, 1.0], top - z + 0.01, r_hub);
+        self.rod(
+            [at[0], at[1], z - 0.01],
+            [0.0, 0.0, 1.0],
+            top - z + 0.01,
+            r_hub,
+        );
         top
     }
 
@@ -247,11 +298,21 @@ impl Build {
         let (p0, pm, p1) = (pt(0.0, 0.0), pt(len / 2.0, 0.0), pt(len, 0.0));
         let (q0, qm, q1) = (pt(0.0, r.t), pt(len / 2.0, r.t), pt(len, r.t));
         let n = self.name("Ring");
-        let mut c = vec![sketch_on(&n, [at[0], at[1], 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0])];
+        let mut c = vec![sketch_on(
+            &n,
+            [at[0], at[1], 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        )];
         if (b1 - b0).abs() < 1e-3 {
             c.push(closed(&[p0, p1, q1, q0]));
         } else {
-            c.extend([arc3(p0, pm, p1), line(p1, q1), arc3(q1, qm, q0), line(q0, p0)]);
+            c.extend([
+                arc3(p0, pm, p1),
+                line(p1, q1),
+                arc3(q1, qm, q0),
+                line(q0, p0),
+            ]);
         }
         c.push(cmd("sketch.finish", json!({})));
         let body = format!("{n}Band");
@@ -266,7 +327,9 @@ impl Build {
         // (radius w/2) ending at u1: w ≤ 2·(u1 − w/2)·sin(step/2)·0.92.
         let k = (step / 2.0).sin() * 0.92;
         let w = r.w.min(2.0 * u1 * k / (1.0 + k));
-        let wr = (w * 0.45).min(2.0 * u0 * (step / 2.0).sin() * 0.85).max(0.3);
+        let wr = (w * 0.45)
+            .min(2.0 * u0 * (step / 2.0).sin() * 0.85)
+            .max(0.3);
         let um = (u1 - w / 2.0).max(u0 + 0.3);
         if w < 0.6 || u1 <= u0 + 0.6 {
             return Err(CustomError::InvalidShape(format!(
@@ -291,11 +354,17 @@ impl Build {
             c.push(line(cc, d));
             let phi2 = phi + step + 1e-4;
             let (s2, c2) = phi2.sin_cos();
-            let next = [at[0] + u0 * c2 + wr / 2.0 * s2, at[1] + u0 * s2 - wr / 2.0 * c2];
+            let next = [
+                at[0] + u0 * c2 + wr / 2.0 * s2,
+                at[1] + u0 * s2 - wr / 2.0 * c2,
+            ];
             if k + 1 == r.n {
                 // Back to the first petal's root.
                 let (s0, c0) = r.rot.sin_cos();
-                let first = [at[0] + u0 * c0 + wr / 2.0 * s0, at[1] + u0 * s0 - wr / 2.0 * c0];
+                let first = [
+                    at[0] + u0 * c0 + wr / 2.0 * s0,
+                    at[1] + u0 * s0 - wr / 2.0 * c0,
+                ];
                 c.push(line(d, first));
             } else {
                 c.push(line(d, next));
@@ -357,31 +426,37 @@ fn rose(b: &mut Build, p: &Value) -> Result<Value> {
     let top = b.hub(at, sh, r_hub, 2.5);
     let t = 1.2;
     let step = 2.0 * PI / petals as f64;
-    b.ring(at, &Ring {
-        n: petals,
-        rot: 0.0,
-        hub: r_hub,
-        r0: 0.0,
-        z0: top - 2.0,
-        b0: 50.0,
-        b1: 80.0 - 40.0 * open,
-        reach: r,
-        t,
-        w: 2.0 * r,
-    })?;
-    if layers == 2 {
-        b.ring(at, &Ring {
+    b.ring(
+        at,
+        &Ring {
             n: petals,
-            rot: step / 2.0,
+            rot: 0.0,
             hub: r_hub,
             r0: 0.0,
-            z0: top - 1.6,
-            b0: 62.0,
-            b1: 84.0 - 24.0 * open,
-            reach: 0.72 * r,
+            z0: top - 2.0,
+            b0: 50.0,
+            b1: 80.0 - 40.0 * open,
+            reach: r,
             t,
             w: 2.0 * r,
-        })?;
+        },
+    )?;
+    if layers == 2 {
+        b.ring(
+            at,
+            &Ring {
+                n: petals,
+                rot: step / 2.0,
+                hub: r_hub,
+                r0: 0.0,
+                z0: top - 1.6,
+                b0: 62.0,
+                b1: 84.0 - 24.0 * open,
+                reach: 0.72 * r,
+                t,
+                w: 2.0 * r,
+            },
+        )?;
     }
     // Inner petals: a spiral of curved walls round the bud, each a little smaller and
     // turned on by the golden angle.
@@ -392,7 +467,15 @@ fn rose(b: &mut Build, p: &Value) -> Result<Value> {
         let f = k as f64 / inner.max(1) as f64;
         let ro = r_wall * (1.0 - 0.55 * f);
         let h = r * (0.55 - 0.15 * f);
-        b.wall(at, (137.5 * k as f64).to_radians(), 220.0, ro - 0.9, ro, top - 0.3, top + h);
+        b.wall(
+            at,
+            (137.5 * k as f64).to_radians(),
+            220.0,
+            ro - 0.9,
+            ro,
+            top - 0.3,
+            top + h,
+        );
         r_min = ro - 0.9;
     }
     // The bud: a short column with a round top (a cap taller than it is wide would bulge
@@ -400,11 +483,23 @@ fn rose(b: &mut Build, p: &Value) -> Result<Value> {
     let rb = (r_min - 0.15).max(0.8);
     let hb = r * 0.3;
     if hb > rb {
-        b.rod([at[0], at[1], top - 0.3], [0.0, 0.0, 1.0], hb - rb + 0.3, rb);
+        b.rod(
+            [at[0], at[1], top - 0.3],
+            [0.0, 0.0, 1.0],
+            hb - rb + 0.3,
+            rb,
+        );
     }
     // Not taller than its rim is wide, so it never bulges past the column.
-    b.cap(at, top + (hb - rb).max(0.0) - 0.05, rb - 0.05, (rb.min(hb) - 0.1).max(0.3));
-    Ok(json!({"size": size, "petals": petals, "layers": layers, "open": open, "inner": inner, "stem_height": sh, "base": dims(&b.base)}))
+    b.cap(
+        at,
+        top + (hb - rb).max(0.0) - 0.05,
+        rb - 0.05,
+        (rb.min(hb) - 0.1).max(0.3),
+    );
+    Ok(
+        json!({"size": size, "petals": petals, "layers": layers, "open": open, "inner": inner, "stem_height": sh, "base": dims(&b.base)}),
+    )
 }
 
 fn daisy(b: &mut Build, p: &Value) -> Result<Value> {
@@ -421,21 +516,26 @@ fn daisy(b: &mut Build, p: &Value) -> Result<Value> {
     let top = b.hub(at, sh, r_hub, 2.8);
     let step = 2.0 * PI / petals as f64;
     let um = 0.65 * r;
-    b.ring(at, &Ring {
-        n: petals,
-        rot: 0.0,
-        hub: r_hub,
-        r0: 0.0,
-        z0: top - 1.4,
-        b0: cup,
-        b1: cup + 4.0,
-        reach: r,
-        t: 1.2,
-        w: pw * 2.0 * um * (step / 2.0).sin() * 0.95,
-    })?;
+    b.ring(
+        at,
+        &Ring {
+            n: petals,
+            rot: 0.0,
+            hub: r_hub,
+            r0: 0.0,
+            z0: top - 1.4,
+            b0: cup,
+            b1: cup + 4.0,
+            reach: r,
+            t: 1.2,
+            w: pw * 2.0 * um * (step / 2.0).sin() * 0.95,
+        },
+    )?;
     // The centre: a round tile, a little raised.
     b.rod([at[0], at[1], top - 0.5], [0.0, 0.0, 1.0], 1.6, centre * r);
-    Ok(json!({"size": size, "petals": petals, "cup": cup, "petal_width": pw, "centre": centre, "stem_height": sh, "base": dims(&b.base)}))
+    Ok(
+        json!({"size": size, "petals": petals, "cup": cup, "petal_width": pw, "centre": centre, "stem_height": sh, "base": dims(&b.base)}),
+    )
 }
 
 fn aster(b: &mut Build, p: &Value) -> Result<Value> {
@@ -455,22 +555,27 @@ fn aster(b: &mut Build, p: &Value) -> Result<Value> {
         let f = i as f64;
         let reach = r * (1.0 - 0.22 * f);
         let um = 0.7 * reach;
-        b.ring(at, &Ring {
-            n: petals,
-            rot: f * step / 2.0,
-            hub: r_hub,
-            r0: 0.0,
-            z0: top - 1.4 - 0.8 * (rings as f64 - 1.0 - f),
-            b0: (cup + 20.0 * f).min(75.0),
-            b1: (cup + 20.0 * f + 6.0).min(80.0),
-            reach,
-            t: 1.0,
-            w: pw * 2.0 * um * (step / 2.0).sin(),
-        })?;
+        b.ring(
+            at,
+            &Ring {
+                n: petals,
+                rot: f * step / 2.0,
+                hub: r_hub,
+                r0: 0.0,
+                z0: top - 1.4 - 0.8 * (rings as f64 - 1.0 - f),
+                b0: (cup + 20.0 * f).min(75.0),
+                b1: (cup + 20.0 * f + 6.0).min(80.0),
+                reach,
+                t: 1.0,
+                w: pw * 2.0 * um * (step / 2.0).sin(),
+            },
+        )?;
     }
     // Raised centre.
     b.cap(at, top - 0.2, r_hub - 0.2, 0.45 * r_hub + 0.6);
-    Ok(json!({"size": size, "rings": rings, "petals": petals, "cup": cup, "petal_width": pw, "stem_height": sh, "base": dims(&b.base)}))
+    Ok(
+        json!({"size": size, "rings": rings, "petals": petals, "cup": cup, "petal_width": pw, "stem_height": sh, "base": dims(&b.base)}),
+    )
 }
 
 fn gerbera(b: &mut Build, p: &Value) -> Result<Value> {
@@ -488,23 +593,28 @@ fn gerbera(b: &mut Build, p: &Value) -> Result<Value> {
     let step = 2.0 * PI / petals as f64;
     for (i, reach) in [(0usize, r), (1, 0.82 * r)] {
         let um = 0.7 * reach;
-        b.ring(at, &Ring {
-            n: petals,
-            rot: i as f64 * step / 2.0,
-            hub: r_hub,
-            r0: 0.0,
-            z0: top - 1.4 - 0.8 * (1 - i) as f64,
-            b0: cup + 14.0 * i as f64,
-            b1: cup + 4.0 + 14.0 * i as f64,
-            reach,
-            t: 1.0,
-            w: pw * 2.0 * um * (step / 2.0).sin(),
-        })?;
+        b.ring(
+            at,
+            &Ring {
+                n: petals,
+                rot: i as f64 * step / 2.0,
+                hub: r_hub,
+                r0: 0.0,
+                z0: top - 1.4 - 0.8 * (1 - i) as f64,
+                b0: cup + 14.0 * i as f64,
+                b1: cup + 4.0 + 14.0 * i as f64,
+                reach,
+                t: 1.0,
+                w: pw * 2.0 * um * (step / 2.0).sin(),
+            },
+        )?;
     }
     // A dark centre disc with a low dome.
     b.rod([at[0], at[1], top - 0.5], [0.0, 0.0, 1.0], 1.4, r_hub);
     b.cap(at, top + 0.7, r_hub * 0.7, r_hub * 0.35);
-    Ok(json!({"size": size, "petals": petals, "cup": cup, "petal_width": pw, "centre": centre, "stem_height": sh, "base": dims(&b.base)}))
+    Ok(
+        json!({"size": size, "petals": petals, "cup": cup, "petal_width": pw, "centre": centre, "stem_height": sh, "base": dims(&b.base)}),
+    )
 }
 
 fn poppy(b: &mut Build, p: &Value) -> Result<Value> {
@@ -518,25 +628,32 @@ fn poppy(b: &mut Build, p: &Value) -> Result<Value> {
     let r = size / 2.0;
     let r_hub = (centre * r).max(2.4);
     let top = b.hub(at, sh, r_hub, 2.0);
-    b.ring(at, &Ring {
-        n: petals,
-        rot: PI / 4.0,
-        hub: r_hub,
-        r0: 0.0,
-        z0: top - 1.6,
-        b0: 48.0,
-        b1: 72.0 - 30.0 * open,
-        reach: r,
-        t: 1.2,
-        w: 2.0 * r,
-    })?;
+    b.ring(
+        at,
+        &Ring {
+            n: petals,
+            rot: PI / 4.0,
+            hub: r_hub,
+            r0: 0.0,
+            z0: top - 1.6,
+            b0: 48.0,
+            b1: 72.0 - 30.0 * open,
+            reach: r,
+            t: 1.2,
+            w: 2.0 * r,
+        },
+    )?;
     // A flat centre with spokes: a disc, then an eight-point star on it.
     b.rod([at[0], at[1], top - 0.5], [0.0, 0.0, 1.0], 1.0, r_hub);
     let n = b.name("Spokes");
     let mut star = Vec::new();
     for k in 0..16 {
         let a = PI * k as f64 / 8.0 + 0.01;
-        let rr = if k % 2 == 0 { r_hub * 0.95 } else { r_hub * 0.35 };
+        let rr = if k % 2 == 0 {
+            r_hub * 0.95
+        } else {
+            r_hub * 0.35
+        };
         star.push([at[0] + rr * a.cos(), at[1] + rr * a.sin()]);
     }
     b.c.extend([
@@ -549,7 +666,9 @@ fn poppy(b: &mut Build, p: &Value) -> Result<Value> {
         ),
     ]);
     b.cap(at, top + 1.1, r_hub * 0.3, r_hub * 0.25);
-    Ok(json!({"size": size, "petals": petals, "open": open, "centre": centre, "stem_height": sh, "base": dims(&b.base)}))
+    Ok(
+        json!({"size": size, "petals": petals, "open": open, "centre": centre, "stem_height": sh, "base": dims(&b.base)}),
+    )
 }
 
 fn cornflower(b: &mut Build, p: &Value) -> Result<Value> {
@@ -570,12 +689,20 @@ fn cornflower(b: &mut Build, p: &Value) -> Result<Value> {
     for k in 0..florets {
         let phi = 2.0 * PI * k as f64 / florets as f64 + 1e-4 * k as f64;
         let axis = [e.cos() * phi.cos(), e.cos() * phi.sin(), e.sin()];
-        let from = [at[0] + 0.4 * r_hub * phi.cos(), at[1] + 0.4 * r_hub * phi.sin(), top - 1.3];
+        let from = [
+            at[0] + 0.4 * r_hub * phi.cos(),
+            at[1] + 0.4 * r_hub * phi.sin(),
+            top - 1.3,
+        ];
         let l = len + 0.01 * k as f64;
         b.cone(from, axis, l, 0.9, mouth);
         // Hollow the mouth into a trumpet: a cone cut in from just past the rim.
         let out = 0.5;
-        let start = [from[0] + axis[0] * (l + out), from[1] + axis[1] * (l + out), from[2] + axis[2] * (l + out)];
+        let start = [
+            from[0] + axis[0] * (l + out),
+            from[1] + axis[1] * (l + out),
+            from[2] + axis[2] * (l + out),
+        ];
         let n = b.name("Mouth");
         b.c.push(cmd(
             "solid.cone",
@@ -589,7 +716,11 @@ fn cornflower(b: &mut Build, p: &Value) -> Result<Value> {
     let mut star = Vec::new();
     for k in 0..16 {
         let a = PI * k as f64 / 8.0 + 0.05;
-        let rr = if k % 2 == 0 { r_hub * 0.85 } else { r_hub * 0.4 };
+        let rr = if k % 2 == 0 {
+            r_hub * 0.85
+        } else {
+            r_hub * 0.4
+        };
         star.push([at[0] + rr * a.cos(), at[1] + rr * a.sin()]);
     }
     b.c.extend([
@@ -601,11 +732,17 @@ fn cornflower(b: &mut Build, p: &Value) -> Result<Value> {
             json!({"sketch": n, "name": format!("{n}Solid"), "distance": r6(0.12 * size + 0.4), "operation": "join", "targets": ["Part"]}),
         ),
     ]);
-    Ok(json!({"size": size, "florets": florets, "angle": angle, "stem_height": sh, "base": dims(&b.base)}))
+    Ok(
+        json!({"size": size, "florets": florets, "angle": angle, "stem_height": sh, "base": dims(&b.base)}),
+    )
 }
 
 fn spike(b: &mut Build, p: &Value) -> Result<Value> {
-    let kind = p.get("kind").and_then(Value::as_str).unwrap_or("lupin").to_string();
+    let kind = p
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("lupin")
+        .to_string();
     if !["snapdragon", "lupin", "lavender", "larkspur"].contains(&kind.as_str()) {
         return Err(CustomError::InvalidShape(
             "`kind` is snapdragon, lupin, lavender or larkspur".into(),
@@ -633,39 +770,75 @@ fn spike(b: &mut Build, p: &Value) -> Result<Value> {
     b.stem(at, z_top, rs);
     let dz = height / rings as f64;
     for k in 0..rings {
-        let f = if rings > 1 { k as f64 / (rings - 1) as f64 } else { 0.0 };
+        let f = if rings > 1 {
+            k as f64 / (rings - 1) as f64
+        } else {
+            0.0
+        };
         let s = fs * (1.0 - taper * f);
         let z = z_first + dz * (k as f64 + 0.3);
         let off = if k % 2 == 1 { PI / per as f64 } else { 0.0 };
         for j in 0..per {
             let phi = off + 2.0 * PI * j as f64 / per as f64 + 1e-4 * (k * per + j) as f64;
             let (sp, cp) = phi.sin_cos();
-            let out = |rad: f64, up: f64| [at[0] + rad * cp, at[1] + rad * sp, z + up + 0.002 * j as f64];
+            let out = |rad: f64, up: f64| {
+                [
+                    at[0] + rad * cp,
+                    at[1] + rad * sp,
+                    z + up + 0.002 * j as f64,
+                ]
+            };
             match kind.as_str() {
                 // Pods: a cone rising steeply outward from the stem, pointed.
                 "lupin" => {
                     let e = 68f64.to_radians();
-                    b.cone(out(0.0, 0.0), [e.cos() * cp, e.cos() * sp, e.sin()], s * 1.3 + rs * 0.5, (s * 0.42).min(rs - 0.05), 0.0);
+                    b.cone(
+                        out(0.0, 0.0),
+                        [e.cos() * cp, e.cos() * sp, e.sin()],
+                        s * 1.3 + rs * 0.5,
+                        (s * 0.42).min(rs - 0.05),
+                        0.0,
+                    );
                 }
                 // Bells: a frustum flaring out and up.
                 "snapdragon" => {
                     let e = 68f64.to_radians();
-                    b.cone(out(0.0, 0.0), [e.cos() * cp, e.cos() * sp, e.sin()], s * 1.2 + rs, s * 0.18, s * 0.45);
+                    b.cone(
+                        out(0.0, 0.0),
+                        [e.cos() * cp, e.cos() * sp, e.sin()],
+                        s * 1.2 + rs,
+                        s * 0.18,
+                        s * 0.45,
+                    );
                 }
                 // Buds: little balls tight on the stem.
                 "lavender" => b.sphere(out(rs + s * 0.15, 0.0), s * 0.35),
                 // Open florets: a short, wide frustum facing out and up.
                 _ => {
                     let e = 66f64.to_radians();
-                    b.cone(out(0.0, 0.0), [e.cos() * cp, e.cos() * sp, e.sin()], s * 0.9 + rs, s * 0.2, s * 0.5);
+                    b.cone(
+                        out(0.0, 0.0),
+                        [e.cos() * cp, e.cos() * sp, e.sin()],
+                        s * 0.9 + rs,
+                        s * 0.2,
+                        s * 0.5,
+                    );
                 }
             }
             b.florets += 1;
         }
     }
     // A pointed tip.
-    b.cone([at[0], at[1], z_top - 0.2], [0.0, 0.0, 1.0], fs * (1.0 - taper) + 1.0, rs, 0.0);
-    Ok(json!({"kind": kind, "height": height, "rings": rings, "florets_per_ring": per, "taper": taper, "floret_size": fs, "stem_height": sh, "base": dims(&b.base)}))
+    b.cone(
+        [at[0], at[1], z_top - 0.2],
+        [0.0, 0.0, 1.0],
+        fs * (1.0 - taper) + 1.0,
+        rs,
+        0.0,
+    );
+    Ok(
+        json!({"kind": kind, "height": height, "rings": rings, "florets_per_ring": per, "taper": taper, "floret_size": fs, "stem_height": sh, "base": dims(&b.base)}),
+    )
 }
 
 fn umbel(b: &mut Build, p: &Value) -> Result<Value> {
@@ -692,11 +865,17 @@ fn umbel(b: &mut Build, p: &Value) -> Result<Value> {
         let axis = [l.sin() * phi.cos(), l.sin() * phi.sin(), l.cos()];
         let from = [at[0], at[1], z + 0.5];
         b.rod(from, axis, len, 0.55);
-        let end = [from[0] + axis[0] * len, from[1] + axis[1] * len, from[2] + axis[2] * len];
+        let end = [
+            from[0] + axis[0] * len,
+            from[1] + axis[1] * len,
+            from[2] + axis[2] * len,
+        ];
         b.sphere(end, cl);
         b.florets += 1;
     }
-    Ok(json!({"rays": rays, "spread": spread, "ray_length": len, "cluster": cl, "stem_height": sh, "base": dims(&b.base)}))
+    Ok(
+        json!({"rays": rays, "spread": spread, "ray_length": len, "cluster": cl, "stem_height": sh, "base": dims(&b.base)}),
+    )
 }
 
 fn fern(b: &mut Build, p: &Value) -> Result<Value> {
@@ -749,7 +928,12 @@ fn fern(b: &mut Build, p: &Value) -> Result<Value> {
     let outline: Vec<P2> = left.into_iter().chain(right).collect();
     let plane = |b: &mut Build, prefix: &str| -> String {
         let n = b.name(prefix);
-        b.c.push(sketch_on(&n, [at[0], at[1], 0.0], [dv[0], dv[1], 0.0], [0.0, 0.0, 1.0]));
+        b.c.push(sketch_on(
+            &n,
+            [at[0], at[1], 0.0],
+            [dv[0], dv[1], 0.0],
+            [0.0, 0.0, 1.0],
+        ));
         n
     };
     let n = plane(b, "Rib");
@@ -787,7 +971,9 @@ fn fern(b: &mut Build, p: &Value) -> Result<Value> {
             b.florets += 1;
         }
     }
-    Ok(json!({"length": length, "pairs": pairs, "curl": curl, "leaflet_length": ll, "leaflet_width": lw, "angle": angle, "thickness": t, "direction": dname, "base": dims(&b.base)}))
+    Ok(
+        json!({"length": length, "pairs": pairs, "curl": curl, "leaflet_length": ll, "leaflet_width": lw, "angle": angle, "thickness": t, "direction": dname, "base": dims(&b.base)}),
+    )
 }
 
 fn stem_template(b: &mut Build, p: &Value) -> Result<Value> {
@@ -795,9 +981,15 @@ fn stem_template(b: &mut Build, p: &Value) -> Result<Value> {
     let d = num(p, "diameter", 3.2, 1.6, 6.0)?;
     let angle = num(p, "angle", 0.0, 0.0, 60.0)?;
     let (dname, dv) = dir_param(p, "+x", false)?;
-    let top = p.get("top").and_then(Value::as_str).unwrap_or("none").to_string();
+    let top = p
+        .get("top")
+        .and_then(Value::as_str)
+        .unwrap_or("none")
+        .to_string();
     if !["none", "knob", "bud"].contains(&top.as_str()) {
-        return Err(CustomError::InvalidShape("`top` is none, knob or bud".into()));
+        return Err(CustomError::InvalidShape(
+            "`top` is none, knob or bud".into(),
+        ));
     }
     b.base = base_param(p, [2, 1])?;
     let at = base_centre(&b.base);
@@ -806,20 +998,34 @@ fn stem_template(b: &mut Build, p: &Value) -> Result<Value> {
     let len = plates * 3.2 / l.cos() + SINK;
     let from = [at[0], at[1], BASE_HEIGHT - SINK];
     b.rod(from, axis, len, d / 2.0);
-    let end = [from[0] + axis[0] * len, from[1] + axis[1] * len, from[2] + axis[2] * len];
+    let end = [
+        from[0] + axis[0] * len,
+        from[1] + axis[1] * len,
+        from[2] + axis[2] * len,
+    ];
     match top.as_str() {
         "knob" => b.sphere(end, d * 0.7),
         "bud" => {
             // A 45° collar out to the bud's width (no ledge to print onto air), then a point.
             let back = d * 0.4;
-            let s0 = [end[0] - axis[0] * back, end[1] - axis[1] * back, end[2] - axis[2] * back];
+            let s0 = [
+                end[0] - axis[0] * back,
+                end[1] - axis[1] * back,
+                end[2] - axis[2] * back,
+            ];
             b.cone(s0, axis, d * 0.32 + 0.01, d / 2.0, d * 0.75);
-            let s1 = [s0[0] + axis[0] * d * 0.32, s0[1] + axis[1] * d * 0.32, s0[2] + axis[2] * d * 0.32];
+            let s1 = [
+                s0[0] + axis[0] * d * 0.32,
+                s0[1] + axis[1] * d * 0.32,
+                s0[2] + axis[2] * d * 0.32,
+            ];
             b.cone(s1, axis, d * 2.0, d * 0.75, 0.0);
         }
         _ => {}
     }
-    Ok(json!({"height": plates, "diameter": d, "angle": angle, "direction": dname, "top": top, "base": dims(&b.base)}))
+    Ok(
+        json!({"height": plates, "diameter": d, "angle": angle, "direction": dname, "top": top, "base": dims(&b.base)}),
+    )
 }
 
 #[cfg(test)]

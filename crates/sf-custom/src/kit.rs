@@ -218,7 +218,14 @@ impl Cmds {
 
     /// A closed outline in a sketch on `plane` extruded `dist` (or, `symmetric`, `dist` in
     /// all centred on the plane).
-    pub fn prism(&mut self, plane: Value, outline: Vec<Value>, dist: f64, symmetric: bool, cut: bool) {
+    pub fn prism(
+        &mut self,
+        plane: Value,
+        outline: Vec<Value>,
+        dist: f64,
+        symmetric: bool,
+        cut: bool,
+    ) {
         let n = self.name("Sk");
         let mut s = plane;
         s["params"]["name"] = json!(n);
@@ -240,7 +247,11 @@ impl Cmds {
     pub fn cylinder(&mut self, base: [f64; 3], axis: [f64; 3], len: f64, r: f64, cut: bool) {
         let n = self.name("Cyl");
         let mut p = json!({"radius": r6(r), "height": r6(len), "base": p3(base), "axis": p3(axis), "name": n});
-        if cut { Self::cut(&mut p) } else { self.op(&mut p) }
+        if cut {
+            Self::cut(&mut p)
+        } else {
+            self.op(&mut p)
+        }
         self.c.push(cmd("solid.cylinder", p));
     }
 
@@ -251,14 +262,22 @@ impl Cmds {
         if r1 > 0.0 {
             p["top_radius"] = json!(r6(r1));
         }
-        if cut { Self::cut(&mut p) } else { self.op(&mut p) }
+        if cut {
+            Self::cut(&mut p)
+        } else {
+            self.op(&mut p)
+        }
         self.c.push(cmd("solid.cone", p));
     }
 
     pub fn boxy(&mut self, lo: [f64; 3], size: [f64; 3], cut: bool) {
         let n = self.name("Box");
         let mut p = json!({"length": r6(size[0]), "width": r6(size[1]), "height": r6(size[2]), "corner": p3(lo), "name": n});
-        if cut { Self::cut(&mut p) } else { self.op(&mut p) }
+        if cut {
+            Self::cut(&mut p)
+        } else {
+            self.op(&mut p)
+        }
         self.c.push(cmd("solid.box", p));
     }
 
@@ -267,7 +286,12 @@ impl Cmds {
     pub fn revolve(&mut self, at: P2, dir: f64, outline: Vec<Value>, angle: f64) {
         let n = self.name("Rev");
         let (s, c) = dir.sin_cos();
-        self.c.push(sketch_on(&n, [at[0], at[1], 0.0], [c, s, 0.0], [0.0, 0.0, 1.0]));
+        self.c.push(sketch_on(
+            &n,
+            [at[0], at[1], 0.0],
+            [c, s, 0.0],
+            [0.0, 0.0, 1.0],
+        ));
         self.c.extend(outline);
         self.c.push(cmd("sketch.finish", json!({})));
         let mut p = json!({"sketch": n, "axis": {"origin": p3([at[0], at[1], 0.0]), "dir": [0, 0, 1]}, "name": format!("{n}Solid")});
@@ -302,7 +326,13 @@ impl Cmds {
         let n0 = -(ro - 0.3);
         let n1 = -(ro + neck);
         let corners = [rot([n0, -hw]), rot([n0, hw]), rot([n1, hw]), rot([n1, -hw])];
-        self.prism(sketch_xy("", z0), vec![closed(&corners)], spec.height, false, false);
+        self.prism(
+            sketch_xy("", z0),
+            vec![closed(&corners)],
+            spec.height,
+            false,
+            false,
+        );
         let far = rot([n1, 0.0]);
         [far[0], far[1], z0 + spec.height / 2.0]
     }
@@ -337,26 +367,59 @@ impl Cmds {
     pub fn peg(&mut self, base: [f64; 3], up: f64) {
         let tip_z = base[2] + up * PEG_LEN;
         let z0 = base[2].min(tip_z);
-        self.cylinder([base[0], base[1], z0], [0.0, 0.0, 1.0], PEG_LEN, PEG_D / 2.0, false);
+        self.cylinder(
+            [base[0], base[1], z0],
+            [0.0, 0.0, 1.0],
+            PEG_LEN,
+            PEG_D / 2.0,
+            false,
+        );
         // The slot, from the tip back to 0.4 mm short of the root, its inner end a 45° roof
         // (a pointing-down peg prints the slot's end as a ceiling, which must not be flat).
         let depth = PEG_LEN - 0.4;
         // Roof sides at 50° (45° sits right on the overhang limit).
         let h = PEG_SLOT / 2.0;
         let rh = h * 1.2;
-        let (z_open, z_end) = if up > 0.0 { (tip_z + 0.5, tip_z - depth) } else { (tip_z - 0.5, tip_z + depth) };
-        let profile = if up > 0.0 {
-            vec![[-h, z_open], [-h, z_end + rh], [0.0, z_end], [h, z_end + rh], [h, z_open]]
+        let (z_open, z_end) = if up > 0.0 {
+            (tip_z + 0.5, tip_z - depth)
         } else {
-            vec![[-h, z_open], [h, z_open], [h, z_end - rh], [0.0, z_end], [-h, z_end - rh]]
+            (tip_z - 0.5, tip_z + depth)
         };
-        let plane = sketch_on("", [base[0], base[1], 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
+        let profile = if up > 0.0 {
+            vec![
+                [-h, z_open],
+                [-h, z_end + rh],
+                [0.0, z_end],
+                [h, z_end + rh],
+                [h, z_open],
+            ]
+        } else {
+            vec![
+                [-h, z_open],
+                [h, z_open],
+                [h, z_end - rh],
+                [0.0, z_end],
+                [-h, z_end - rh],
+            ]
+        };
+        let plane = sketch_on(
+            "",
+            [base[0], base[1], 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+        );
         self.prism(plane, vec![closed(&profile)], 2.0 * PEG_D, true, true);
     }
 
     /// A vertical hole Ø[`HOLE_D`] down from `top`, `depth` deep.
     pub fn hole(&mut self, top: [f64; 3], depth: f64) {
-        self.cylinder([top[0], top[1], top[2] - depth], [0.0, 0.0, 1.0], depth + 1.0, HOLE_D / 2.0, true);
+        self.cylinder(
+            [top[0], top[1], top[2] - depth],
+            [0.0, 0.0, 1.0],
+            depth + 1.0,
+            HOLE_D / 2.0,
+            true,
+        );
     }
 
     /// A collar that slides down a [`BAR_D`] bar and stays put: a ring with 0.15 mm
@@ -376,20 +439,38 @@ impl Cmds {
     pub fn collar_bore(&mut self, at: P2, z0: f64, h: f64, blind: bool) {
         let rb = BAR_D / 2.0 + 0.15;
         let depth = if blind { h - 1.0 - rb * 1.2 } else { h + 1.0 };
-        self.cylinder([at[0], at[1], z0 - 0.5], [0.0, 0.0, 1.0], depth + 0.5, rb, true);
+        self.cylinder(
+            [at[0], at[1], z0 - 0.5],
+            [0.0, 0.0, 1.0],
+            depth + 0.5,
+            rb,
+            true,
+        );
         if blind {
             // A 50° roof over the bore, not a flat ceiling.
-            self.cone([at[0], at[1], z0 + depth - 0.01], [0.0, 0.0, 1.0], rb * 1.2, rb, 0.0, true);
+            self.cone(
+                [at[0], at[1], z0 + depth - 0.01],
+                [0.0, 0.0, 1.0],
+                rb * 1.2,
+                rb,
+                0.0,
+                true,
+            );
         }
         for k in 0..3 {
             let a = 2.0 * PI * k as f64 / 3.0 + 0.3;
             let (s, c) = a.sin_cos();
             // A rib from 0.2 mm inside the bore wall out into it.
             let inner = rb - 0.2;
-            let pts: Vec<P2> = [[inner, -0.3], [rb + 0.3, -0.3], [rb + 0.3, 0.3], [inner, 0.3]]
-                .iter()
-                .map(|p| [at[0] + p[0] * c - p[1] * s, at[1] + p[0] * s + p[1] * c])
-                .collect();
+            let pts: Vec<P2> = [
+                [inner, -0.3],
+                [rb + 0.3, -0.3],
+                [rb + 0.3, 0.3],
+                [inner, 0.3],
+            ]
+            .iter()
+            .map(|p| [at[0] + p[0] * c - p[1] * s, at[1] + p[0] * s + p[1] * c])
+            .collect();
             let top = if blind { h - 1.0 } else { h };
             self.prism(sketch_xy("", z0), vec![closed(&pts)], top, false, false);
         }
@@ -407,12 +488,18 @@ pub(crate) struct Iso {
 
 impl Iso {
     pub fn translate(t: [f64; 3]) -> Self {
-        Self { r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], t }
+        Self {
+            r: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            t,
+        }
     }
     /// Turned `a` about the vertical, then moved by `t`.
     pub fn rz(a: f64, t: [f64; 3]) -> Self {
         let (s, c) = a.sin_cos();
-        Self { r: [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], t }
+        Self {
+            r: [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]],
+            t,
+        }
     }
     pub fn apply(&self, p: [f64; 3]) -> [f64; 3] {
         let r = &self.r;
@@ -432,7 +519,10 @@ impl Iso {
                 r[i][j] = (0..3).map(|k| other.r[i][k] * self.r[k][j]).sum();
             }
         }
-        Iso { r, t: other.apply(self.t) }
+        Iso {
+            r,
+            t: other.apply(self.t),
+        }
     }
 }
 
@@ -450,6 +540,9 @@ pub(crate) struct PartDef {
     pub copies: Vec<Iso>,
     /// Why it prints the way it does (kept in the source for the record).
     pub orientation: String,
+    /// For a part on a socket base: commands run after the base's tubes (see
+    /// [`build_on_base`]).
+    pub post: Vec<Value>,
 }
 
 /// A kit, before it is built.
@@ -459,18 +552,31 @@ pub(crate) struct KitDef {
     pub roles: Vec<(&'static str, &'static str)>,
     /// The socket base's cells (in the assembled frame).
     pub sockets: Vec<(i32, i32)>,
+    /// How it goes on a stem, in the assembled frame (mm).
+    pub mount: Option<crate::stem::MountMm>,
 }
 
 /// A part's print, from its recorded source (`{"kit_part": {"base": [...]|null,
-/// "commands": [...]}}`).
+/// "commands": [...], "post"?: [...]}}`).
 pub fn build_kit_part(source: &Value) -> Result<CustomPart> {
-    let kp = source.get("kit_part").ok_or_else(|| CustomError::InvalidShape("not a kit part source".into()))?;
-    let cmds: Vec<Value> = kp.get("commands").and_then(Value::as_array).cloned().unwrap_or_default();
+    let kp = source
+        .get("kit_part")
+        .ok_or_else(|| CustomError::InvalidShape("not a kit part source".into()))?;
+    let cmds: Vec<Value> = kp
+        .get("commands")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let post: Vec<Value> = kp
+        .get("post")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     match kp.get("base").filter(|b| !b.is_null()) {
         Some(b) => {
             let base: Vec<(i32, i32)> = serde_json::from_value(b.clone())
                 .map_err(|e| CustomError::InvalidShape(format!("kit part base: {e}")))?;
-            build_on_base(&base, &cmds, false)
+            build_on_base(&base, &cmds, &post, false)
         }
         None => build_plain(&cmds),
     }
@@ -498,12 +604,20 @@ pub(crate) fn build_plain(cmds: &[Value]) -> Result<CustomPart> {
         });
     }
     if trace {
-        eprintln!("exporting a part of {} commands, volume {:.1} mm³", cmds.len(), m.volume);
+        eprintln!(
+            "exporting a part of {} commands, volume {:.1} mm³",
+            cmds.len(),
+            m.volume
+        );
     }
     let t = std::time::Instant::now();
     let part = finish(&mut s, "Kit part", None, None);
     if trace {
-        eprintln!("exported ({} commands) in {:.2} s", cmds.len(), t.elapsed().as_secs_f64());
+        eprintln!(
+            "exported ({} commands) in {:.2} s",
+            cmds.len(),
+            t.elapsed().as_secs_f64()
+        );
     }
     part
 }
@@ -555,12 +669,18 @@ pub(crate) fn build_kit(name: &str, label: &str, def: KitDef, source: Value) -> 
             .iter()
             .map(|pd| {
                 scope.spawn(move || match &pd.base {
-                    Some(b) => build_on_base(b, &pd.cmds, false),
+                    Some(b) => build_on_base(b, &pd.cmds, &pd.post, false),
                     None => build_plain(&pd.cmds),
                 })
             })
             .collect();
-        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| Err(CustomError::Export("a part's build panicked".into())))).collect()
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err(CustomError::Export("a part's build panicked".into())))
+            })
+            .collect()
     });
     let mut prints = Vec::new();
     for (pd, r) in def.parts.iter().zip(results) {
@@ -606,11 +726,20 @@ pub(crate) fn build_kit(name: &str, label: &str, def: KitDef, source: Value) -> 
     let d = f64::from(cells_u8.iter().map(|c| c.1).max().unwrap_or(0)) + 1.0;
     let top = f64::from(plates) * p.plate_height;
     // The assembled frame's origin: the top centre of the occupied box.
-    let origin = [f64::from(si) * p.pitch + w * 4.0, f64::from(sj) * p.pitch + d * 4.0, top];
+    let origin = [
+        f64::from(si) * p.pitch + w * 4.0,
+        f64::from(sj) * p.pitch + d * 4.0,
+        top,
+    ];
     // Meshes: each part about its connection point, cut to its share of the budget.
     // Display meshes: the part on the base up to 6000 triangles, every other part its share
     // of 30 000 (1500 to 5000), so an assembled flower stays under about 35 000.
-    let loose: usize = def.parts.iter().filter(|p| p.base.is_none()).map(|p| p.copies.len()).sum();
+    let loose: usize = def
+        .parts
+        .iter()
+        .filter(|p| p.base.is_none())
+        .map(|p| p.copies.len())
+        .sum();
     let based_budget = 6000.min(DISPLAY_TRIANGLES);
     let loose_budget = (30_000 / loose.max(1)).clamp(1500, 5000);
     let mut kit_parts = Vec::new();
@@ -622,10 +751,21 @@ pub(crate) fn build_kit(name: &str, label: &str, def: KitDef, source: Value) -> 
             let l = to_ldu([v[0] - c[0], v[1] - c[1], v[2] - c[2]]);
             [l[0] as f32, l[1] as f32, l[2] as f32]
         })?;
-        let mesh = decimate(&mesh, if pd.base.is_some() { based_budget } else { loose_budget });
+        let mesh = decimate(
+            &mesh,
+            if pd.base.is_some() {
+                based_budget
+            } else {
+                loose_budget
+            },
+        );
         // Overhang above the bed (a based part: above its socket's ceiling, whose bridges
         // print like any plate's).
-        let above = if pd.base.is_some() { BASE_HEIGHT - p.top_thickness + 0.05 } else { 0.3 };
+        let above = if pd.base.is_some() {
+            BASE_HEIGHT - p.top_thickness + 0.05
+        } else {
+            0.3
+        };
         let over = overhang_area(&pr.stl, above);
         overhangs.push(over);
         let mut copies = Vec::new();
@@ -646,7 +786,11 @@ pub(crate) fn build_kit(name: &str, label: &str, def: KitDef, source: Value) -> 
             role: pd.role.clone(),
             mesh,
             source: DetailSource {
-                source: json!({"kit_part": {"base": pd.base, "commands": pd.cmds, "orientation": pd.orientation}}),
+                source: if pd.post.is_empty() {
+                    json!({"kit_part": {"base": pd.base, "commands": pd.cmds, "orientation": pd.orientation}})
+                } else {
+                    json!({"kit_part": {"base": pd.base, "commands": pd.cmds, "post": pd.post, "orientation": pd.orientation}})
+                },
             },
             supports: over > SUPPORT_AREA_MM2,
             copies,
@@ -659,30 +803,51 @@ pub(crate) fn build_kit(name: &str, label: &str, def: KitDef, source: Value) -> 
             .into_iter()
             .map(|(parts, note)| KitStep { parts, note })
             .collect(),
-        roles: def.roles.iter().map(|(r, c)| (r.to_string(), c.to_string())).collect(),
+        roles: def
+            .roles
+            .iter()
+            .map(|(r, c)| (r.to_string(), c.to_string()))
+            .collect(),
     };
     let design = DetailDesign {
         name: name.into(),
         label: label.into(),
         cells: cells_u8,
-        plates: u8::try_from(plates).map_err(|_| CustomError::InvalidShape("kit too tall".into()))?,
+        plates: u8::try_from(plates)
+            .map_err(|_| CustomError::InvalidShape("kit too tall".into()))?,
         sockets: sockets_u8,
         studs: Vec::new(),
         mesh: assembled,
         source: DetailSource { source },
         kit: Some(kit),
-        mount: None,
+        mount: def.mount.map(|m| m.to_ldu(origin)),
+        stem: None,
     };
-    Ok(BuiltKit { design, prints, overhangs })
+    Ok(BuiltKit {
+        design,
+        prints,
+        overhangs,
+    })
 }
 
 fn prefix(key: &str, e: CustomError) -> CustomError {
     match e {
         CustomError::InvalidShape(s) => CustomError::InvalidShape(format!("{key}: {s}")),
-        CustomError::Mismatch { stage, details } => CustomError::Mismatch { stage: format!("{key}: {stage}"), details },
-        CustomError::Engine { stage, index, command, message } => {
-            CustomError::Engine { stage: format!("{key}: {stage}"), index, command, message }
-        }
+        CustomError::Mismatch { stage, details } => CustomError::Mismatch {
+            stage: format!("{key}: {stage}"),
+            details,
+        },
+        CustomError::Engine {
+            stage,
+            index,
+            command,
+            message,
+        } => CustomError::Engine {
+            stage: format!("{key}: {stage}"),
+            index,
+            command,
+            message,
+        },
         CustomError::Export(s) => CustomError::Export(format!("{key}: {s}")),
         other => other,
     }
@@ -730,17 +895,29 @@ pub fn coupon() -> Vec<(String, Vec<Value>)> {
     let mut c = Cmds::default();
     c.boxy([0.0, -3.0, 0.0], [48.0, 3.0, 2.0], false);
     for (k, i) in [0.0, 0.05, 0.10, 0.15].iter().enumerate() {
-        let spec = ClipSpec { interference: *i, ..ClipSpec::default() };
+        let spec = ClipSpec {
+            interference: *i,
+            ..ClipSpec::default()
+        };
         let x = 6.0 + 12.0 * k as f64;
         let centre = [x, spec.r_out() + 1.0];
         c.clip(centre, 0.0, PI / 2.0, &spec, 1.0 + 0.3);
         for dot in 0..=k {
-            c.cylinder([x - 3.0 + 1.6 * dot as f64, -1.5, 1.9], [0.0, 0.0, 1.0], 0.6, 0.45, false);
+            c.cylinder(
+                [x - 3.0 + 1.6 * dot as f64, -1.5, 1.9],
+                [0.0, 0.0, 1.0],
+                0.6,
+                0.45,
+                false,
+            );
         }
     }
     out.push(("clip_strip".to_string(), c.c));
     for i in [0.0, 0.05, 0.10, 0.15] {
-        let spec = ClipSpec { interference: i, ..ClipSpec::default() };
+        let spec = ClipSpec {
+            interference: i,
+            ..ClipSpec::default()
+        };
         let mut s = Cmds::default();
         s.clip([0.0, 0.0], 0.0, PI / 2.0, &spec, 3.0);
         out.push((format!("clip_i{:03}", (i * 100.0).round() as i32), s.c));
@@ -759,17 +936,30 @@ mod tests {
         assert!(f.snap_strain <= MAX_STRAIN && f.snap_strain > 0.02, "{f:?}");
         assert!(f.grip_strain < f.snap_strain);
         // The coupon's tightest clip (0.15 mm) is there to find the limit: just over 3 %.
-        let tight = clip_fit(&ClipSpec { interference: 0.15, ..ClipSpec::default() });
-        assert!(tight.snap_strain > MAX_STRAIN && tight.snap_strain < 0.035, "{tight:?}");
+        let tight = clip_fit(&ClipSpec {
+            interference: 0.15,
+            ..ClipSpec::default()
+        });
+        assert!(
+            tight.snap_strain > MAX_STRAIN && tight.snap_strain < 0.035,
+            "{tight:?}"
+        );
         // A thick, short-jawed clip would crack.
-        let stiff = clip_fit(&ClipSpec { wall: 1.4, neck_half_angle: 60.0, ..ClipSpec::default() });
+        let stiff = clip_fit(&ClipSpec {
+            wall: 1.4,
+            neck_half_angle: 60.0,
+            ..ClipSpec::default()
+        });
         assert!(!stiff.ok());
     }
 
     #[test]
     fn peg_presses_in_within_strain() {
         let f = peg_fit();
-        assert!(f.strain < MAX_STRAIN && f.interference > 0.0 && f.thinnest >= MIN_FEATURE, "{f:?}");
+        assert!(
+            f.strain < MAX_STRAIN && f.interference > 0.0 && f.thinnest >= MIN_FEATURE,
+            "{f:?}"
+        );
     }
 
     #[test]
@@ -785,7 +975,9 @@ mod tests {
         let v = [0.3, -0.7, 1.1];
         let lhs = to_ldu(a.then(&Iso::translate([-1.0, 0.0, 0.0])).apply(v));
         let lv = to_ldu(v);
-        let rhs: Vec<f64> = (0..3).map(|i| (0..3).map(|k| f64::from(r[i][k]) * lv[k]).sum()).collect();
+        let rhs: Vec<f64> = (0..3)
+            .map(|i| (0..3).map(|k| f64::from(r[i][k]) * lv[k]).sum())
+            .collect();
         for i in 0..3 {
             assert!((lhs[i] - rhs[i]).abs() < 1e-5, "{lhs:?} {rhs:?}");
         }

@@ -234,7 +234,7 @@ fn balance(model: &Model) -> Balance {
     Balance { ok: margin >= 0.25, center_of_mass: com, margin }
 }
 
-fn convex_hull(mut pts: Vec<(f32, f32)>) -> Vec<(f32, f32)> {
+pub(crate) fn convex_hull(mut pts: Vec<(f32, f32)>) -> Vec<(f32, f32)> {
     pts.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
     pts.dedup();
     if pts.len() < 3 {
@@ -262,7 +262,7 @@ fn convex_hull(mut pts: Vec<(f32, f32)>) -> Vec<(f32, f32)> {
 }
 
 /// Positive inside a counter-clockwise convex polygon, negative outside.
-fn signed_distance(hull: &[(f32, f32)], p: (f32, f32)) -> f32 {
+pub(crate) fn signed_distance(hull: &[(f32, f32)], p: (f32, f32)) -> f32 {
     if hull.len() < 3 {
         return -1.0;
     }

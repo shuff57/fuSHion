@@ -1,8 +1,9 @@
-//! Write the sample pamphlet: `cargo run --release -p sf-pamphlet --example sample -- [out.pdf]`.
+//! Write a sample pamphlet: `cargo run --release -p sf-pamphlet --example sample -- [out.pdf]
+//! [bouquet]` (the flower pot by default, or the three-stem bouquet).
 
 use sf_core::Palette;
 use sf_ldraw::MeshLibrary;
-use sf_pamphlet::{PamphletOptions, sample::sample_model, write_pamphlet};
+use sf_pamphlet::{PamphletOptions, sample::{bouquet_model, sample_model}, write_pamphlet};
 
 fn main() -> anyhow::Result<()> {
     let out = std::env::args().nth(1).unwrap_or_else(|| "/tmp/fork-d-sample.pdf".into());
@@ -15,7 +16,8 @@ fn main() -> anyhow::Result<()> {
         ..Default::default()
     };
     let t = std::time::Instant::now();
-    let info = write_pamphlet(&sample_model(), &Palette::builtin(), &meshes, &opts, out.as_ref())?;
+    let model = if std::env::args().nth(2).as_deref() == Some("bouquet") { bouquet_model() } else { sample_model() };
+    let info = write_pamphlet(&model, &Palette::builtin(), &meshes, &opts, out.as_ref())?;
     println!("{out}: {info:?} in {:.2?} (LDraw library: {})", t.elapsed(), !meshes.is_procedural());
     Ok(())
 }

@@ -177,6 +177,7 @@ fn box_detail() -> (sf_core::CustomDef, sf_core::DetailMesh) {
         mesh: sf_core::DetailMesh { positions, indices },
         kit: None,
         mount: None,
+        stem: None,
         source: sf_core::DetailSource { source: serde_json::Value::Null },
     };
     (design.instance("D001"), design.mesh)
@@ -316,6 +317,7 @@ fn kit_details_draw_their_parts_in_role_colours() {
         source: sf_core::DetailSource { source: serde_json::Value::Null },
         kit: Some(kit.clone()),
         mount: None,
+        stem: None,
     };
     let mut m = model(vec![printed(design.instance("D001"), RED, Cell::new(0, 0, 0))]);
     m.meshes.insert("flower".into(), design.mesh.clone());
@@ -546,4 +548,303 @@ fn curved_sample_png() {
     m.meshes.insert("dome".into(), dome_mesh(24));
     let o = RenderOptions { view_size: 300, edges: true, background: [236, 238, 241] };
     render_sheet(&m, &Palette::builtin(), &lib, &[View::Iso, View::Front], &o).save(path).unwrap();
+}
+
+// ---- Stems (bouquets) --------------------------------------------------------------------
+
+const GREEN: ColorId = 2;
+const YELLOW: ColorId = 14;
+
+fn rot_z(deg: f32) -> [[f32; 3]; 3] {
+    let (s, c) = deg.to_radians().sin_cos();
+    [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]
+}
+
+fn mat3(a: [[f32; 3]; 3], b: [[f32; 3]; 3]) -> [[f32; 3]; 3] {
+    std::array::from_fn(|i| std::array::from_fn(|j| (0..3).map(|k| a[i][k] * b[k][j]).sum()))
+}
+
+/// The design's lowest point (largest y) below its origin, LDU.
+fn bottom_y(d: &sf_core::DetailMesh) -> f32 {
+    d.positions.iter().map(|p| p[1]).fold(f32::MIN, f32::max)
+}
+
+/// A head on the stem's tip (`branch` None) or a branch's: the design's bottom on the tip,
+/// its -Y along the tip.
+fn head_at(stem: &sf_core::StemPlacement, branch: Option<usize>, design: &str, mesh: &sf_core::DetailMesh, color: ColorId) -> sf_core::StemAttach {
+    let d = &stem.def;
+    let (tip, t) = match branch {
+        None => (d.point(d.length), d.tangent(d.length)),
+        Some(i) => (d.branch_point(i, d.branches[i].length), d.branch_tangent(i, d.branches[i].length)),
+    };
+    let r = rot_z(t[0].atan2(-t[1]).to_degrees());
+    let local = KitPose { rotation: r, position: sub(tip, mat_vec(r, [0.0, bottom_y(mesh), 0.0])) };
+    sf_core::StemAttach {
+        design: design.into(),
+        color,
+        colors: Default::default(),
+        pose: pose_then(&stem.pose, &local),
+        bar: None,
+        branch,
+    }
+}
+
+fn head_on(stem: &sf_core::StemPlacement, design: &str, mesh: &sf_core::DetailMesh, color: ColorId) -> sf_core::StemAttach {
+    head_at(stem, None, design, mesh, color)
+}
+
+/// A leaf clipped on bar `bar`, turned `side` degrees about the stem and tilted out.
+fn leaf_on(stem: &sf_core::StemPlacement, bar: usize, side: f32, design: &str, color: ColorId) -> sf_core::StemAttach {
+    let d = &stem.def;
+    let s = d.bars[bar].at;
+    let along = rot_z(d.bend * s / d.length);
+    let spin = yaw(side);
+    let tilt = rot_z(-30.0);
+    let local = KitPose { rotation: mat3(along, mat3(spin, tilt)), position: d.point(s) };
+    sf_core::StemAttach {
+        design: design.into(),
+        color,
+        colors: Default::default(),
+        pose: pose_then(&stem.pose, &local),
+        bar: Some(bar),
+        branch: None,
+    }
+}
+
+struct Designs {
+    /// (name, assembled mesh, kit) for two heads and a leaf.
+    heads: [(String, sf_core::DetailMesh, Option<sf_core::Kit>); 2],
+    leaf: (String, sf_core::DetailMesh, Option<sf_core::Kit>),
+}
+
+fn stub_designs() -> Designs {
+    // A plain box head, the flower kit (assembled mesh: a disc-ish box), and a flat leaf
+    // reaching out along +x from its clip.
+    let flower = flower_kit();
+    Designs {
+        heads: [
+            ("bud".into(), box_mesh([-12.0, -4.0, -12.0], [12.0, 20.0, 12.0]), None),
+            ("flower".into(), box_mesh([-32.0, -6.0, -32.0], [32.0, 2.0, 32.0]), Some(flower)),
+        ],
+        leaf: ("leaf".into(), box_mesh([0.0, -2.0, -8.0], [50.0, 2.0, 8.0]), None),
+    }
+}
+
+/// A brick vase (three 2 × 4 bricks), a printed hub on it, and three stems: straight with
+/// a box head, bent with a kit head, and one with two leaves.
+fn bouquet(ds: &Designs) -> Model {
+    let mut m = model(
+        (0..3).map(|i| Placement::new("3001", BLUE, Cell::new(0, 3 * i, 0), Rot(0))).collect(),
+    );
+    let hub_mesh = box_mesh([-20.0, 0.0, -20.0], [20.0, 8.0, 20.0]);
+    let hub = sf_core::DetailDesign {
+        name: "hub".into(),
+        label: "hub".into(),
+        cells: vec![(0, 0), (1, 0), (0, 1), (1, 1)],
+        plates: 1,
+        sockets: vec![(0, 0), (1, 0), (0, 1), (1, 1)],
+        studs: vec![],
+        mesh: hub_mesh.clone(),
+        source: sf_core::DetailSource { source: serde_json::Value::Null },
+        kit: None,
+        mount: None,
+        stem: None,
+    };
+    let hub_pl = printed(hub.instance("D001"), GREEN, Cell::new(1, 9, 0));
+    let (top, _) = hub_pl.ldraw_transform();
+    m.placements.push(hub_pl);
+    m.meshes.insert("hub".into(), hub_mesh);
+    for (name, mesh, kit) in ds.heads.iter().chain([&ds.leaf]) {
+        m.meshes.insert(name.clone(), mesh.clone());
+        if let Some(k) = kit {
+            m.kits.insert(name.clone(), k.clone());
+        }
+    }
+    let stem = |def: sf_core::StemDef, lean: f32, turn: f32, hole: u32| sf_core::StemPlacement {
+        def,
+        color: GREEN,
+        pose: KitPose { rotation: mat3(yaw(turn), rot_z(lean)), position: top },
+        hub: "D001".into(),
+        hole,
+        head: None,
+        branch_heads: vec![],
+        leaves: vec![],
+    };
+    let def = |id: &str, length: f32, bend: f32, bars: Vec<sf_core::StemBar>| sf_core::StemDef {
+        id: id.into(),
+        length,
+        bend,
+        tip_bar: 8.0,
+        bars,
+        diameter: sf_core::stem::STEM_D,
+        tip: None,
+        branches: vec![],
+        style: String::new(),
+    };
+    let mut straight = stem(def("S01", 120.0, 0.0, vec![]), 0.0, 0.0, 1);
+    straight.head = Some(head_on(&straight, &ds.heads[0].0, &ds.heads[0].1, YELLOW));
+    let mut bent = stem(def("S02", 140.0, 35.0, vec![]), 10.0, 0.0, 2);
+    bent.head = Some(head_on(&bent, &ds.heads[1].0, &ds.heads[1].1, RED));
+    let bars = vec![sf_core::StemBar { at: 40.0, length: 8.0 }, sf_core::StemBar { at: 70.0, length: 8.0 }];
+    let mut leafy = stem(def("S03", 110.0, 15.0, bars), 12.0, 180.0, 3);
+    leafy.leaves = vec![leaf_on(&leafy, 0, 0.0, &ds.leaf.0, GREEN), leaf_on(&leafy, 1, 180.0, &ds.leaf.0, GREEN)];
+    let branch = |at: f32, angle: f32, length: f32, bend: f32, tip_bar: f32, tip: Option<sf_core::StemTip>| sf_core::StemBranch {
+        at,
+        angle,
+        length,
+        bend,
+        diameter: None,
+        tip_bar,
+        tip,
+    };
+    // A daisy sprig: a bare main stem forking into three branches, each with a daisy.
+    let mut sprig_def = def("S04", 90.0, -10.0, vec![]);
+    sprig_def.tip_bar = 6.0;
+    sprig_def.style = "daisy sprig".into();
+    sprig_def.branches = vec![branch(55.0, 35.0, 50.0, -10.0, 6.0, None), branch(70.0, -40.0, 40.0, 10.0, 6.0, None)];
+    let mut sprig = stem(sprig_def, -18.0, 60.0, 4);
+    let (name, mesh) = (&ds.heads[1].0, &ds.heads[1].1);
+    sprig.head = Some(head_on(&sprig, name, mesh, WHITE));
+    sprig.branch_heads = (0..2).map(|i| head_at(&sprig, Some(i), name, mesh, WHITE)).collect();
+    // Lavender: a thin brown stem branching into sprigs, every end a bud.
+    let bud = Some(sf_core::StemTip::Bud { length: 16.0, width: 4.5 });
+    let mut lav_def = def("S05", 130.0, 8.0, vec![]);
+    lav_def.tip_bar = 0.0;
+    lav_def.diameter = 4.0;
+    lav_def.tip = bud;
+    lav_def.style = "lavender sprig".into();
+    lav_def.branches = vec![
+        branch(80.0, 25.0, 40.0, -8.0, 0.0, bud),
+        branch(90.0, -25.0, 35.0, 8.0, 0.0, bud),
+        branch(100.0, 20.0, 25.0, -5.0, 0.0, bud),
+        branch(108.0, -20.0, 20.0, 5.0, 0.0, bud),
+    ];
+    let mut lavender = stem(lav_def, 15.0, -120.0, 5);
+    lavender.color = BROWN;
+    // Grass: a fan of blades, no head.
+    let blade = |l: f32| Some(sf_core::StemTip::Blade { length: l, width: 6.0 });
+    let mut grass_def = def("S06", 50.0, 0.0, vec![]);
+    grass_def.tip_bar = 0.0;
+    grass_def.tip = blade(60.0);
+    grass_def.style = "grass".into();
+    grass_def.branches = vec![
+        branch(10.0, 30.0, 30.0, 20.0, 0.0, blade(50.0)),
+        branch(10.0, -30.0, 30.0, -20.0, 0.0, blade(50.0)),
+        branch(20.0, 50.0, 20.0, 25.0, 0.0, blade(35.0)),
+        branch(20.0, -50.0, 20.0, -25.0, 0.0, blade(35.0)),
+    ];
+    let grass = stem(grass_def, 8.0, 150.0, 6);
+    m.stems = vec![straight, bent, leafy, sprig, lavender, grass];
+    m
+}
+
+const WHITE: ColorId = 15;
+const BROWN: ColorId = 70;
+
+fn greenish(c: [u8; 3]) -> bool {
+    c[1] > 40 && c[1] as u32 > c[0] as u32 + 20 && c[1] as u32 > c[2] as u32 + 10
+}
+
+#[test]
+fn stems_render_with_their_heads_and_leaves_above_the_vase() {
+    let lib = MeshLibrary::procedural();
+    let ds = stub_designs();
+    let m = bouquet(&ds);
+    let pal = Palette::builtin();
+    let front = render_view(&m, &pal, &lib, View::Front, &opts(160));
+    // The vase alone fills the frame; with stems it is framed small at the bottom.
+    let vase = bbox_of(&front, bluish).expect("vase");
+    let all = bbox_of(&front, |c| c != [0, 0, 0]).unwrap();
+    assert!(all.1 + 40 < vase.1, "stems reach well above the vase: {all:?} {vase:?}");
+    assert!(all.1 > 0 && all.3 < 159, "everything framed: {all:?}");
+    assert!(count(&front, greenish) > 100, "stems, hub and leaves drawn");
+    assert!(count(&front, yellowish) > 30, "the box head");
+    let brownish = |c: [u8; 3]| c[0] > 50 && c[0] as u32 > c[1] as u32 + 15 && c[1] > c[2] && c[0] < 200;
+    assert!(count(&front, brownish) > 30, "the lavender stem");
+    // The kit head draws its parts in their role colours: red petals, a yellow hub part.
+    let top = render_view(&m, &pal, &lib, View::Top, &opts(160));
+    assert!(count(&top, reddish) > 30);
+    // Without the designs' meshes the stems still draw, the heads don't.
+    let mut bare = m.clone();
+    bare.meshes.retain(|k, _| k == "hub");
+    bare.kits.clear();
+    let img = render_view(&bare, &pal, &lib, View::Front, &opts(160));
+    assert_eq!(count(&img, yellowish), 0);
+    assert!(count(&img, greenish) > 50);
+    // stems_bounds covers the heads, far above the vase's top (y = -72 at the hub's foot).
+    let (lo, _) = stems_bounds(&m).unwrap();
+    assert!(lo[1] < -72.0 - 120.0 * 2.5, "{lo:?}");
+}
+
+#[test]
+fn stem_thumbnails() {
+    let lib = MeshLibrary::procedural();
+    let ds = stub_designs();
+    let m = bouquet(&ds);
+    let pal = Palette::builtin();
+    // Laid flat as printed, seen from the top: a long thin green shape, base at the bottom.
+    let flat = render_stem(&m.stems[0].def, GREEN, &pal, &lib, View::Top, &opts(128));
+    let b = bbox_of(&flat, greenish).expect("stem drawn");
+    assert!(b.3 - b.1 > 8 * (b.2 - b.0), "long and thin from above: {b:?}");
+    // ... and lying flat: from the side it is long and low.
+    let side = render_stem(&m.stems[0].def, GREEN, &pal, &lib, View::Left, &opts(128));
+    let sb = bbox_of(&side, greenish).unwrap();
+    assert!(sb.2 - sb.0 > 8 * (sb.3 - sb.1), "{sb:?}");
+    // The assembly stands upright in the stem's own frame: head above the stem.
+    let asm = render_stem_assembly(&m.stems[0], &m, &pal, &lib, View::Front, &opts(128));
+    let (head, stem) = (bbox_of(&asm, yellowish).unwrap(), bbox_of(&asm, greenish).unwrap());
+    assert!(head.3 <= stem.1 + 4 && cy(head) < cy(stem), "{head:?} {stem:?}");
+    let leafy = render_stem_assembly(&m.stems[2], &m, &pal, &lib, View::Front, &opts(128));
+    let lb = bbox_of(&leafy, greenish).unwrap();
+    let mut bare = m.stems[2].clone();
+    bare.leaves.clear();
+    let plain = render_stem_assembly(&bare, &m, &pal, &lib, View::Front, &opts(128));
+    let pb = bbox_of(&plain, greenish).unwrap();
+    assert!(lb.2 - lb.0 > pb.2 - pb.0 + 6, "leaves reach out: {lb:?} vs {pb:?}");
+}
+
+#[test]
+fn pose_helpers_invert() {
+    let p = KitPose { rotation: mat3(yaw(30.0), rot_z(20.0)), position: [5.0, -7.0, 3.0] };
+    let id = pose_then(&p, &pose_inverse(&p));
+    for i in 0..3 {
+        assert!(id.position[i].abs() < 1e-4);
+        for j in 0..3 {
+            assert!((id.rotation[i][j] - if i == j { 1.0 } else { 0.0 }).abs() < 1e-5);
+        }
+    }
+}
+
+/// Writes the bouquet renders when FUSHION_STEMS_DIR is set, with the real flower designs
+/// from FUSHION_STEMS_DESIGNS (a session's `details/` folder) if given.
+#[test]
+fn stems_sample_pngs() {
+    let Ok(dir) = std::env::var("FUSHION_STEMS_DIR") else { return };
+    let mut ds = stub_designs();
+    if let Ok(src) = std::env::var("FUSHION_STEMS_DESIGNS") {
+        let load = |n: &str| {
+            let d: sf_core::DetailDesign =
+                serde_json::from_str(&std::fs::read_to_string(format!("{src}/{n}.json")).unwrap()).unwrap();
+            (d.name, d.mesh, d.kit)
+        };
+        ds.heads = [load("magenta_rose"), load("daisy")];
+        ds.leaf = load("big_leaf");
+    }
+    let m = bouquet(&ds);
+    let lib = MeshLibrary::open_default().unwrap_or_else(|_| MeshLibrary::procedural());
+    let pal = Palette::builtin();
+    let o = RenderOptions { view_size: 480, edges: true, background: [236, 238, 241] };
+    std::fs::create_dir_all(&dir).unwrap();
+    for (v, name) in [(View::Front, "front"), (View::Iso, "iso"), (View::Top, "top")] {
+        render_view(&m, &pal, &lib, v, &o).save(format!("{dir}/{name}.png")).unwrap();
+    }
+    render_sheet(&m, &pal, &lib, &[View::Front, View::Iso, View::Top, View::Left], &o).save(format!("{dir}/sheet.png")).unwrap();
+    // A session folder with the model, for looking at it in the app.
+    std::fs::create_dir_all(format!("{dir}/session")).unwrap();
+    std::fs::write(format!("{dir}/session/model.json"), serde_json::to_string(&m).unwrap()).unwrap();
+    let t = RenderOptions { view_size: 256, ..o.clone() };
+    for (i, s) in m.stems.iter().enumerate() {
+        render_stem(&s.def, s.color, &pal, &lib, View::Top, &t).save(format!("{dir}/stem{}-flat.png", i + 1)).unwrap();
+        render_stem_assembly(s, &m, &pal, &lib, View::Iso, &t).save(format!("{dir}/stem{}-assembly.png", i + 1)).unwrap();
+    }
 }

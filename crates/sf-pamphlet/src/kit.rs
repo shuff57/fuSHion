@@ -23,9 +23,16 @@ pub struct SubBuild {
     pub part_colors: Vec<ColorId>,
     /// Placements (indices into the model) that use it.
     pub uses: Vec<usize>,
+    /// Stems (indices into `Model::stems`) carrying it as a head or leaf, once per use.
+    pub stem_uses: Vec<usize>,
 }
 
 impl SubBuild {
+    /// How many to build.
+    pub fn count(&self) -> usize {
+        self.uses.len() + self.stem_uses.len()
+    }
+
     /// Key used for the parts-list entry and step callouts of the finished detail.
     pub fn key(&self, index: usize) -> String {
         format!("kit#{index}")
@@ -40,25 +47,55 @@ pub fn kit_of<'a>(model: &'a Model, p: &'a Placement) -> Option<(&'a str, &'a Ki
     Some((k.as_str(), kit, name.as_str()))
 }
 
-/// Groups the model's kit uses into sub-builds (same design, same colour for every role),
-/// in the order they first appear in `steps`.
+/// Groups the model's kit uses into sub-builds (same design, same colour for every role):
+/// placements in the order they first appear in `steps`, then stems' heads and leaves.
 pub fn sub_builds(model: &Model, steps: &[Vec<usize>], palette: &Palette) -> Vec<SubBuild> {
     let mut out: Vec<SubBuild> = Vec::new();
     let empty = BTreeMap::new();
+    let mut add = |design: &str, kit: &Kit, label: &str, main: ColorId, overrides: &BTreeMap<String, ColorId>, use_: Result<usize, usize>| {
+        let colors = kit_role_colors(kit, main, overrides, palette);
+        let i = match out.iter().position(|s| s.design == design && s.colors == colors && s.main == main) {
+            Some(i) => i,
+            None => {
+                let part_colors = kit.parts.iter().map(|part| colors.get(&part.role).copied().unwrap_or(main)).collect();
+                out.push(SubBuild {
+                    design: design.to_string(),
+                    label: label.to_string(),
+                    main,
+                    colors,
+                    part_colors,
+                    uses: Vec::new(),
+                    stem_uses: Vec::new(),
+                });
+                out.len() - 1
+            }
+        };
+        match use_ {
+            Ok(p) => out[i].uses.push(p),
+            Err(s) => out[i].stem_uses.push(s),
+        }
+    };
     for &i in steps.iter().flatten() {
         let Some(p) = model.placements.get(i) else { continue };
         let Some((design, kit, label)) = kit_of(model, p) else { continue };
         let overrides = p.custom.as_deref().map(|d| &d.colors).unwrap_or(&empty);
-        let colors = kit_role_colors(kit, p.color, overrides, palette);
-        match out.iter_mut().find(|s| s.design == design && s.colors == colors && s.main == p.color) {
-            Some(s) => s.uses.push(i),
-            None => {
-                let part_colors = kit.parts.iter().map(|part| colors.get(&part.role).copied().unwrap_or(p.color)).collect();
-                out.push(SubBuild { design: design.to_string(), label: label.to_string(), main: p.color, colors, part_colors, uses: vec![i] })
+        add(design, kit, label, p.color, overrides, Ok(i));
+    }
+    for (si, sp) in model.stems.iter().enumerate() {
+        for a in crate::stem::attachments(sp) {
+            if let Some((design, kit)) = model.kits.get_key_value(&a.design) {
+                add(design, kit, &crate::stem::humanize(design), a.color, &a.colors, Err(si));
             }
         }
     }
     out
+}
+
+/// The sub-build of a stem's head or leaf, if it is a kit.
+pub fn of_attach(subs: &[SubBuild], model: &Model, a: &sf_core::StemAttach, palette: &Palette) -> Option<usize> {
+    let kit = model.kits.get(&a.design)?;
+    let colors = kit_role_colors(kit, a.color, &a.colors, palette);
+    subs.iter().position(|s| s.design == a.design && s.main == a.color && s.colors == colors)
 }
 
 /// How far the exploded picture pulls pieces apart (1.0 doubles every distance).

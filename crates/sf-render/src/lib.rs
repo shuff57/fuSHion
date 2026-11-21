@@ -15,7 +15,7 @@ mod raster;
 
 use image::{Rgba, RgbaImage};
 use raster::{SVert, Target};
-use sf_core::{ColorId, Fill, Kit, KitPart, KitPose, Model, Palette, Placement, VoxelGrid};
+use sf_core::{ColorId, Fill, Kit, KitPart, KitPose, Model, Palette, Placement, StemAttach, StemDef, StemPlacement, VoxelGrid};
 use sf_ldraw::{MAIN_COLOR, MeshLibrary, PartMesh};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -227,14 +227,34 @@ impl<'a> Colors<'a> {
 pub fn render_view(model: &Model, palette: &Palette, meshes: &MeshLibrary, view: View, opts: &RenderOptions) -> RgbaImage {
     let size = opts.view_size.max(8);
     let mut target = Target::new(size as usize, size as usize, opts.background);
-    if let Some((lo, hi)) = model_bounds(model) {
+    // Stems, and the heads and leaves on them, reach well above the bricks.
+    let stems = model_stem_items(model, palette, meshes);
+    if let Some((lo, hi)) = union_bounds(model_bounds(model), items_bounds(&stems)) {
         let cam = Camera::fit(view, lo, hi, size);
-        draw_model(&mut target, &cam, model, palette, meshes, opts.edges);
+        draw_model(&mut target, &cam, model, palette, meshes, opts.edges, &stems);
     }
     to_image(&target)
 }
 
-fn draw_model(target: &mut Target, cam: &Camera, model: &Model, palette: &Palette, meshes: &MeshLibrary, edges: bool) {
+fn union_bounds(a: Option<([f32; 3], [f32; 3])>, b: Option<([f32; 3], [f32; 3])>) -> Option<([f32; 3], [f32; 3])> {
+    match (a, b) {
+        (Some((a0, a1)), Some((b0, b1))) => Some((
+            [0, 1, 2].map(|i| a0[i].min(b0[i])),
+            [0, 1, 2].map(|i| a1[i].max(b1[i])),
+        )),
+        (a, b) => a.or(b),
+    }
+}
+
+fn draw_model(
+    target: &mut Target,
+    cam: &Camera,
+    model: &Model,
+    palette: &Palette,
+    meshes: &MeshLibrary,
+    edges: bool,
+    extra: &[KitItem],
+) {
     let mut projected: HashMap<(String, u8), Option<Arc<Projected>>> = HashMap::new();
     let mut colors = Colors::new(palette);
     let mut warned: Vec<&str> = Vec::new();
@@ -287,6 +307,15 @@ fn draw_model(target: &mut Target, cam: &Camera, model: &Model, palette: &Palett
         draw_projected(target, &proj, o, main, &mut colors);
         if edges && !proj.edges.is_empty() {
             edge_queue.push((proj, o, edge_color(main)));
+        }
+    }
+    // Stems and what is attached to them.
+    for it in extra {
+        let proj = Arc::new(project_mesh(cam, &it.mesh, it.m, edges));
+        let o = cam.project(it.pos);
+        draw_projected(target, &proj, o, it.rgb, &mut colors);
+        if edges && !proj.edges.is_empty() {
+            edge_queue.push((proj, o, edge_color(it.rgb)));
         }
     }
     let (alpha, bias) = (cam.edge_alpha(), cam.edge_bias());
@@ -721,6 +750,143 @@ pub fn render_kit_exploded(
     spread: f32,
 ) -> RgbaImage {
     let items = kit_items(kit, colors, palette, meshes, spread, |_, _| Some(false));
+    render_items(&items, None, palette, view, opts)
+}
+
+// ---- Stems: bouquets ----------------------------------------------------------------------
+
+const IDENTITY_POSE: KitPose = KitPose { rotation: IDENTITY, position: [0.0; 3] };
+
+/// `a` after `b`: the pose of something placed by `b` inside a frame placed by `a`
+/// (`v ↦ a.R·(b.R·v + b.t) + a.t`).
+pub fn pose_then(a: &KitPose, b: &KitPose) -> KitPose {
+    let (rotation, position) = compose(a.rotation, a.position, b);
+    KitPose { rotation, position }
+}
+
+/// The inverse of a rigid pose.
+pub fn pose_inverse(p: &KitPose) -> KitPose {
+    let r = p.rotation;
+    let rt = [[r[0][0], r[1][0], r[2][0]], [r[0][1], r[1][1], r[2][1]], [r[0][2], r[1][2], r[2][2]]];
+    KitPose { rotation: rt, position: mul(mat_vec(rt, p.position), -1.0) }
+}
+
+/// A head or leaf on a stem, placed by `frame ∘ att.pose`: every copy of a kit's parts in
+/// their role colours, or the design's single mesh in the attachment's colour. A design
+/// missing from the model is skipped.
+fn attach_items(att: &StemAttach, frame: &KitPose, model: &Model, palette: &Palette, meshes: &MeshLibrary, out: &mut Vec<KitItem>) {
+    let pose = pose_then(frame, &att.pose);
+    if let Some(kit) = model.kits.get(&att.design) {
+        for part in &kit.parts {
+            let (_, mesh) = meshes.detail(&part.mesh);
+            let code = kit.role_color(&part.role, att.color, &att.colors, |n| palette.resolve(n));
+            let rgb = palette.rgb(code);
+            for copy in &part.copies {
+                let p = pose_then(&pose, copy);
+                out.push(KitItem { mesh: mesh.clone(), m: p.rotation, pos: p.position, rgb });
+            }
+        }
+    } else if let Some(d) = model.meshes.get(&att.design) {
+        let (_, mesh) = meshes.detail(d);
+        out.push(KitItem { mesh, m: pose.rotation, pos: pose.position, rgb: palette.rgb(att.color) });
+    }
+}
+
+/// A stem with its head and leaves, placed by `frame ∘ stem.pose`.
+fn stem_items(stem: &StemPlacement, frame: &KitPose, model: &Model, palette: &Palette, meshes: &MeshLibrary, out: &mut Vec<KitItem>) {
+    let pose = pose_then(frame, &stem.pose);
+    let (_, mesh) = meshes.stem(&stem.def);
+    out.push(KitItem { mesh, m: pose.rotation, pos: pose.position, rgb: palette.rgb(stem.color) });
+    for att in stem.head.iter().chain(&stem.branch_heads).chain(&stem.leaves) {
+        attach_items(att, frame, model, palette, meshes, out);
+    }
+}
+
+fn model_stem_items(model: &Model, palette: &Palette, meshes: &MeshLibrary) -> Vec<KitItem> {
+    let mut out = Vec::new();
+    for stem in &model.stems {
+        stem_items(stem, &IDENTITY_POSE, model, palette, meshes, &mut out);
+    }
+    out
+}
+
+/// Bounds (LDU, model frame) of the model's stems with their heads and leaves, from the
+/// stems' centrelines and the designs' meshes: for framing a camera without building
+/// meshes. `None` without stems.
+pub fn stems_bounds(model: &Model) -> Option<([f32; 3], [f32; 3])> {
+    let mut lo = [f32::MAX; 3];
+    let mut hi = [f32::MIN; 3];
+    let mut grow = |p: [f32; 3], pad: f32| {
+        for i in 0..3 {
+            lo[i] = lo[i].min(p[i] - pad);
+            hi[i] = hi[i].max(p[i] + pad);
+        }
+    };
+    let place = |pose: &KitPose, v: [f32; 3]| add(pose.position, mat_vec(pose.rotation, v));
+    for stem in &model.stems {
+        let d = &stem.def;
+        let ldu = sf_core::stem::LDU_PER_MM;
+        // A bud or blade on a bare end reaches its length past it.
+        let tip_pad = |t: &Option<sf_core::StemTip>| match t {
+            Some(sf_core::StemTip::Bud { length, width } | sf_core::StemTip::Blade { length, width }) => length.max(*width) * ldu,
+            None => 0.0,
+        };
+        let r = d.diameter.max(sf_core::stem::STEM_D) / 2.0 * ldu;
+        for i in 0..=16 {
+            grow(place(&stem.pose, d.point(d.length * i as f32 / 16.0)), r);
+        }
+        grow(place(&stem.pose, d.point(d.length)), r + tip_pad(&d.tip));
+        for (b, br) in d.branches.iter().enumerate() {
+            for i in 0..=8 {
+                grow(place(&stem.pose, d.branch_point(b, br.length * i as f32 / 8.0)), r);
+            }
+            grow(place(&stem.pose, d.branch_point(b, br.length)), r + tip_pad(&br.tip));
+        }
+        grow(place(&stem.pose, [0.0, sf_core::stem::PEG_LEN * sf_core::stem::LDU_PER_MM, 0.0]), r);
+        for att in stem.head.iter().chain(&stem.branch_heads).chain(&stem.leaves) {
+            let Some(d) = model.meshes.get(&att.design) else { continue };
+            let Some(first) = d.positions.first() else { continue };
+            let (mut a, mut b) = (*first, *first);
+            for p in &d.positions {
+                for i in 0..3 {
+                    a[i] = a[i].min(p[i]);
+                    b[i] = b[i].max(p[i]);
+                }
+            }
+            for k in 0..8 {
+                let c = [0, 1, 2].map(|i| if k >> i & 1 == 0 { a[i] } else { b[i] });
+                grow(place(&att.pose, c), 0.0);
+            }
+        }
+    }
+    (lo[0] <= hi[0]).then_some((lo, hi))
+}
+
+/// A stem laid flat as it prints (its bend plane on the bed, the flat side down), in
+/// `color`: for the print list and the "parts to print" pages. Best seen from
+/// [`View::Top`] (base at the bottom of the picture) or [`View::Iso`].
+pub fn render_stem(def: &StemDef, color: ColorId, palette: &Palette, meshes: &MeshLibrary, view: View, opts: &RenderOptions) -> RgbaImage {
+    let (_, mesh) = meshes.stem(def);
+    // Stem frame → bed: local X stays, local -Y (up the stem) runs to +Z (away from the
+    // front), local +Z (the flat side) points down (+Y).
+    let flat = [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]];
+    let items = [KitItem { mesh, m: flat, pos: [0.0; 3], rgb: palette.rgb(color) }];
+    render_items(&items, None, palette, view, opts)
+}
+
+/// One stem standing upright in its own frame (the base shoulder at the origin), with its
+/// head and leaves on: for a bouquet sub-build page ("put the rose on stem S03"). `model`
+/// supplies the designs' meshes and kits.
+pub fn render_stem_assembly(
+    stem: &StemPlacement,
+    model: &Model,
+    palette: &Palette,
+    meshes: &MeshLibrary,
+    view: View,
+    opts: &RenderOptions,
+) -> RgbaImage {
+    let mut items = Vec::new();
+    stem_items(stem, &pose_inverse(&stem.pose), model, palette, meshes, &mut items);
     render_items(&items, None, palette, view, opts)
 }
 
