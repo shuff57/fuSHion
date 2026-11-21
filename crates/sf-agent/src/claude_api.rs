@@ -76,10 +76,21 @@ LEGO-compatible bricks. You work by writing a shape spec and calling `build_mode
 places every brick, checks that the model holds together, and shows you six rendered views \
 (front, right, back, left, top, iso, in that order, left to right then top to bottom; reliefs show only top and iso).\n\n\
 Compare each render with the source picture and fix the spec until the model clearly reads as \
-the subject and the report shows no structure issues. Use at most {} builds per request, then \
+the subject and the report shows no structure issues.\n\nBricks alone can't make a petal, a flower, a leaf, an eye or a beak. For every feature \
+like that, design a printed detail part with `design_detail` (a template such as rose, daisy, aster, gerbera, \
+poppy, cornflower, spike, umbel, fern, leaf, petal, stem, dome, cone or round_plate, or your own SolidCraft \
+commands), look at the picture it returns, adjust it until it reads as the feature, then place it with the \
+spec's `details`. For flowers, follow LEGO's Botanical bouquets (10280 Flower Bouquet, 10313 Wildflower \
+Bouquet): each head is a hub with petals around it, often two staggered layers and a separate centre; spike \
+flowers (snapdragon, lupin, lavender, larkspur) stack rings of florets up a stem; foliage is separate leaves \
+and fronds. Match the picture's species, petal count, colours and size; replicate the picture as closely \
+as you can.\n\n\
+Detail templates and their parameters (mm, degrees; base in studs):\n{}\n\n\
+Use at most {} builds per request, then \
 reply with two or three plain sentences: what you built, what you changed last, and anything the \
 user might want to adjust. When the user asks for a change, edit your previous spec rather than \
 starting over.\n\n{}",
+        crate::details::templates_text(),
         max_builds,
         sf_spec::GUIDE
     )
@@ -87,6 +98,19 @@ starting over.\n\n{}",
 
 fn tools() -> Value {
     json!([{
+        "name": "design_detail",
+        "description": "Design a printed detail part with SolidCraft (a flower head, petal, leaf, fern, stem, eye dome, beak or horn, round plate, or your own SolidCraft commands). It is checked, saved under `name`, and returned with a picture from four sides (iso, front, right, top). Place it with the spec's `details`.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Design name (letters, digits, _), used by the spec's `details`."},
+                "label": {"type": "string", "description": "Short human name, e.g. \"red rose\"."},
+                "design": {"type": "object", "description": "{\"template\": name, \"params\": {...}} or {\"commands\": [...], \"cells\": [[0,0],[1,0]], \"plates\": n, \"sockets\": [[0,0],[1,0]]} in the detail frame (column (i,j) spans x 8i..8i+8, y 8j..8j+8 mm, z up from 0; the socket base is built for you, top at z = 3.2 mm)."},
+                "color": {"type": "string", "description": "Colour for the picture."}
+            },
+            "required": ["name", "design"]
+        }
+    }, {
         "name": "build_model",
         "description": "Compile a fuSHion shape spec into real parts, check the structure, and return the report plus a six-view render sheet (front, right, back, left, top, iso). Call it with the complete spec every time.",
         "input_schema": {
@@ -107,6 +131,8 @@ pub struct Conversation {
 /// Start a fresh conversation once this many renders are in it, carrying the
 /// current spec over, so requests stay small.
 const MAX_IMAGES: usize = 16;
+/// Detail designs Claude may make per request.
+const MAX_DESIGNS: u32 = 12;
 
 impl Conversation {
     /// Load the saved conversation. A corrupt file is moved to
@@ -266,8 +292,9 @@ fn run_turn_inner(
     convo.save()?;
 
     let mut builds = 0u32;
+    let mut designs = 0u32;
     let mut final_text = String::new();
-    for _ in 0..(cfg.max_builds + 3) {
+    for _ in 0..(cfg.max_builds + MAX_DESIGNS + 3) {
         let body = json!({
             "model": cfg.model,
             "max_tokens": 16000,
@@ -327,6 +354,25 @@ fn run_turn_inner(
         let mut results = Vec::new();
         for b in tool_uses {
             let id = b["id"].as_str().unwrap_or_default();
+            if b["name"] == "design_detail" {
+                if designs >= MAX_DESIGNS {
+                    results.push(json!({"type": "tool_result", "tool_use_id": id, "is_error": true,
+                        "content": "Detail design limit for this request reached; use the designs you have."}));
+                    continue;
+                }
+                designs += 1;
+                let input = &b["input"];
+                let name = input["name"].as_str().unwrap_or_default();
+                on_event(Event::Text(format!("Designing detail {name}…")));
+                match session.design_detail(&input["design"], name, input["label"].as_str().unwrap_or(""), input["color"].as_str().unwrap_or("")) {
+                    Ok((d, png)) => results.push(json!({"type": "tool_result", "tool_use_id": id, "content": [
+                        {"type": "text", "text": format!("Saved design {}: cells {:?}, sockets {:?}, {} plates tall.", d.name, d.cells, d.sockets, d.plates)},
+                        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": b64(&png)}}
+                    ]})),
+                    Err(e) => results.push(json!({"type": "tool_result", "tool_use_id": id, "is_error": true, "content": format!("{e:#}")})),
+                }
+                continue;
+            }
             if b["name"] != "build_model" {
                 results.push(json!({"type": "tool_result", "tool_use_id": id, "is_error": true,
                     "content": format!("unknown tool {}", b["name"])}));

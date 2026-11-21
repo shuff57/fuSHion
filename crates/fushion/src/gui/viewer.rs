@@ -337,22 +337,51 @@ pub struct SceneInput<'a> {
 }
 
 pub fn build_scene(generation: u64, inp: &SceneInput) -> Scene {
-    let mut batches: HashMap<&str, (Arc<sf_ldraw::PartMesh>, Vec<Instance>)> = HashMap::new();
-    let mut order: Vec<&str> = Vec::new();
+    // Batches by mesh key: a catalog part's id, or a printed part's content key (printed
+    // ids like B001 repeat across models, and the GPU keeps meshes between scenes).
+    let mut batches: HashMap<String, (Arc<sf_ldraw::PartMesh>, Vec<Instance>)> = HashMap::new();
+    let mut order: Vec<String> = Vec::new();
+    // Within one scene: printed brick / detail design → its mesh key.
+    let mut printed_keys: HashMap<String, Option<String>> = HashMap::new();
     let mut overlay = Vec::new();
     if let Some(model) = inp.model {
         for (i, p) in model.placements.iter().enumerate() {
             if !inp.vis.visible.get(i).copied().unwrap_or(true) {
                 continue;
             }
-            let entry = match batches.get_mut(p.part.as_str()) {
+            let local = p.custom.as_deref().map(|def| match &def.kind {
+                sf_core::CustomKind::Brick => sf_ldraw::brick_key(def),
+                sf_core::CustomKind::Detail { mesh, .. } => format!("detail:{mesh}"),
+            });
+            let key = match &local {
+                None => p.part.clone(),
+                Some(l) => match printed_keys.get(l) {
+                    Some(Some(k)) => k.clone(),
+                    Some(None) => continue,
+                    None => match inp.meshes.placement_mesh(p, model) {
+                        Some((k, mesh)) => {
+                            printed_keys.insert(l.clone(), Some(k.clone()));
+                            if !batches.contains_key(&k) {
+                                order.push(k.clone());
+                                batches.insert(k.clone(), (mesh, Vec::new()));
+                            }
+                            k
+                        }
+                        None => {
+                            printed_keys.insert(l.clone(), None);
+                            continue;
+                        }
+                    },
+                },
+            };
+            let entry = match batches.get_mut(&key) {
                 Some(e) => e,
                 None => {
                     let Some(mesh) = inp.meshes.mesh(&p.part) else {
                         continue;
                     };
-                    order.push(p.part.as_str());
-                    batches.entry(p.part.as_str()).or_insert((mesh, Vec::new()))
+                    order.push(key.clone());
+                    batches.entry(key).or_insert((mesh, Vec::new()))
                 }
             };
             let rgb = inp.palette.rgb(p.color);
@@ -417,11 +446,7 @@ pub fn build_scene(generation: u64, inp: &SceneInput) -> Scene {
     }
     let batches = order
         .into_iter()
-        .filter_map(|id| {
-            batches
-                .remove(id)
-                .map(|(m, inst)| (id.to_string(), m, inst))
-        })
+        .filter_map(|id| batches.remove(&id).map(|(m, inst)| (id, m, inst)))
         .collect();
     Scene {
         generation,

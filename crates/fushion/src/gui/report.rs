@@ -57,6 +57,7 @@ impl App {
             .show(ui, |ui| {
                 self.edit_section(ui);
                 self.report_section(ui);
+                self.printed_gallery(ui);
                 self.export_section(ui);
             });
     }
@@ -95,11 +96,7 @@ impl App {
                     .and_then(|i| self.model().and_then(|m| m.placements.get(i)).cloned());
                 match sel {
                     Some(p) => {
-                        let name = p
-                            .def()
-                            .map(|d| d.name)
-                            .unwrap_or(p.part.as_str())
-                            .to_string();
+                        let name = p.name();
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
                             swatch(ui, palette.rgb(p.color), 14.0, false);
@@ -181,6 +178,81 @@ impl App {
         ui.separator();
     }
 
+    /// Pictures of every different printed part (bricks and details) with its number,
+    /// colour and count. Rendered a few per frame and kept until the model changes.
+    fn printed_gallery(&mut self, ui: &mut egui::Ui) {
+        let Some(s) = &self.session else { return };
+        let Some(m) = &s.model else { return };
+        // One entry per (id, colour), in model order, with a placement to draw and a count.
+        let mut kinds: Vec<((String, ColorId), usize, usize)> = Vec::new();
+        for (i, p) in m.placements.iter().enumerate() {
+            let Some(d) = &p.custom else { continue };
+            let key = (d.id.clone(), p.color);
+            match kinds.iter_mut().find(|k| k.0 == key) {
+                Some(k) => k.1 += 1,
+                None => kinds.push((key, 1, i)),
+            }
+        }
+        if kinds.is_empty() {
+            return;
+        }
+        if self.thumbs_for != self.model_mtime {
+            self.thumbs.clear();
+            self.thumbs_for = self.model_mtime;
+        }
+        // Render up to six missing pictures this frame.
+        let opts = sf_render::RenderOptions { view_size: 112, edges: true, background: [43, 45, 50] };
+        let mut made = 0;
+        for (key, _, i) in &kinds {
+            if made >= 6 {
+                break;
+            }
+            if self.thumbs.contains_key(key) {
+                continue;
+            }
+            let img = sf_render::render_part_in(m, &m.placements[*i], &s.palette, &s.meshes, sf_render::View::Iso, &opts);
+            let ci = egui::ColorImage::from_rgba_unmultiplied([img.width() as usize, img.height() as usize], img.as_raw());
+            let tex = ui.ctx().load_texture(format!("part-{}-{}", key.0, key.1), ci, egui::TextureOptions::LINEAR);
+            self.thumbs.insert(key.clone(), tex);
+            made += 1;
+        }
+        if made > 0 {
+            ui.ctx().request_repaint();
+        }
+        let palette = &s.palette;
+        egui::CollapsingHeader::new(RichText::new(format!("Printed parts ({} different)", kinds.len())).strong())
+            .default_open(true)
+            .show(ui, |ui| {
+                let w = 112.0;
+                let cols = ((ui.available_width() / (w + 8.0)).floor() as usize).max(1);
+                egui::Grid::new("printed-gallery").spacing([8.0, 8.0]).show(ui, |ui| {
+                    for (n, (key, count, i)) in kinds.iter().enumerate() {
+                        ui.vertical(|ui| {
+                            ui.set_width(w);
+                            match self.thumbs.get(key) {
+                                Some(t) => {
+                                    ui.add(egui::Image::new(t).fit_to_exact_size(egui::vec2(w, w)))
+                                        .on_hover_text(m.placements[*i].name());
+                                }
+                                None => {
+                                    ui.add_sized([w, w], egui::Spinner::new());
+                                }
+                            }
+                            ui.horizontal(|ui| {
+                                swatch(ui, palette.rgb(key.1), 10.0, false);
+                                ui.label(RichText::new(&key.0).strong());
+                                ui.label(RichText::new(format!("×{count}")).weak());
+                            });
+                        });
+                        if (n + 1) % cols == 0 {
+                            ui.end_row();
+                        }
+                    }
+                });
+            });
+        ui.add_space(6.0);
+    }
+
     fn report_section(&mut self, ui: &mut egui::Ui) {
         let Some(s) = &self.session else { return };
         ui.label(RichText::new("Report").size(16.0).strong());
@@ -190,6 +262,31 @@ impl App {
         };
         let palette = &s.palette;
         ui.add_space(4.0);
+        if let Some(m) = &s.model {
+            let printed: Vec<&str> = m
+                .placements
+                .iter()
+                .filter_map(|p| p.custom.as_ref().map(|d| d.id.as_str()))
+                .collect();
+            let mode = if m.printable || !printed.is_empty() {
+                "3D printing"
+            } else {
+                "Real LEGO parts"
+            };
+            kv(ui, "Build", mode);
+            if !printed.is_empty() {
+                let unique: std::collections::BTreeSet<&str> = printed.iter().copied().collect();
+                kv(
+                    ui,
+                    "Printed",
+                    format!(
+                        "{} parts, {} different",
+                        printed.len(),
+                        unique.len()
+                    ),
+                );
+            }
+        }
         let budget = r.budget.or(s.budget).unwrap_or(self.budget);
         let frac = r.parts as f32 / budget.max(1) as f32;
         ui.horizontal(|ui| {

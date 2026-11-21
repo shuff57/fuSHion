@@ -3,14 +3,17 @@
 //! CLI and the MCP server (a separate process) see the same state.
 //!
 //! Files: `source.png`, `spec.json`, `model.json`, `report.json`,
-//! `report.txt`, `render.png`, `conversation.json`, `history/NNN-spec.json`.
+//! `report.txt`, `render.png`, `conversation.json`, `history/NNN-spec.json`,
+//! `budget.txt`, `print.txt` ("1"/"0", build for 3D printing; missing means on) and
+//! `details/<name>.json` (detail designs) with `details/<name>.png` (their pictures).
 
 use anyhow::{Context, Result, bail};
-use sf_core::{Availability, Model, Palette, UnknownAvailability};
+use sf_core::{Availability, DetailDesign, Model, Palette, UnknownAvailability};
 use sf_engine::{BuildOptions, Report};
 use sf_ldraw::MeshLibrary;
 use sf_render::{RenderOptions, View};
 use sf_spec::Spec;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -34,6 +37,8 @@ pub struct Session {
     pub report: Option<Report>,
     /// Part budget the user chose (overrides the spec's).
     pub budget: Option<u32>,
+    /// Build for 3D printing: every brick designed for its place (default on).
+    pub print: bool,
     source_mtime: Option<std::time::SystemTime>,
 }
 
@@ -91,6 +96,7 @@ impl Session {
             model: None,
             report: None,
             budget: None,
+            print: true,
             source_mtime: None,
         };
         s.reload()?;
@@ -111,6 +117,7 @@ impl Session {
         if let Ok(t) = std::fs::read_to_string(self.dir.join("budget.txt")) {
             self.budget = t.trim().parse().ok();
         }
+        self.print = std::fs::read_to_string(self.dir.join("print.txt")).map(|t| t.trim() != "0").unwrap_or(true);
         if let Ok(t) = std::fs::read_to_string(self.dir.join("model.json")) {
             self.model = serde_json::from_str(&t).ok();
         }
@@ -137,6 +144,51 @@ impl Session {
             }
         }
         Ok(())
+    }
+
+    /// Build for 3D printing (every brick designed for its place) or with real LEGO parts.
+    pub fn set_print(&mut self, print: bool) -> Result<()> {
+        self.print = print;
+        std::fs::write(self.dir.join("print.txt"), if print { "1" } else { "0" })?;
+        Ok(())
+    }
+
+    /// The folder holding this session's detail designs.
+    pub fn details_dir(&self) -> PathBuf {
+        self.dir.join("details")
+    }
+
+    /// Every detail design saved in this session, by name.
+    pub fn designs(&self) -> BTreeMap<String, DetailDesign> {
+        crate::details::load_all(&self.details_dir())
+    }
+
+    /// Design a detail part with SolidCraft (see [`crate::details::make`]), save it under
+    /// `name` (replacing an older design of that name) and return it with a PNG picture of
+    /// it from four sides in `color` (also saved as `details/<name>.png`).
+    pub fn design_detail(&self, request: &serde_json::Value, name: &str, label: &str, color: &str) -> Result<(DetailDesign, Vec<u8>)> {
+        let name = crate::details::clean_name(name)?;
+        let label = if label.trim().is_empty() { name.replace('_', " ") } else { label.trim().to_string() };
+        let design = crate::details::make(request, &name, &label)?;
+        let colour = self.palette.resolve(color).unwrap_or(sf_core::color::FILLER);
+        let png = crate::details::preview_png(&design, colour, &self.palette, &self.meshes)?;
+        let dir = self.details_dir();
+        std::fs::create_dir_all(&dir)?;
+        write_atomic(&dir.join(format!("{name}.json")), &serde_json::to_string(&design)?)?;
+        write_bytes_atomic(&dir.join(format!("{name}.png")), &png)?;
+        Ok((design, png))
+    }
+
+    /// A picture of a saved design from four sides, as PNG bytes.
+    pub fn detail_picture(&self, name: &str, color: &str) -> Result<Vec<u8>> {
+        let name = crate::details::clean_name(name)?;
+        let designs = self.designs();
+        let Some(d) = designs.get(&name) else {
+            let have: Vec<&str> = designs.keys().map(String::as_str).collect();
+            bail!("no design named `{name}`; designs: {}", if have.is_empty() { "none yet".into() } else { have.join(", ") });
+        };
+        let colour = self.palette.resolve(color).unwrap_or(sf_core::color::FILLER);
+        crate::details::preview_png(d, colour, &self.palette, &self.meshes)
     }
 
     /// Set the source image (any format `image` reads). Stored as PNG.
@@ -185,6 +237,8 @@ impl Session {
             palette: self.palette.clone(),
             availability: self.availability.clone(),
             budget: self.budget,
+            print: self.print,
+            details: self.designs(),
             ..Default::default()
         };
         let result = sf_engine::build(&spec, &opts, self.image.as_ref())?;
@@ -256,6 +310,7 @@ impl Session {
             palette: self.palette.clone(),
             catalog: self.catalog.clone(),
             availability: self.availability.clone(),
+            meshes: self.meshes.clone(),
         })
     }
 
@@ -278,7 +333,18 @@ pub struct ExportJob {
     pub palette: Palette,
     pub catalog: Option<Arc<sf_catalog::CatalogIndex>>,
     pub availability: Arc<dyn Availability>,
+    pub meshes: Arc<MeshLibrary>,
 }
+
+/// Print advice for the pamphlet's "Before you build" page.
+pub const PRINT_SETTINGS: &[&str] = &[
+    "Print every part studs up, on its base, exactly as the files are oriented.",
+    "0.2 mm layers with a 0.2 mm first layer; every height in these parts is a multiple of 0.2 mm.",
+    "0.4 mm nozzle: Arachne (variable line width) on, 0.40-0.42 mm lines, XY compensation 0, no ironing.",
+    "PETG holds the fused studs' grip longer than PLA; PLA works for display models.",
+    "Bricks have their number engraved underneath (B017 is engraved 017). Details are listed with a picture.",
+    "Details marked \"supports\" in print-list.csv need support material under their petals or leaves.",
+];
 
 impl ExportJob {
     pub fn run(&self, out: &Path) -> Result<Vec<PathBuf>> {
@@ -301,6 +367,27 @@ impl ExportJob {
             }
             Err(e) => eprintln!("BrickLink wanted list skipped: {e}"),
         }
+        // Printed parts: one STL/3MF per part design, per colour, plus print-list.csv.
+        let printed = model.placements.iter().any(|p| p.custom.is_some());
+        if printed && crate::custom::ENABLED {
+            let set = crate::custom::export_print_set(model, &self.palette, &out.join("print"), |_, _| {})?;
+            written.extend(set.files);
+            if !set.notes.is_empty() {
+                let p = out.join("print").join("notes.txt");
+                std::fs::write(&p, set.notes.join("\n"))?;
+                written.push(p);
+            }
+        }
+        // Instructions pamphlet.
+        let opts = sf_pamphlet::PamphletOptions {
+            title: Some(model.title.clone()).filter(|t| !t.trim().is_empty()),
+            print_settings: if printed { PRINT_SETTINGS.iter().map(|s| s.to_string()).collect() } else { Vec::new() },
+            numbers_on_parts: printed,
+            ..Default::default()
+        };
+        let pdf = out.join(format!("{slug}-instructions.pdf"));
+        sf_pamphlet::write_pamphlet(model, &self.palette, &self.meshes, &opts, &pdf)?;
+        written.push(pdf);
         let needs = crate::custom::custom_needs(model, self.availability.as_ref());
         if !needs.is_empty() && crate::custom::ENABLED {
             let (files, notes) = crate::custom::make_needed_parts(&needs, &self.palette, &out.join("custom"))?;

@@ -28,6 +28,9 @@ fn write_mcp_config(session: &Session, fushion_exe: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// What the first prompt says about detail parts.
+const DETAIL_HINT: &str = "Bricks alone can't make a petal, a flower, a leaf, an eye or a beak. For every feature like that, design a printed detail part with design_detail (a template such as rose, daisy, aster, gerbera, poppy, cornflower, spike, umbel, fern, leaf, petal, stem, dome, cone or round_plate, or your own SolidCraft commands), look at the picture it returns, adjust it until it reads as the feature, then place it with the spec's `details`. For flowers, follow LEGO's Botanical bouquets (10280 Flower Bouquet, 10313 Wildflower Bouquet): each head is a hub with petals around it, often two staggered layers and a separate centre; spike flowers (snapdragon, lupin, lavender, larkspur) stack rings of florets up a stem; foliage is separate leaves and fronds. Match the picture's species, petal count, colours and size; replicate the picture as closely as you can. Call list_details for the templates and their parameters.";
+
 /// Run one turn through Claude Code. Returns Claude's final text.
 pub fn run_turn(session: &Session, fushion_exe: &Path, user_text: &str) -> Result<String> {
     let id_path = session.dir.join("claude_code_session.txt");
@@ -36,9 +39,10 @@ pub fn run_turn(session: &Session, fushion_exe: &Path, user_text: &str) -> Resul
     let prompt = if resume.is_none() {
         format!(
             "Use the fushion tools to build the picture at {} as a brick model (part budget {budget}). \
-             First call get_guide and view_source_image, then build with build_model and iterate on the \
+             First call get_guide and view_source_image. {} Then build with build_model and iterate on the \
              renders, at most 5 builds. Finish with two or three plain sentences for the user. {}",
             session.source_png_path().display(),
+            DETAIL_HINT,
             user_text
         )
     } else {
@@ -53,7 +57,7 @@ pub fn run_turn(session: &Session, fushion_exe: &Path, user_text: &str) -> Resul
         .arg(&mcp)
         .arg("--strict-mcp-config")
         .arg("--allowedTools")
-        .arg("mcp__fushion__get_guide mcp__fushion__view_source_image mcp__fushion__build_model mcp__fushion__get_state")
+        .arg("mcp__fushion__get_guide mcp__fushion__view_source_image mcp__fushion__build_model mcp__fushion__get_state mcp__fushion__design_detail mcp__fushion__list_details mcp__fushion__view_detail")
         // fushion only needs its own tools; keep Claude out of the shell and files.
         .arg("--disallowedTools")
         .arg("Bash Edit Write NotebookEdit WebFetch WebSearch")

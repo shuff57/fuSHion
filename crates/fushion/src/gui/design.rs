@@ -133,6 +133,21 @@ impl App {
                 self.set_status(e, true);
             }
         });
+        let r = ui
+            .add_enabled(
+                !busy,
+                egui::Checkbox::new(&mut self.print_mode, "Build for 3D printing"),
+            )
+            .on_hover_text(
+                "On: every brick is designed for its spot and printed, and Claude designs \
+                 shaped details (petals, eyes, beaks) in SolidCraft.\n\
+                 Off: real LEGO parts only, with a BrickLink parts list.",
+            );
+        if r.changed()
+            && let Err(e) = self.session_print_sync()
+        {
+            self.set_status(e, true);
+        }
 
         // Backend.
         ui.add_space(6.0);

@@ -53,6 +53,46 @@ fn slug(s: &str) -> String {
     crate::session::slug(s)
 }
 
+/// Grams of PLA per mm³ (1.24 g/cm³, solid).
+pub const PLA_G_PER_MM3: f64 = 1.24e-3;
+
+/// One line of a print set's list: a printed part in one colour, or a catalog part to buy.
+#[derive(Clone, Debug, serde::Serialize)]
+pub struct PrintRow {
+    /// The printed part's id (`"B017"`, `"D003"`), or the LDraw id of a part to buy.
+    pub id: String,
+    /// `"brick"`, `"plate"`, `"detail"` or `"buy"`.
+    pub kind: String,
+    pub description: String,
+    pub colour: String,
+    /// How many to print (or buy) in this colour.
+    pub count: usize,
+    pub plates: u32,
+    /// Footprint `[x, z]` in studs (the bounding box of its cells).
+    pub size_studs: [u8; 2],
+    /// One part's volume, mm³ (0 for parts to buy).
+    pub volume_mm3: f64,
+    /// One part's weight in solid PLA, g.
+    pub grams: f64,
+    /// Whether it needs supports printed standing on its base (details with overhangs
+    /// flatter than 45°; bricks never do: their ceilings bridge like any brick's).
+    pub supports: bool,
+    /// The STL, relative to the print set's folder (`None` for parts to buy).
+    pub file: Option<String>,
+}
+
+/// What [`export_print_set`] wrote.
+#[derive(Clone, Debug)]
+pub struct PrintSet {
+    /// Every file written (STLs, 3MFs and the list).
+    pub files: Vec<PathBuf>,
+    pub rows: Vec<PrintRow>,
+    /// `print-list.csv`.
+    pub list: PathBuf,
+    /// Parts that could not be made, and why.
+    pub notes: Vec<String>,
+}
+
 #[cfg(feature = "custom")]
 mod imp {
     use super::*;
@@ -99,6 +139,170 @@ mod imp {
     pub(super) fn from_commands(batch: &Value, out: &Path, name: &str) -> Result<MadePart> {
         let part = sf_custom::build_from_commands(batch).map_err(|e| anyhow::anyhow!("{e}"))?;
         write(&part, out, name)
+    }
+
+    /// The print of one printed part: a brick from its cells and units (labelled with its
+    /// id), a detail rebuilt from its recorded source.
+    pub(super) fn print_part(def: &sf_core::CustomDef, model: &Model) -> Result<sf_custom::CustomPart> {
+        match &def.kind {
+            sf_core::CustomKind::Brick => {
+                let shape = CustomShape::Printed {
+                    cells: def.cells.iter().map(|&(a, b)| (i32::from(a), i32::from(b))).collect(),
+                    plates: u32::from(def.plates),
+                    units: def
+                        .units
+                        .iter()
+                        .map(|u| u.iter().map(|&(a, b)| (i32::from(a), i32::from(b))).collect())
+                        .collect(),
+                    label: Some(def.id.clone()),
+                };
+                sf_custom::build(&shape, &profile()).map_err(|e| anyhow::anyhow!("{}: {e}", def.id))
+            }
+            sf_core::CustomKind::Detail { mesh, .. } => {
+                let Some(src) = model.details.get(mesh) else {
+                    bail!("{}: the model has no design `{mesh}`", def.id)
+                };
+                sf_custom::rebuild_detail(&src.source).map_err(|e| anyhow::anyhow!("{}: {e}", def.id))
+            }
+        }
+    }
+
+    /// A detail's socket ceiling (1.8 mm) plus a hair: overhangs are measured above it.
+    const DETAIL_CEILING_MM: f64 = 1.85;
+
+    pub(super) fn print_set(
+        model: &Model,
+        palette: &Palette,
+        out: &Path,
+        progress: &(dyn Fn(usize, usize) + Sync),
+    ) -> Result<PrintSet> {
+        use std::collections::BTreeMap;
+        use std::sync::Mutex;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        // Unique printed parts by id (each id is one geometry), and their colours.
+        let mut defs: BTreeMap<String, sf_core::CustomDef> = BTreeMap::new();
+        let mut uses: BTreeMap<(String, ColorId), usize> = BTreeMap::new();
+        let mut buy: BTreeMap<(String, ColorId), usize> = BTreeMap::new();
+        for p in &model.placements {
+            match &p.custom {
+                Some(c) => {
+                    if let Some(prev) = defs.get(&c.id) {
+                        let same = prev.kind == c.kind
+                            && prev.cells == c.cells
+                            && prev.plates == c.plates
+                            && prev.units == c.units
+                            && prev.studs == c.studs;
+                        if !same {
+                            bail!("two different parts share the id {}", c.id);
+                        }
+                    } else {
+                        defs.insert(c.id.clone(), (**c).clone());
+                    }
+                    *uses.entry((c.id.clone(), p.color)).or_default() += 1;
+                }
+                None => *buy.entry((p.part.clone(), p.color)).or_default() += 1,
+            }
+        }
+        std::fs::create_dir_all(out)?;
+        let jobs: Vec<&sf_core::CustomDef> = defs.values().collect();
+        let total = jobs.len();
+        let results: Mutex<BTreeMap<String, Result<sf_custom::CustomPart>>> = Mutex::new(BTreeMap::new());
+        let next = AtomicUsize::new(0);
+        let done = AtomicUsize::new(0);
+        progress(0, total);
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8).min(total.max(1));
+        std::thread::scope(|scope| {
+            for _ in 0..threads {
+                scope.spawn(|| loop {
+                    let k = next.fetch_add(1, Ordering::SeqCst);
+                    let Some(def) = jobs.get(k) else { break };
+                    let r = print_part(def, model);
+                    results.lock().unwrap_or_else(|e| e.into_inner()).insert(def.id.clone(), r);
+                    progress(done.fetch_add(1, Ordering::SeqCst) + 1, total);
+                });
+            }
+        });
+        let results = results.into_inner().unwrap_or_else(|e| e.into_inner());
+        let mut files = Vec::new();
+        let mut rows = Vec::new();
+        let mut notes = Vec::new();
+        for ((id, color), count) in &uses {
+            let def = &defs[id];
+            let colour = palette.name(*color);
+            let (kind, desc) = match &def.kind {
+                sf_core::CustomKind::Brick if def.plates.is_multiple_of(3) => ("brick", def.describe()),
+                sf_core::CustomKind::Brick => ("plate", def.describe()),
+                sf_core::CustomKind::Detail { .. } => ("detail", def.describe()),
+            };
+            let supports = matches!(def.kind, sf_core::CustomKind::Detail { .. });
+            let part = match results.get(id) {
+                Some(Ok(p)) => p,
+                Some(Err(e)) => {
+                    notes.push(format!("{id} in {colour}: {e:#}"));
+                    continue;
+                }
+                None => continue,
+            };
+            let dir = out.join(slug(&colour));
+            let made = write(part, &dir, id)?;
+            files.push(made.stl.clone());
+            files.push(made.three_mf);
+            rows.push(PrintRow {
+                id: id.clone(),
+                kind: kind.into(),
+                description: desc,
+                colour,
+                count: *count,
+                plates: u32::from(def.plates),
+                size_studs: def.size(),
+                volume_mm3: part.volume_mm3,
+                grams: part.volume_mm3 * PLA_G_PER_MM3,
+                supports: supports
+                    && sf_custom::overhang_area(&part.stl, DETAIL_CEILING_MM) > sf_custom::SUPPORT_AREA_MM2,
+                file: made.stl.strip_prefix(out).ok().map(|p| p.to_string_lossy().into_owned()),
+            });
+        }
+        for ((part, color), count) in &buy {
+            let def = sf_core::parts::part(part);
+            rows.push(PrintRow {
+                id: part.clone(),
+                kind: "buy".into(),
+                description: def.map_or_else(|| part.clone(), |d| d.name.to_string()),
+                colour: palette.name(*color),
+                count: *count,
+                plates: def.map_or(0, |d| u32::from(d.height)),
+                size_studs: def.map_or([0, 0], |d| d.size),
+                volume_mm3: 0.0,
+                grams: 0.0,
+                supports: false,
+                file: None,
+            });
+        }
+        let csv_field = |s: &str| {
+            if s.contains([',', '"', '\n']) { format!("\"{}\"", s.replace('"', "\"\"")) } else { s.to_string() }
+        };
+        let mut csv = String::from("id,kind,description,colour,count,plates,size_studs,volume_mm3,grams_pla,supports,file\n");
+        for r in &rows {
+            csv.push_str(&format!(
+                "{},{},{},{},{},{},{}x{},{:.1},{:.2},{},{}\n",
+                csv_field(&r.id),
+                r.kind,
+                csv_field(&r.description),
+                csv_field(&r.colour),
+                r.count,
+                r.plates,
+                r.size_studs[0],
+                r.size_studs[1],
+                r.volume_mm3,
+                r.grams,
+                if r.supports { "yes" } else { "no" },
+                csv_field(r.file.as_deref().unwrap_or(""))
+            ));
+        }
+        let list = out.join("print-list.csv");
+        std::fs::write(&list, csv)?;
+        files.push(list.clone());
+        Ok(PrintSet { files, rows, list, notes })
     }
 
     pub(super) fn for_needs(needs: &[CustomNeed], palette: &Palette, out: &Path) -> Result<(Vec<PathBuf>, Vec<String>)> {
@@ -160,6 +364,9 @@ mod imp {
     pub(super) fn for_needs(_: &[CustomNeed], _: &Palette, _: &Path) -> Result<(Vec<PathBuf>, Vec<String>)> {
         anyhow::bail!(OFF)
     }
+    pub(super) fn print_set(_: &Model, _: &Palette, _: &Path, _: &(dyn Fn(usize, usize) + Sync)) -> Result<PrintSet> {
+        anyhow::bail!(OFF)
+    }
 }
 
 /// Generate a parametric custom part. `shape` is an `sf_custom::CustomShape`
@@ -174,6 +381,23 @@ pub fn make_part(shape: &Value, _compliant_stud: bool, out: &Path, name: &str) -
 /// Generate a freeform part from a SolidCraft command batch.
 pub fn make_part_from_commands(batch: &Value, out: &Path, name: &str) -> Result<MadePart> {
     imp::from_commands(batch, out, &slug(name))
+}
+
+/// Print files for a model built to print: one STL and 3MF per printed part (each id once,
+/// made on as many threads as the machine has, up to 8), copied into a folder per colour as
+/// `out/<colour>/<id>.stl|.3mf`, and `out/print-list.csv` listing every printed part (id,
+/// kind, description, colour, count, plates, size, volume, grams of PLA, file) and every
+/// catalog part to buy. Bricks are built from their cells and the fused units the packer
+/// chose, with their id engraved underneath; details are rebuilt from the model's recorded
+/// design. A part that fails is left out and named in `notes`. `progress(done, total)` is
+/// called from the worker threads as each part finishes.
+pub fn export_print_set(
+    model: &Model,
+    palette: &Palette,
+    out: &Path,
+    progress: impl Fn(usize, usize) + Sync,
+) -> Result<PrintSet> {
+    imp::print_set(model, palette, out, &progress)
 }
 
 /// Print files for every part the model needs printed. Returns the files
@@ -243,5 +467,71 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A print set from a small model: two placements of one brick id (in two colours), one
+    /// other brick, one detail and a catalog part to buy.
+    #[test]
+    fn print_set_writes_one_file_per_id_and_colour() {
+        use sf_core::{Cell, CustomDef, CustomKind, Model, Palette, Placement, Rot};
+        let brick = |id: &str, cells: Vec<(u8, u8)>, units: Vec<Vec<(u8, u8)>>, plates: u8| CustomDef {
+            id: id.into(),
+            kind: CustomKind::Brick,
+            studs: units.iter().flatten().copied().collect(),
+            sockets: cells.clone(),
+            cells,
+            plates,
+            units,
+        };
+        let b1 = brick("B001", vec![(0, 0), (1, 0), (2, 0)], vec![vec![(0, 0), (1, 0), (2, 0)]], 3);
+        let b2 = brick(
+            "B002",
+            vec![(0, 0), (1, 0), (0, 1), (1, 1)],
+            vec![vec![(0, 0), (0, 1)], vec![(1, 0), (1, 1)]],
+            1,
+        );
+        let dome = sf_custom::detail_template("eye_white", "eye", "dome", &serde_json::json!({}))
+            .unwrap()
+            .design;
+        let mut model = Model { title: "t".into(), ..Default::default() };
+        model.meshes.insert(dome.name.clone(), dome.mesh.clone());
+        model.details.insert(dome.name.clone(), dome.source.clone());
+        model.placements = vec![
+            Placement::printed(b1.clone(), 4, Cell::new(0, 0, 0), Rot(0)),
+            Placement::printed(b1.clone(), 15, Cell::new(0, 0, 2), Rot(0)),
+            Placement::printed(b2, 4, Cell::new(0, 3, 0), Rot(1)),
+            Placement::printed(dome.instance("D001"), 15, Cell::new(0, 4, 0), Rot(0)),
+            Placement::new("3001", 1, Cell::new(5, 0, 5), Rot(0)),
+        ];
+        let out = std::env::temp_dir().join(format!("fushion-print-set-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let calls = std::sync::Mutex::new(Vec::new());
+        let set = super::export_print_set(&model, &Palette::builtin(), &out, |d, t| calls.lock().unwrap().push((d, t)))
+            .unwrap();
+        assert!(set.notes.is_empty(), "{:?}", set.notes);
+        let pal = Palette::builtin();
+        let (red, white) = (super::slug(&pal.name(4)), super::slug(&pal.name(15)));
+        for f in [
+            format!("{red}/B001.stl"),
+            format!("{white}/B001.stl"),
+            format!("{red}/B002.3mf"),
+            format!("{white}/D001.stl"),
+            "print-list.csv".into(),
+        ] {
+            assert!(out.join(&f).is_file(), "missing {f}");
+        }
+        // Three unique ids made, progress reached 3 of 3.
+        assert!(calls.lock().unwrap().contains(&(3, 3)));
+        let csv = std::fs::read_to_string(&set.list).unwrap();
+        assert_eq!(csv.lines().count(), 1 + 4 + 1, "{csv}");
+        assert!(csv.contains("B002,plate,"), "{csv}");
+        assert!(csv.contains("D001,detail,"), "{csv}");
+        assert!(csv.lines().next().unwrap().contains(",supports,"), "{csv}");
+        assert!(set.rows.iter().all(|r| !r.supports), "a dome and bricks need no supports");
+        assert!(csv.contains("3001,buy,Brick 2 x 4"), "{csv}");
+        let b1_rows: Vec<_> = set.rows.iter().filter(|r| r.id == "B001").collect();
+        assert_eq!(b1_rows.len(), 2);
+        assert!(b1_rows.iter().all(|r| r.count == 1 && r.grams > 0.5));
+        let _ = std::fs::remove_dir_all(&out);
     }
 }

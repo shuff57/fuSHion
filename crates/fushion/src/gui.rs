@@ -153,6 +153,9 @@ pub struct App {
     // Design.
     source_tex: Option<egui::TextureHandle>,
     budget: u32,
+    /// Build for 3D printing (merged printed bricks and designed details) rather than from
+    /// real LEGO parts. Kept per session in `print.txt`.
+    print_mode: bool,
     backend: Backend,
     api_status: Result<(), String>,
     cc_status: Option<bool>,
@@ -162,6 +165,11 @@ pub struct App {
     busy: Option<(Backend, f64)>,
     key_input: String,
     key_saved: bool,
+
+    /// Pictures of the model's printed parts, by (part id, colour), for the report panel.
+    thumbs: std::collections::HashMap<(String, sf_core::ColorId), egui::TextureHandle>,
+    /// The model file the pictures were made from.
+    thumbs_for: Option<SystemTime>,
 
     // Sync.
     model_mtime: Option<SystemTime>,
@@ -180,6 +188,14 @@ pub struct App {
 
 /// Where a background export leaves its result.
 type ExportSlot = Arc<Mutex<Option<Result<Vec<PathBuf>, String>>>>;
+
+/// Session file holding the build mode: `1` for 3D printing, `0` for real LEGO parts.
+const PRINT_FILE: &str = "print.txt";
+
+/// The session's build mode (printing when the file is missing).
+fn read_print_mode(dir: &Path) -> bool {
+    std::fs::read_to_string(dir.join(PRINT_FILE)).map_or(true, |t| t.trim() != "0")
+}
 
 fn mtime(p: &Path) -> Option<SystemTime> {
     std::fs::metadata(p).and_then(|m| m.modified()).ok()
@@ -276,6 +292,7 @@ impl App {
             ghost: None,
             source_tex: None,
             budget: sf_engine::DEFAULT_BUDGET,
+            print_mode: true,
             backend: Backend::Api,
             api_status: Ok(()),
             cc_status: None,
@@ -285,6 +302,8 @@ impl App {
             busy: None,
             key_input: String::new(),
             key_saved: false,
+            thumbs: Default::default(),
+            thumbs_for: None,
             model_mtime: None,
             source_mtime: None,
             last_poll: 0.0,
@@ -369,6 +388,7 @@ impl App {
         match self.res.open(dir) {
             Ok(s) => {
                 self.budget = s.budget.unwrap_or(sf_engine::DEFAULT_BUDGET);
+                self.print_mode = read_print_mode(&s.dir);
                 self.chat = worker::transcript_from_conversation(&s)
                     .into_iter()
                     .map(|(u, t)| ChatLine {
@@ -600,6 +620,15 @@ impl App {
         self.tool = Tool::Select;
         self.worker.start_turn(req, ctx.clone());
         self.set_status(format!("Working with {}…", self.backend.label()), false);
+    }
+
+    /// Save the print-mode choice into the session (`print.txt`, read into every build).
+    fn session_print_sync(&mut self) -> Result<(), String> {
+        let print = self.print_mode;
+        let Some(s) = &mut self.session else {
+            return Ok(());
+        };
+        s.set_print(print).map_err(|e| format!("Saving build mode: {e:#}"))
     }
 
     fn session_budget_sync(&mut self) -> Result<(), String> {

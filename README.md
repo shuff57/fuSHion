@@ -47,6 +47,30 @@ picture ─▶ Claude writes a shape spec ─▶ compile to coloured voxels
   data: never-produced pairs are not used, and rare pairs (in three sets or
   fewer) are avoided.
 
+## Build for 3D printing
+
+With **Build for 3D printing** on (the default), nothing is limited to LEGO's catalog:
+
+- Every brick is designed for its place. Same-colour areas merge into one brick of any
+  shape, up to 8 × 8 studs, with seams staggered from layer to layer. A typical model
+  needs a quarter of the parts it would take in real LEGO. Identical bricks share a
+  number, which is engraved underneath.
+- Studs are fused in pairs and triples. Each brick groups its studs to suit what sits
+  on top, so no brick ever ends between two fused studs.
+- Claude designs **detail parts** in SolidCraft for what bricks can't make: flowers
+  (rose, daisy, aster, gerbera, poppy, cornflower, spike flowers, umbel), fern fronds,
+  leaves, stems, eyes, beaks, horns. Each design comes back as a picture from four sides
+  for Claude to check before placing it with the spec's `details`. The flowers follow
+  LEGO's Botanical bouquets.
+- **Export** writes `print/<colour>/<part>.stl|.3mf`, one file per part design and colour,
+  plus `print-list.csv` with counts, size, filament weight and whether supports are needed.
+  It also writes `<title>-instructions.pdf`: a cover, what to print and buy with
+  pictures and tick boxes, then the build steps, with earlier parts faded and each step's
+  new parts listed.
+
+The app's report panel shows a picture of every printed part. Turn the option off to
+build from real LEGO parts instead.
+
 ## Install
 
 Needs Rust 1.95 or newer.

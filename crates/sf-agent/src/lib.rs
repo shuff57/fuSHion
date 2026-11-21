@@ -8,6 +8,7 @@
 pub mod claude_api;
 pub mod claude_code;
 pub mod custom;
+pub mod details;
 pub mod session;
 
 pub use session::{BuildOutput, ExportJob, Session};

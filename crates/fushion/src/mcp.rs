@@ -67,6 +67,33 @@ pub struct CustomCommandsParams {
 }
 
 #[derive(Deserialize, schemars::JsonSchema)]
+pub struct DetailParams {
+    /// Name to save the design under (letters, digits, `_`), used by the spec's `details`.
+    pub name: String,
+    /// Short human name for the parts list, e.g. "red rose". Defaults to the name.
+    #[serde(default)]
+    pub label: String,
+    /// What to make: {"template": "rose", "params": {...}} (see list_details for templates
+    /// and their parameters) or {"commands": [SolidCraft commands], "cells": [[0,0],[1,0]],
+    /// "plates": 3, "sockets": [[0,0],[1,0]]} drawn in the detail's frame (column (i, j)
+    /// spans x 8i..8i+8, y 8j..8j+8 mm; it stands on z = 0; the socket base is built for you
+    /// with its top at z = 3.2 mm, and your commands should join onto it).
+    pub design: serde_json::Value,
+    /// Colour for the picture (the model sets each use's colour). Default Light Bluish Gray.
+    #[serde(default)]
+    pub color: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
+pub struct ViewDetailParams {
+    /// A saved design's name.
+    pub name: String,
+    /// Colour for the picture.
+    #[serde(default)]
+    pub color: String,
+}
+
+#[derive(Deserialize, schemars::JsonSchema)]
 pub struct BudgetParams {
     /// Maximum number of parts, or null to use the spec's budget.
     pub budget: Option<u32>,
@@ -74,6 +101,19 @@ pub struct BudgetParams {
 
 fn internal(e: impl std::fmt::Display) -> McpError {
     McpError::internal_error(e.to_string(), None)
+}
+
+/// One line about a detail design.
+fn detail_summary(d: &sf_core::DetailDesign) -> String {
+    format!(
+        "{} (\"{}\"): cells {:?}, sockets {:?}, {} plates tall, {} triangles",
+        d.name,
+        d.label,
+        d.cells,
+        d.sockets,
+        d.plates,
+        d.mesh.indices.len() / 3
+    )
 }
 
 fn b64(bytes: &[u8]) -> String {
@@ -137,13 +177,58 @@ impl Fushion {
         }
     }
 
+    #[tool(description = "Design a printed detail part with SolidCraft: a flower head (rose, daisy, aster, poppy...), a petal, a leaf or fern frond, a stem, an eye dome, a beak or horn, a round plate, or anything from your own SolidCraft commands. It is checked (one closed solid, watertight, socket base underneath that fits the studs below), saved under `name`, and returned with a picture from four sides (iso, front, right, top). Look at the picture and redesign until it reads as the feature, then place it with the spec's `details`.")]
+    async fn design_detail(&self, Parameters(p): Parameters<DetailParams>) -> Result<CallToolResult, McpError> {
+        match self.with_session(move |s| s.design_detail(&p.design, &p.name, &p.label, &p.color)).await {
+            Ok((d, png)) => Ok(CallToolResult::success(vec![
+                ContentBlock::text(detail_summary(&d)),
+                ContentBlock::image(b64(&png), "image/png"),
+            ])),
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(e.message.to_string())])),
+        }
+    }
+
+    #[tool(description = "List this session's detail designs (name, label, cells, sockets, height) and the detail templates with their parameters.")]
+    async fn list_details(&self) -> Result<CallToolResult, McpError> {
+        let text = self
+            .with_session(|s| {
+                let designs = s.designs();
+                let mut out = String::from("Designs:\n");
+                if designs.is_empty() {
+                    out.push_str("(none yet)\n");
+                }
+                for d in designs.values() {
+                    out.push_str(&format!("- {}\n", detail_summary(d)));
+                }
+                out.push_str("\nTemplates (params in mm and degrees; base in studs):\n");
+                out.push_str(&sf_agent::details::templates_text());
+                Ok(out)
+            })
+            .await?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
+    }
+
+    #[tool(description = "Show a picture of a saved detail design from four sides (iso, front, right, top).")]
+    async fn view_detail(&self, Parameters(p): Parameters<ViewDetailParams>) -> Result<CallToolResult, McpError> {
+        match self.with_session(move |s| s.detail_picture(&p.name, &p.color)).await {
+            Ok(png) => Ok(CallToolResult::success(vec![ContentBlock::image(b64(&png), "image/png")])),
+            Err(e) => Ok(CallToolResult::error(vec![ContentBlock::text(e.message.to_string())])),
+        }
+    }
+
     #[tool(description = "Get the current spec and the latest report (for continuing an earlier session).")]
     async fn get_state(&self) -> Result<CallToolResult, McpError> {
         let text = self
             .with_session(|s| {
                 let spec = serde_json::to_string_pretty(&s.spec)?;
                 let report = s.report.as_ref().map(|r| r.to_text()).unwrap_or_else(|| "nothing built yet".into());
-                Ok(format!("Budget: {:?}\nReport:\n{report}\nSpec:\n{spec}", s.budget))
+                let mode = if s.print { "3D printing (every brick designed for its place)" } else { "real LEGO parts" };
+                let designs: Vec<String> = s.designs().keys().cloned().collect();
+                Ok(format!(
+                    "Budget: {:?}\nBuilding for: {mode}\nDetail designs: {}\nReport:\n{report}\nSpec:\n{spec}",
+                    s.budget,
+                    if designs.is_empty() { "none".into() } else { designs.join(", ") }
+                ))
             })
             .await?;
         Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
@@ -197,7 +282,8 @@ impl ServerHandler for Fushion {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "fuSHion turns a picture into a buildable brick model. Call get_guide, look at the picture with \
              view_source_image, then iterate with build_model until the renders read as the subject and the \
-             report shows no structure issues.",
+             report shows no structure issues. Design printed detail parts (flowers, petals, leaves, eyes, \
+             beaks) with design_detail, check their pictures, and place them with the spec's `details`.",
         )
     }
 }
