@@ -6,12 +6,16 @@
 //!    description, quantity, a box to tick), grouped by colour.
 //! 4. **Steps**: two per page (one when a step adds many kinds of part). The model so far,
 //!    earlier parts pale, this step's parts in colour, seen from the iso corner that shows
-//!    them best; beside it a callout of the parts to add.
+//!    them best; beside it a callout of the parts to add. A detail built from a kit of
+//!    printed parts (a flower from a hub, petals and a centre) gets a **sub-build** first,
+//!    LEGO style: a tinted box headed "Build ×N" with an exploded picture and the kit's own
+//!    steps; the main step then adds the finished detail, pointing back to that page.
 //! 5. **Finished**: the model from two corners.
 //!
 //! Rendering uses sf-render's CPU renderer; the PDF is written by a small built-in writer
 //! (base-14 Helvetica, JPEG images).
 
+pub mod kit;
 pub mod pdf;
 #[doc(hidden)]
 pub mod sample;
@@ -25,6 +29,7 @@ use sf_ldraw::MeshLibrary;
 use sf_render::{RenderOptions, View, render_part};
 use std::collections::BTreeMap;
 use std::path::Path;
+use kit::{KitRenderer, SubBuild};
 use view::ScratchPalette;
 
 /// Settings for [`write_pamphlet`].
@@ -74,6 +79,15 @@ pub struct PamphletInfo {
     pub detail_parts: usize,
     /// Catalog (LEGO) parts to buy.
     pub catalog_parts: usize,
+    /// Kit details: designs, uses, separately printed pieces and sub-builds.
+    pub kit_designs: usize,
+    pub kit_uses: usize,
+    pub kit_parts: usize,
+    pub sub_builds: usize,
+    /// Page (1-based) where each sub-build starts, in order.
+    pub sub_build_pages: Vec<usize>,
+    /// Page (1-based) of each main build step.
+    pub step_pages: Vec<usize>,
 }
 
 /// Write the instructions for `model` to `out` (a `.pdf`).
@@ -101,32 +115,42 @@ pub fn pamphlet_bytes(model: &Model, palette: &Palette, meshes: &MeshLibrary, op
         .or_else(|| Some(model.title.clone()).filter(|t| !t.trim().is_empty()))
         .unwrap_or_else(|| "fuSHion model".to_string());
     let mut b = Builder { doc: Pdf::default(), palette, meshes, opts, title, thumbs: BTreeMap::new() };
-    let entries = b.entries(model)?;
     let steps = steps_of(model);
+    let subs = kit::sub_builds(model, &steps, palette);
+    // Each placement's parts-list key: a kit use goes under its sub-build.
+    let mut keys: Vec<(String, ColorId)> = model.placements.iter().map(|p| (p.part.clone(), p.color)).collect();
+    for (g, sb) in subs.iter().enumerate() {
+        for &i in &sb.uses {
+            keys[i] = (sb.key(g), sb.main);
+        }
+    }
+    let entries = b.entries(model, &keys, &subs)?;
 
-    let mut info = PamphletInfo { steps: steps.len(), ..Default::default() };
+    let mut info = PamphletInfo { steps: steps.len(), sub_builds: subs.len(), ..Default::default() };
     for e in entries.values() {
         match e.kind {
-            Kind::Printed => {
-                info.printed_designs += 1;
-                info.printed_parts += e.count;
-            }
-            Kind::Detail => {
-                info.detail_designs += 1;
-                info.detail_parts += e.count;
-            }
+            Kind::Printed => info.printed_parts += e.count,
+            Kind::Detail => info.detail_parts += e.count,
+            Kind::KitPart => info.kit_parts += e.count,
+            Kind::Kit => info.kit_uses += e.count,
             Kind::Catalog => info.catalog_parts += e.count,
         }
     }
     // Designs are counted per part id, not per colour.
     info.printed_designs = distinct(entries.values().filter(|e| e.kind == Kind::Printed));
     info.detail_designs = distinct(entries.values().filter(|e| e.kind == Kind::Detail));
+    let mut designs: Vec<&str> = subs.iter().map(|s| s.design.as_str()).collect();
+    designs.sort_unstable();
+    designs.dedup();
+    info.kit_designs = designs.len();
 
     b.cover(model, &info, steps.len())?;
     b.before_you_build(&info);
     b.parts_pages(&entries, true);
     b.parts_pages(&entries, false);
-    b.step_pages(model, &steps, &entries)?;
+    let (sub_pages, step_pages) = b.step_pages(model, &steps, &entries, &keys, &subs)?;
+    info.sub_build_pages = sub_pages;
+    info.step_pages = step_pages;
     b.finished(model)?;
     b.footers();
 
@@ -181,6 +205,10 @@ pub fn steps_of(model: &Model) -> Vec<Vec<usize>> {
 enum Kind {
     Printed,
     Detail,
+    /// One printed piece of a kit (a petal).
+    KitPart,
+    /// A finished kit detail placed on the model (not printed as one piece).
+    Kit,
     Catalog,
 }
 
@@ -192,14 +220,19 @@ fn kind(p: &Placement) -> Kind {
     }
 }
 
-/// One row of the parts lists: a part in one colour.
+/// One row of the parts lists (or one callout line): a part in one colour.
 struct Entry {
     kind: Kind,
+    /// Key: the part id, `"<design>/<part>"` for a kit piece, `"kit#<n>"` for a sub-build.
     part: String,
+    /// What the row shows in bold: the id, or "rose petal" for a kit piece.
+    title: String,
     color: ColorId,
     count: usize,
     name: String,
     thumb: ImageId,
+    /// A kit piece that needs support material.
+    supports: bool,
 }
 
 const MARGIN: f32 = 40.0;
@@ -208,6 +241,10 @@ const MUTED: [u8; 3] = [110, 114, 120];
 const RULE: [u8; 3] = [200, 203, 208];
 const PANEL: [u8; 3] = [244, 245, 247];
 const ACCENT: [u8; 3] = [214, 64, 52];
+/// Sub-build boxes.
+const TINT: [u8; 3] = [229, 238, 248];
+const TINT_EDGE: [u8; 3] = [170, 192, 220];
+const TINT_INK: [u8; 3] = [32, 66, 112];
 
 struct Builder<'a> {
     doc: Pdf,
@@ -237,11 +274,14 @@ impl Builder<'_> {
         self.doc.add_image(&rgb(img), self.opts.jpeg_quality)
     }
 
-    /// Every part × colour in the model, with a thumbnail each.
-    fn entries(&mut self, model: &Model) -> Result<BTreeMap<(String, ColorId), Entry>> {
+    /// Every part × colour in the model, with a thumbnail each; kit uses as one entry per
+    /// sub-build, plus one per kit piece × colour.
+    fn entries(&mut self, model: &Model, keys: &[(String, ColorId)], subs: &[SubBuild]) -> Result<BTreeMap<(String, ColorId), Entry>> {
         let mut samples: BTreeMap<(String, ColorId), (Placement, usize)> = BTreeMap::new();
-        for p in &model.placements {
-            samples.entry((p.part.clone(), p.color)).or_insert_with(|| (p.clone(), 0)).1 += 1;
+        for (p, k) in model.placements.iter().zip(keys) {
+            if !k.0.starts_with("kit#") {
+                samples.entry(k.clone()).or_insert_with(|| (p.clone(), 0)).1 += 1;
+            }
         }
         // Thumbnails render in parallel.
         let keys: Vec<(String, ColorId)> = samples.keys().cloned().collect();
@@ -267,7 +307,53 @@ impl Builder<'_> {
             let (p, count) = &samples[&k];
             let thumb = self.add(&img)?;
             self.thumbs.insert(k.clone(), thumb);
-            out.insert(k.clone(), Entry { kind: kind(p), part: k.0.clone(), color: k.1, count: *count, name: p.name(), thumb });
+            out.insert(k.clone(), Entry { kind: kind(p), part: k.0.clone(), title: k.0.clone(), color: k.1, count: *count, name: p.name(), thumb, supports: false });
+        }
+
+        // Kits: the finished detail per sub-build, and every piece in every colour.
+        let kr = KitRenderer { palette, meshes, size };
+        let whole: Vec<RgbaImage> = parallel_map(subs, |sb| square(&kr.assembled(&model.kits[&sb.design], &sb.colors)));
+        for ((g, sb), img) in subs.iter().enumerate().zip(whole) {
+            let thumb = self.add(&img)?;
+            let key = (sb.key(g), sb.main);
+            out.insert(
+                key.clone(),
+                Entry { kind: Kind::Kit, part: key.0.clone(), title: sb.label.clone(), color: sb.main, count: sb.uses.len(), name: sb.label.clone(), thumb, supports: false },
+            );
+        }
+        // (design, part index) and count for each piece × colour.
+        let mut pieces: BTreeMap<(String, ColorId), (String, usize, usize, String)> = BTreeMap::new();
+        for sb in subs {
+            let kit = &model.kits[&sb.design];
+            for (pi, part) in kit.parts.iter().enumerate() {
+                let key = (format!("{}/{}", sb.design, part.key), sb.part_colors[pi]);
+                pieces.entry(key).or_insert_with(|| (sb.design.clone(), pi, 0, sb.label.clone())).2 += part.copies.len() * sb.uses.len();
+            }
+        }
+        let pkeys: Vec<(String, ColorId)> = pieces.keys().cloned().collect();
+        let imgs: Vec<RgbaImage> = parallel_map(&pkeys, |k| {
+            let (design, pi, ..) = &pieces[k];
+            square(&kr.part(&model.kits[design].parts[*pi], k.1))
+        });
+        for (k, img) in pkeys.into_iter().zip(imgs) {
+            let (design, pi, count, label) = &pieces[&k];
+            let part = &model.kits[design].parts[*pi];
+            let thumb = self.add(&img)?;
+            self.thumbs.insert(k.clone(), thumb);
+            let per = part.copies.len();
+            out.insert(
+                k.clone(),
+                Entry {
+                    kind: Kind::KitPart,
+                    part: k.0.clone(),
+                    title: format!("{label} {}", part.label),
+                    color: k.1,
+                    count: *count,
+                    name: format!("Kit piece, {per} per {label}"),
+                    thumb,
+                    supports: part.supports,
+                },
+            );
         }
         Ok(out)
     }
@@ -321,6 +407,9 @@ impl Builder<'_> {
         if info.detail_parts > 0 {
             parts.push(format!("{} printed details ({} designs)", info.detail_parts, info.detail_designs));
         }
+        if info.kit_parts > 0 {
+            parts.push(format!("{} printed kit pieces for {} sub-builds", info.kit_parts, info.kit_uses));
+        }
         if info.catalog_parts > 0 {
             parts.push(format!("{} LEGO parts", info.catalog_parts));
         }
@@ -331,14 +420,18 @@ impl Builder<'_> {
         let page = self.doc.pages.last_mut().expect("cover");
         let mut y = bottom + 34.0;
         for f in facts {
-            page.text_center(PAGE_W / 2.0, y, 12.0, Font::Regular, INK, &f);
-            y += 20.0;
+            for line in pdf::wrap(&f, Font::Regular, 12.0, PAGE_W - 2.0 * MARGIN) {
+                page.text_center(PAGE_W / 2.0, y, 12.0, Font::Regular, INK, &line);
+                y += 17.0;
+            }
+            y += 3.0;
         }
         Ok(())
     }
 
     fn before_you_build(&mut self, info: &PamphletInfo) {
-        let printed = info.printed_parts + info.detail_parts > 0;
+        let printed = info.printed_parts + info.detail_parts + info.kit_parts > 0;
+        let kits = info.sub_builds > 0;
         let numbers = self.opts.numbers_on_parts;
         let settings = self.opts.print_settings.clone();
         // Sample colours for the legend.
@@ -374,7 +467,23 @@ impl Builder<'_> {
                 "Every printed part has a number (for example B017) in the parts list and the step pictures. Keep each \
                  print with its number as you go."
             };
-            y = page.paragraph(MARGIN, y, w, 11.0, Font::Regular, INK, num) + 10.0;
+            y = page.paragraph(MARGIN, y, w, 11.0, Font::Regular, INK, num) + 4.0;
+            if kits {
+                page.fill_rect(MARGIN, y, w, 40.0, TINT);
+                page.stroke_rect(MARGIN, y, w, 40.0, 0.75, TINT_EDGE);
+                page.paragraph(
+                    MARGIN + 8.0,
+                    y + 15.0,
+                    w - 16.0,
+                    10.5,
+                    Font::Regular,
+                    TINT_INK,
+                    "Some details, like flowers, are built from several printed pieces. They are built first, in a \
+                     tinted box headed \"Build ×2\" (make two); the next step adds them to the model.",
+                );
+                y += 46.0;
+            }
+            y += 6.0;
 
             y = section(page, y, "Print settings");
             let lines = if settings.is_empty() {
@@ -422,7 +531,8 @@ impl Builder<'_> {
 
     /// "What to print" (printed bricks and details) or "What to buy" (catalog parts).
     fn parts_pages(&mut self, entries: &BTreeMap<(String, ColorId), Entry>, printed: bool) {
-        let rows: Vec<&Entry> = entries.values().filter(|e| (e.kind != Kind::Catalog) == printed).collect();
+        let rows: Vec<&Entry> =
+            entries.values().filter(|e| e.kind != Kind::Kit && (e.kind != Kind::Catalog) == printed).collect();
         if rows.is_empty() {
             return;
         }
@@ -489,11 +599,18 @@ impl Builder<'_> {
                     Some(e) => {
                         page.stroke_rect(x + 1.0, y + 17.0, 10.0, 10.0, 0.9, INK);
                         page.image(e.thumb, x + 18.0, y + 3.0, 40.0, 40.0);
-                        page.text(x + 66.0, y + 18.0, 11.5, Font::Bold, INK, &e.part);
+                        let title = pdf::fit(&e.title, Font::Bold, 11.5, COL_W - 140.0);
+                        page.text(x + 66.0, y + 18.0, 11.5, Font::Bold, INK, &title);
+                        if e.supports {
+                            let tx = x + 70.0 + pdf::text_width(&title, Font::Bold, 11.5);
+                            let tw = pdf::text_width("SUPPORTS", Font::Bold, 6.5) + 8.0;
+                            page.fill_rect(tx, y + 9.5, tw, 10.0, ACCENT);
+                            page.text(tx + 4.0, y + 17.0, 6.5, Font::Bold, [255, 255, 255], "SUPPORTS");
+                        }
                         let qty = format!("×{}", e.count);
                         page.text_right(x + COL_W, y + 18.0, 13.0, Font::Bold, INK, &qty);
                         let desc = match e.kind {
-                            Kind::Catalog => e.name.clone(),
+                            Kind::Catalog | Kind::KitPart | Kind::Kit => e.name.clone(),
                             _ => describe_printed(&e.name, &e.part),
                         };
                         let desc = pdf::fit(&desc, Font::Regular, 8.5, COL_W - 70.0);
@@ -509,9 +626,18 @@ impl Builder<'_> {
         }
     }
 
-    fn step_pages(&mut self, model: &Model, steps: &[Vec<usize>], entries: &BTreeMap<(String, ColorId), Entry>) -> Result<()> {
+    /// The main build steps, each kit sub-build just before the step that adds it. Returns
+    /// the page (1-based) where each sub-build starts and the page of each main step.
+    fn step_pages(
+        &mut self,
+        model: &Model,
+        steps: &[Vec<usize>],
+        entries: &BTreeMap<(String, ColorId), Entry>,
+        keys: &[(String, ColorId)],
+        subs: &[SubBuild],
+    ) -> Result<(Vec<usize>, Vec<usize>)> {
         if steps.is_empty() {
-            return Ok(());
+            return Ok((Vec::new(), Vec::new()));
         }
         // Render every step (in parallel): the picture and the corner it was seen from.
         let size = self.opts.step_image_px.max(64);
@@ -523,15 +649,33 @@ impl Builder<'_> {
             let turn = view::best_turn(&m, &new, meshes);
             (view::trim(&view::render_turned(&m, &pal.palette, meshes, turn, size), 10), turn)
         });
+        // Sub-build pictures: the exploded kit, then each of its steps.
+        let kr = KitRenderer { palette, meshes, size: (size * 3 / 4).max(64) };
+        let sub_imgs: Vec<(RgbaImage, Vec<RgbaImage>)> = parallel_map(subs, |sb| {
+            let kit = &model.kits[&sb.design];
+            (kr.exploded(kit, &sb.colors), kr.steps(kit, &sb.colors))
+        });
+        // The main step each sub-build is first used in.
+        let step_of: Vec<usize> =
+            subs.iter().map(|sb| steps.iter().position(|s| s.contains(&sb.uses[0])).unwrap_or(0)).collect();
 
+        let mut sub_pages = vec![0; subs.len()];
+        let mut step_pages = Vec::with_capacity(steps.len());
+        let mut sub_imgs: Vec<Option<(RgbaImage, Vec<RgbaImage>)>> = sub_imgs.into_iter().map(Some).collect();
         let mut slot_free = false; // the lower half of the current page is free
         for (k, (img, turn)) in rendered.into_iter().enumerate() {
+            for g in (0..subs.len()).filter(|&g| step_of[g] == k) {
+                let (exploded, kit_steps) = sub_imgs[g].take().expect("each sub-build once");
+                sub_pages[g] = self.doc.pages.len() + 1;
+                self.sub_build(model, g, &subs[g], k, &exploded, &kit_steps, entries)?;
+                slot_free = false;
+            }
             let id = self.add(&img)?;
             // This step's parts, grouped.
             let mut group: BTreeMap<(String, ColorId), usize> = BTreeMap::new();
             for &i in &steps[k] {
-                if let Some(p) = model.placements.get(i) {
-                    *group.entry((p.part.clone(), p.color)).or_default() += 1;
+                if let Some(key) = keys.get(i) {
+                    *group.entry(key.clone()).or_default() += 1;
                 }
             }
             let full = group.len() > self.opts.max_kinds_half_page;
@@ -549,12 +693,20 @@ impl Builder<'_> {
                 slot_free = true;
                 (MARGIN, PAGE_H / 2.0 - MARGIN - 10.0)
             };
+            step_pages.push(self.doc.pages.len());
             let page = self.doc.pages.last_mut().expect("page");
             page.text(MARGIN, y0 + 30.0, 32.0, Font::Bold, INK, &format!("{}", k + 1));
             if turn != 0 {
                 page.text(MARGIN, y0 + 46.0, 9.0, Font::Regular, ACCENT, &format!("Seen from the {}", corner(turn)));
             }
-            let rows: Vec<(&Entry, usize)> = group.iter().filter_map(|(key, &n)| entries.get(key).map(|e| (e, n))).collect();
+            let rows: Vec<(&Entry, usize, Option<String>)> = group
+                .iter()
+                .filter_map(|(key, &n)| {
+                    let e = entries.get(key)?;
+                    let note = key.0.strip_prefix("kit#").and_then(|g| g.parse::<usize>().ok()).map(|g| format!("Built on page {}", sub_pages[g]));
+                    Some((e, n, note))
+                })
+                .collect();
             if full {
                 // Picture across the page, callout grid below it.
                 let cols = 3usize;
@@ -567,10 +719,10 @@ impl Builder<'_> {
                 let cw = PAGE_W - 2.0 * MARGIN;
                 page.fill_rect(MARGIN, cy, cw, call_h, PANEL);
                 page.stroke_rect(MARGIN, cy, cw, call_h, 0.75, RULE);
-                for (j, (e, n)) in rows.iter().enumerate() {
+                for (j, (e, n, note)) in rows.iter().enumerate() {
                     let x = MARGIN + 8.0 + (j % cols) as f32 * (cw - 16.0) / cols as f32;
                     let y = cy + 7.0 + (j / cols) as f32 * 46.0;
-                    callout_row(page, x, y, (cw - 16.0) / cols as f32 - 8.0, e, *n, self.palette);
+                    callout_row(page, x, y, (cw - 16.0) / cols as f32 - 8.0, e, *n, note.as_deref(), self.palette);
                 }
             } else {
                 let call_w = 170.0;
@@ -580,9 +732,109 @@ impl Builder<'_> {
                 let cy = y0 + 10.0;
                 page.fill_rect(cx, cy, call_w, call_h, PANEL);
                 page.stroke_rect(cx, cy, call_w, call_h, 0.75, RULE);
-                for (j, (e, n)) in rows.iter().enumerate() {
-                    callout_row(page, cx + 8.0, cy + 7.0 + j as f32 * 46.0, call_w - 16.0, e, *n, self.palette);
+                for (j, (e, n, note)) in rows.iter().enumerate() {
+                    callout_row(page, cx + 8.0, cy + 7.0 + j as f32 * 46.0, call_w - 16.0, e, *n, note.as_deref(), self.palette);
                 }
+            }
+        }
+        Ok((sub_pages, step_pages))
+    }
+
+    /// A tinted sub-build box: "Build ×N", the exploded kit, then the kit's steps two
+    /// across (four on the first page, six on the next ones).
+    #[allow(clippy::too_many_arguments)]
+    fn sub_build(
+        &mut self,
+        model: &Model,
+        g: usize,
+        sb: &SubBuild,
+        main_step: usize,
+        exploded: &RgbaImage,
+        kit_steps: &[RgbaImage],
+        entries: &BTreeMap<(String, ColorId), Entry>,
+    ) -> Result<()> {
+        let kit = &model.kits[&sb.design];
+        let exploded = self.add(exploded)?;
+        let step_ids: Vec<ImageId> = kit_steps.iter().map(|i| self.add(i)).collect::<Result<_>>()?;
+        let palette = self.palette;
+        let n = sb.uses.len();
+        let label = sb.label.clone();
+        let box_page = |b: &mut Self, cont: bool| -> f32 {
+            let page = b.new_page();
+            let (x, y, w, h) = (MARGIN - 10.0, MARGIN - 12.0, PAGE_W - 2.0 * MARGIN + 20.0, PAGE_H - 52.0 - (MARGIN - 12.0));
+            page.fill_rect(x, y, w, h, TINT);
+            page.stroke_rect(x, y, w, h, 1.0, TINT_EDGE);
+            page.text(MARGIN + 2.0, MARGIN + 16.0, 24.0, Font::Bold, TINT_INK, &format!("Build ×{n}"));
+            let hx = MARGIN + 14.0 + pdf::text_width(&format!("Build ×{n}"), Font::Bold, 24.0);
+            page.fill_rect(hx, MARGIN + 4.0, 12.0, 12.0, palette.rgb(sb.main));
+            page.stroke_rect(hx, MARGIN + 4.0, 12.0, 12.0, 0.5, MUTED);
+            let what = format!("{label}, {}{}", palette.name(sb.main), if cont { " (continued)" } else { "" });
+            page.text(hx + 18.0, MARGIN + 14.5, 13.0, Font::Bold, TINT_INK, &what);
+            page.text_right(PAGE_W - MARGIN - 2.0, MARGIN + 14.0, 9.0, Font::Regular, TINT_INK, &format!("for step {}", main_step + 1));
+            let _ = g;
+            MARGIN + 30.0
+        };
+        let mut y = box_page(self, false);
+        let inner_w = PAGE_W - 2.0 * MARGIN - 4.0;
+        let x0 = MARGIN + 2.0;
+        {
+            let page = self.doc.pages.last_mut().expect("page");
+            page.fill_rect(x0, y, inner_w, 210.0, [255, 255, 255]);
+            page.stroke_rect(x0, y, inner_w, 210.0, 0.6, TINT_EDGE);
+            page.text(x0 + 8.0, y + 14.0, 8.5, Font::Regular, MUTED, &format!("Every piece of one {label}"));
+            page.image(exploded, x0 + 8.0, y + 20.0, inner_w - 16.0, 184.0);
+        }
+        y += 220.0;
+        const CELL_H: f32 = 200.0;
+        let cell_w = (inner_w - 10.0) / 2.0;
+        let bottom = PAGE_H - 60.0;
+        for (j, (st, id)) in kit.steps.iter().zip(step_ids).enumerate() {
+            let col = j % 2;
+            if col == 0 && y + CELL_H > bottom {
+                y = box_page(self, true);
+            }
+            let x = x0 + col as f32 * (cell_w + 10.0);
+            let page = self.doc.pages.last_mut().expect("page");
+            page.fill_rect(x, y, cell_w, CELL_H, [255, 255, 255]);
+            page.stroke_rect(x, y, cell_w, CELL_H, 0.6, TINT_EDGE);
+            page.text(x + 8.0, y + 22.0, 18.0, Font::Bold, TINT_INK, &format!("{}", j + 1));
+            page.image(id, x + 30.0, y + 6.0, cell_w - 38.0, 118.0);
+            let mut ty = y + 138.0;
+            if !st.note.is_empty() {
+                for line in pdf::wrap(&st.note, Font::Regular, 8.5, cell_w - 16.0).into_iter().take(2) {
+                    page.text(x + 8.0, ty, 8.5, Font::Regular, INK, &line);
+                    ty += 11.0;
+                }
+            }
+            // Pieces used in this step, by kind.
+            let mut used: BTreeMap<usize, usize> = BTreeMap::new();
+            for &(pi, _) in &st.parts {
+                *used.entry(pi).or_default() += 1;
+            }
+            let rows: Vec<(usize, usize)> = used.into_iter().collect();
+            let room = ((y + CELL_H - 4.0 - ty.max(y + 150.0)) / 22.0).floor().max(1.0) as usize;
+            let ry0 = y + CELL_H - 4.0 - rows.len().min(room) as f32 * 22.0;
+            for (r, &(pi, count)) in rows.iter().enumerate() {
+                let ry = ry0 + r as f32 * 22.0;
+                if r + 1 == room && rows.len() > room {
+                    page.text(x + 8.0, ry + 14.0, 8.5, Font::Regular, MUTED, &format!("+{} more kinds", rows.len() - r));
+                    break;
+                }
+                let part = &kit.parts[pi];
+                let color = sb.part_colors[pi];
+                let key = (format!("{}/{}", sb.design, part.key), color);
+                if let Some(e) = entries.get(&key) {
+                    page.image(e.thumb, x + 8.0, ry, 20.0, 20.0);
+                }
+                page.text(x + 32.0, ry + 14.0, 10.0, Font::Bold, INK, &format!("×{count}"));
+                let tx = x + 36.0 + pdf::text_width(&format!("×{count}"), Font::Bold, 10.0);
+                page.fill_rect(tx, ry + 7.0, 8.0, 8.0, palette.rgb(color));
+                page.stroke_rect(tx, ry + 7.0, 8.0, 8.0, 0.4, MUTED);
+                let what = pdf::fit(&format!("{}, {}", part.label, palette.name(color)), Font::Regular, 8.5, cell_w - (tx - x) - 20.0);
+                page.text(tx + 12.0, ry + 14.0, 8.5, Font::Regular, MUTED, &what);
+            }
+            if col == 1 {
+                y += CELL_H + 10.0;
             }
         }
         Ok(())
@@ -631,17 +883,23 @@ fn describe_printed(name: &str, id: &str) -> String {
     }
 }
 
+/// One line of a step's callout: thumbnail, "B017 ×2", and the colour (or `note`, such as
+/// "Built on page 7" for a sub-build).
 #[allow(clippy::too_many_arguments)]
-fn callout_row(page: &mut Page, x: f32, y: f32, w: f32, e: &Entry, n: usize, palette: &Palette) {
+fn callout_row(page: &mut Page, x: f32, y: f32, w: f32, e: &Entry, n: usize, note: Option<&str>, palette: &Palette) {
     page.fill_rect(x, y, 38.0, 38.0, [255, 255, 255]);
     page.image(e.thumb, x + 1.0, y + 1.0, 36.0, 36.0);
-    let label = pdf::fit(&format!("{} ×{n}", e.part), Font::Bold, 11.0, w - 46.0);
+    let label = pdf::fit(&format!("{} ×{n}", e.title), Font::Bold, 11.0, w - 46.0);
     page.text(x + 46.0, y + 16.0, 11.0, Font::Bold, INK, &label);
     let sw = palette.rgb(e.color);
     page.fill_rect(x + 46.0, y + 23.0, 8.0, 8.0, sw);
     page.stroke_rect(x + 46.0, y + 23.0, 8.0, 8.0, 0.4, MUTED);
-    let cname = pdf::fit(&palette.name(e.color), Font::Regular, 8.5, w - 60.0);
-    page.text(x + 58.0, y + 30.5, 8.5, Font::Regular, MUTED, &cname);
+    let (text, ink) = match note {
+        Some(t) => (t.to_string(), TINT_INK),
+        None => (palette.name(e.color), MUTED),
+    };
+    let text = pdf::fit(&text, Font::Regular, 8.5, w - 60.0);
+    page.text(x + 58.0, y + 30.5, 8.5, Font::Regular, ink, &text);
 }
 
 /// Pad an image to a square on white (thumbnails line up in their boxes).

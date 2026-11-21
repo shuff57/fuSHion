@@ -36,12 +36,19 @@ fn meshes() -> MeshLibrary {
 fn sample_pamphlet_is_a_valid_pdf() {
     let m = sample_model();
     let (bytes, info) = pamphlet_bytes(&m, &Palette::builtin(), &meshes(), &PamphletOptions { step_image_px: 400, thumb_px: 96, ..Default::default() }).unwrap();
-    // Cover, before you build, print list, buy list, 4 steps on 2 pages, finished.
-    assert_eq!(info.pages, 7, "{info:?}");
-    assert_eq!(info.steps, 4);
+    // Cover, before you build, print list, buy list, steps 1–4 on 2 pages, a sub-build page
+    // for each rose (red, then yellow), step 5 adding them, finished.
+    assert_eq!(info.pages, 10, "{info:?}");
+    assert_eq!(info.steps, 5);
     assert_eq!((info.printed_parts, info.printed_designs), (3, 2));
     assert_eq!((info.detail_parts, info.detail_designs), (1, 1));
     assert_eq!(info.catalog_parts, 7);
+    // Two roses in two colour schemes: two sub-builds of one, 6 pieces each; the green hubs
+    // share a parts-list row.
+    assert_eq!((info.kit_designs, info.kit_uses, info.sub_builds, info.kit_parts), (1, 2, 2, 12));
+    assert_eq!(info.step_pages, vec![5, 5, 6, 6, 9]);
+    assert_eq!(info.sub_build_pages, vec![7, 8]);
+    assert!(info.sub_build_pages.iter().all(|&p| p < info.step_pages[4] && p > info.step_pages[3]));
     check_pdf(&bytes, info.pages);
 
     // Poppler, when it's installed, must read it too.
@@ -57,9 +64,35 @@ fn sample_pamphlet_is_a_valid_pdf() {
     }
     if let Ok(out) = std::process::Command::new("pdftotext").arg(&path).arg("-").output() {
         let s = String::from_utf8_lossy(&out.stdout);
-        for want in ["Flower pot (sample)", "Before you build", "What to print", "What to buy", "B001", "D001", "×2", "Finished!", "page 7 of 7"] {
+        for want in [
+            "Flower pot (sample)",
+            "Before you build",
+            "What to print",
+            "What to buy",
+            "B001",
+            "D001",
+            "×2",
+            "Finished!",
+            "page 10 of 10",
+            "Build ×1",
+            "rose, Red",
+            "rose, Yellow",
+            "for step 5",
+            "rose petal",
+            "rose hub",
+            "SUPPORTS",
+            "Clip the four petals onto the hub.",
+            "Built on page 7",
+            "Built on page 8",
+        ] {
             assert!(s.contains(want), "missing {want:?} in:\n{s}");
         }
+        // Page by page: the sub-builds sit on pages 7 and 8, before step 5.
+        let pages: Vec<&str> = s.split('\u{c}').collect();
+        assert!(pages[6].contains("rose, Red") && pages[7].contains("rose, Yellow"), "{:?}", &pages[6..8]);
+        assert!(pages[8].contains("Built on page 7"));
+        // Parts list: hubs ×2 (both green), petals ×4 in red and in yellow.
+        assert!(pages[2].contains("rose hub"));
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -70,7 +103,9 @@ fn big_steps_get_a_page_and_size_stays_reasonable() {
     let mut m = sample_model();
     m.steps = vec![(0..m.placements.len()).collect()];
     let (_, info) = pamphlet_bytes(&m, &Palette::builtin(), &meshes(), &PamphletOptions { step_image_px: 300, thumb_px: 64, max_kinds_half_page: 3, ..Default::default() }).unwrap();
-    assert_eq!(info.pages, 6, "{info:?}");
+    // Cover, before, print, buy, two sub-builds, one big step page, finished.
+    assert_eq!(info.pages, 8, "{info:?}");
+    assert_eq!(info.step_pages, vec![7]);
 }
 
 #[test]

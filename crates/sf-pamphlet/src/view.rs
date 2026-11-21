@@ -14,11 +14,6 @@ use std::collections::HashMap;
 /// First colour code used for made-up colours (ghosts, masks). LDraw codes stay far below.
 const SCRATCH_CODE: ColorId = 50_000;
 
-/// How pale earlier parts are: 0 = their own colour, 1 = the ghost grey.
-const GHOST: f32 = 0.6;
-/// How much of its hue a ghost keeps (the rest goes grey), so a pale red can't pass for pink.
-const GHOST_HUE: f32 = 0.22;
-const GHOST_GREY: [u8; 3] = [236, 237, 240];
 
 /// A copy of `p` turned `turns` quarter turns about the vertical axis through the grid
 /// origin, the same way `Rot` turns a part: grid cell `(x, z)` goes to `(z, -x - 1)` per
@@ -61,18 +56,12 @@ impl ScratchPalette {
         code
     }
 
-    /// The pale stand-in for `code`.
+    /// The pale stand-in for `code` (sf-render's ghost colour, shared with its kit steps).
     pub fn ghost(&mut self, code: ColorId) -> ColorId {
         if let Some(&g) = self.ghosts.get(&code) {
             return g;
         }
-        let c = self.palette.rgb(code).map(f32::from);
-        let lum = 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
-        let rgb = [0, 1, 2].map(|i| {
-            let desat = lum + (c[i] - lum) * GHOST_HUE;
-            (desat * (1.0 - GHOST) + GHOST_GREY[i] as f32 * GHOST).round() as u8
-        });
-        let g = self.add(rgb);
+        let g = self.add(sf_render::ghost_rgb(self.palette.rgb(code)));
         self.ghosts.insert(code, g);
         g
     }
@@ -81,7 +70,9 @@ impl ScratchPalette {
 /// The model up to and including step `k`, with parts from earlier steps ghosted.
 /// Returns the model and the indices (into the new model) of this step's parts.
 pub fn step_model(m: &Model, steps: &[Vec<usize>], k: usize, pal: &mut ScratchPalette, ghost: bool) -> (Model, Vec<usize>) {
-    let mut out = Model { title: m.title.clone(), mode: m.mode, printable: m.printable, meshes: m.meshes.clone(), details: m.details.clone(), ..Default::default() };
+    // Everything but the placements and steps (kits, meshes and details are needed to draw
+    // the parts).
+    let mut out = Model { placements: Vec::new(), steps: Vec::new(), ..m.clone() };
     for s in &steps[..k] {
         for &i in s {
             if let Some(p) = m.placements.get(i) {
@@ -135,6 +126,26 @@ pub fn best_turn(m: &Model, new: &[usize], meshes: &MeshLibrary) -> u8 {
 pub fn render_turned(m: &Model, palette: &Palette, meshes: &MeshLibrary, turns: u8, size: u32) -> RgbaImage {
     let opts = RenderOptions { view_size: size, edges: true, background: [255, 255, 255] };
     render_view(&turn_model(m, turns), palette, meshes, View::Iso, &opts)
+}
+
+/// Crop several same-size renders to one box: the union of their content plus a margin.
+pub fn trim_all(imgs: &[RgbaImage], margin: u32) -> Vec<RgbaImage> {
+    let Some(first) = imgs.first() else { return Vec::new() };
+    let (w, h) = first.dimensions();
+    let (mut x0, mut y0, mut x1, mut y1) = (w, h, 0, 0);
+    for img in imgs {
+        for (x, y, p) in img.enumerate_pixels() {
+            if p[0] < 250 || p[1] < 250 || p[2] < 250 {
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+            }
+        }
+    }
+    if x0 > x1 {
+        return imgs.to_vec();
+    }
+    let (x0, y0) = (x0.saturating_sub(margin), y0.saturating_sub(margin));
+    let (x1, y1) = ((x1 + margin).min(w - 1), (y1 + margin).min(h - 1));
+    imgs.iter().map(|i| image::imageops::crop_imm(i, x0, y0, x1 - x0 + 1, y1 - y0 + 1).to_image()).collect()
 }
 
 /// Crop the white border around a render, keeping a small margin.

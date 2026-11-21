@@ -1,6 +1,6 @@
 //! A small hand-made model with every kind of part, for tests and the example.
 
-use sf_core::{Cell, CustomDef, CustomKind, DetailMesh, Model, Placement, Rot};
+use sf_core::{Cell, CustomDef, CustomKind, DetailMesh, DetailSource, Kit, KitPart, KitPose, KitStep, Model, Placement, Rot};
 
 fn brick(id: &str, cells: Vec<(u8, u8)>, plates: u8) -> CustomDef {
     CustomDef {
@@ -73,6 +73,87 @@ pub fn sample_model() -> Model {
         sockets: vec![(0, 0), (1, 0)],
     };
     m.placements.push(Placement::printed(head, 29, Cell::new(2, 7, 2), Rot(0)));
-    m.steps = vec![vec![0], vec![1, 2, 3, 4, 5], vec![6, 7, 8, 9], vec![10]];
+    // Two roses: a kit of a hub, four petals and a centre, in two colour schemes.
+    let kit = rose_kit();
+    m.meshes.insert("rose".into(), assembled_mesh(&kit));
+    m.kits.insert("rose".into(), kit);
+    let rose = |id: &str, colors: &[(&str, u16)]| CustomDef {
+        id: id.into(),
+        kind: CustomKind::Detail { mesh: "rose".into(), name: "rose".into() },
+        cells: vec![(0, 0), (1, 0)],
+        colors: colors.iter().map(|&(r, c)| (r.to_string(), c)).collect(),
+        plates: 3,
+        studs: Vec::new(),
+        units: Vec::new(),
+        sockets: vec![(0, 0), (1, 0)],
+    };
+    m.placements.push(Placement::printed(rose("D002", &[]), 4, Cell::new(0, 7, 0), Rot(0)));
+    m.placements.push(Placement::printed(rose("D003", &[("centre", 25)]), 14, Cell::new(3, 7, 5), Rot(0)));
+    m.steps = vec![vec![0], vec![1, 2, 3, 4, 5], vec![6, 7, 8, 9], vec![10], vec![11, 12]];
     m
+}
+
+fn about_y(deg: f32, position: [f32; 3]) -> KitPose {
+    let (s, c) = deg.to_radians().sin_cos();
+    KitPose { rotation: [[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]], position }
+}
+
+/// A rose kit: a green hub, four petals ("main") and a yellow centre.
+pub fn rose_kit() -> Kit {
+    let part = |key: &str, label: &str, role: &str, mesh: DetailMesh, supports: bool, copies: Vec<KitPose>| KitPart {
+        key: key.into(),
+        label: label.into(),
+        role: role.into(),
+        mesh,
+        source: DetailSource { source: serde_json::Value::Null },
+        supports,
+        copies,
+    };
+    let mut hub = DetailMesh::default();
+    box_mesh(&mut hub, 40.0, 40.0, 0.0, 12.0);
+    let mut petal = DetailMesh::default();
+    // A petal leaning out along +x from its clip at the origin.
+    box_mesh(&mut petal, 30.0, 16.0, -6.0, 0.0);
+    for v in &mut petal.positions {
+        v[0] += 13.0;
+        v[1] -= v[0] * 0.25;
+    }
+    let mut centre = DetailMesh::default();
+    box_mesh(&mut centre, 14.0, 14.0, -12.0, 0.0);
+    // Each petal clips onto the hub's rim, 16 LDU out.
+    let petals = (0..4)
+        .map(|k| {
+            let (s, c) = (90.0f32 * k as f32).to_radians().sin_cos();
+            about_y(90.0 * k as f32, [16.0 * c, -2.0, -16.0 * s])
+        })
+        .collect();
+    Kit {
+        parts: vec![
+            part("hub", "hub", "hub", hub, false, vec![about_y(0.0, [0.0; 3])]),
+            part("petal", "petal", "main", petal, true, petals),
+            part("centre", "centre", "centre", centre, false, vec![about_y(0.0, [0.0, -2.0, 0.0])]),
+        ],
+        steps: vec![
+            KitStep { parts: vec![(0, 0)], note: String::new() },
+            KitStep { parts: (0..4).map(|c| (1, c)).collect(), note: "Clip the four petals onto the hub.".into() },
+            KitStep { parts: vec![(2, 0)], note: "Press the centre in.".into() },
+        ],
+        roles: vec![("main".into(), "Red".into()), ("hub".into(), "Green".into()), ("centre".into(), "Yellow".into())],
+    }
+}
+
+/// The kit put together, as one mesh (the detail's quick-view mesh).
+fn assembled_mesh(kit: &Kit) -> DetailMesh {
+    let mut out = DetailMesh::default();
+    for part in &kit.parts {
+        for pose in &part.copies {
+            let base = out.positions.len() as u32;
+            for &v in &part.mesh.positions {
+                let r = pose.rotation;
+                out.positions.push([0, 1, 2].map(|i| r[i][0] * v[0] + r[i][1] * v[1] + r[i][2] * v[2] + pose.position[i]));
+            }
+            out.indices.extend(part.mesh.indices.iter().map(|i| i + base));
+        }
+    }
+    out
 }
