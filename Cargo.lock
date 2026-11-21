@@ -5426,6 +5426,7 @@ dependencies = [
  "sf-engine",
  "sf-export",
  "sf-ldraw",
+ "sf-pamphlet",
  "sf-render",
  "sf-spec",
 ]
@@ -5459,6 +5460,7 @@ dependencies = [
  "png",
  "serde",
  "serde_json",
+ "sf-core",
  "solidcraft-engine",
  "solidcraft-io",
  "thiserror 2.0.21",
@@ -5497,11 +5499,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "sf-pamphlet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "flate2",
+ "image",
+ "sf-core",
+ "sf-ldraw",
+ "sf-render",
+]
+
+[[package]]
 name = "sf-render"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "image",
+ "serde_json",
  "sf-core",
  "sf-ldraw",
 ]

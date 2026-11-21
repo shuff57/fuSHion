@@ -19,6 +19,7 @@ sf-catalog = { path = "crates/sf-catalog" }
 sf-export = { path = "crates/sf-export" }
 sf-agent = { path = "crates/sf-agent", default-features = false }
 sf-custom = { path = "crates/sf-custom" }
+sf-pamphlet = { path = "crates/sf-pamphlet" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

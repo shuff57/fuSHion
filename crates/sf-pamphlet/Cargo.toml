@@ -1,0 +1,15 @@
+[package]
+name = "sf-pamphlet"
+description = "Printable PDF build instructions for fuSHion models: cover, parts to print and buy, step pages."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sf-core.workspace = true
+sf-ldraw.workspace = true
+sf-render.workspace = true
+image.workspace = true
+flate2.workspace = true
+anyhow.workspace = true
