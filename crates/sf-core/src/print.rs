@@ -31,6 +31,11 @@ pub struct CustomDef {
     /// Columns with a stud on top. For a brick these are chosen for its spot (see
     /// [`stud_layout`]); a detail usually has none.
     pub studs: Vec<(u8, u8)>,
+    /// How `studs` are fused, each unit a row of 2 or 3 neighbouring columns in order. The
+    /// engine chooses them for the part's spot (no unit under an edge of what sits on it),
+    /// and the print must use exactly these. Empty: every unit by the standard rule.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub units: Vec<Vec<(u8, u8)>>,
     /// Columns that take studs from below (a brick: all its cells; a detail: its base).
     pub sockets: Vec<(u8, u8)>,
 }
@@ -126,6 +131,7 @@ impl DetailDesign {
             cells: self.cells.clone(),
             plates: self.plates,
             studs: self.studs.clone(),
+            units: Vec::new(),
             sockets: self.sockets.clone(),
         }
     }
@@ -286,8 +292,14 @@ impl Placement {
     /// The fused units on top of this part, as grid `(x, z)` columns (studs sit at
     /// `y = top()`). Empty for parts without printable studs.
     pub fn stud_units(&self) -> Vec<Vec<(i32, i32)>> {
-        if self.custom.is_some() {
-            // A printed brick's studs were laid out for its spot: rows along its longer side.
+        if let Some(c) = &self.custom {
+            if !c.units.is_empty() {
+                return c
+                    .units
+                    .iter()
+                    .map(|u| u.iter().map(|&(lx, lz)| self.local_to_grid(lx, lz)).collect())
+                    .collect();
+            }
             let studs = self.top_studs();
             let [fx, fz] = self.footprint();
             return stud_layout(&studs, fx > fz, |_, _| None).0;
@@ -420,6 +432,7 @@ mod tests {
             cells: vec![(0, 0), (1, 0), (2, 0), (0, 1)],
             plates: 3,
             studs: vec![(1, 0), (2, 0)],
+            units: vec![vec![(1, 0), (2, 0)]],
             sockets: vec![(0, 0), (1, 0), (2, 0), (0, 1)],
         }
     }
