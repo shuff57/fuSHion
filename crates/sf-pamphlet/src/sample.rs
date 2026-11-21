@@ -11,6 +11,8 @@ fn brick(id: &str, cells: Vec<(u8, u8)>, plates: u8) -> CustomDef {
         sockets: cells.clone(),
         cells,
         colors: Default::default(),
+        trim: None,
+        mesh: None,
         plates,
     }
 }
@@ -66,6 +68,8 @@ pub fn sample_model() -> Model {
         id: "D001".into(),
         kind: CustomKind::Detail { mesh: "flower_head".into(), name: "flower head".into() },
         colors: Default::default(),
+        trim: None,
+        mesh: None,
         cells: vec![(0, 0), (1, 0)],
         plates: 3,
         studs: Vec::new(),
@@ -86,6 +90,8 @@ pub fn sample_model() -> Model {
         studs: Vec::new(),
         units: Vec::new(),
         sockets: vec![(0, 0), (1, 0)],
+        trim: None,
+        mesh: None,
     };
     m.placements.push(Placement::printed(rose("D002", &[]), 4, Cell::new(0, 7, 0), Rot(0)));
     m.placements.push(Placement::printed(rose("D003", &[("centre", 25)]), 14, Cell::new(3, 7, 5), Rot(0)));

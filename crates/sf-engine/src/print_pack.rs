@@ -399,6 +399,8 @@ fn to_placement(p: &Part) -> Placement {
         id: String::new(),
         kind: CustomKind::Brick,
         colors: Default::default(),
+        trim: None,
+        mesh: None,
         cells: cells.clone(),
         plates: p.plates as u8,
         studs: Vec::new(),

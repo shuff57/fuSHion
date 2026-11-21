@@ -556,6 +556,8 @@ mod tests {
             sockets: cells.clone(),
             cells,
             colors: Default::default(),
+            trim: None,
+            mesh: None,
             plates,
             units,
         };

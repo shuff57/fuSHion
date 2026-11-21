@@ -148,6 +148,8 @@ fn l_brick() -> sf_core::CustomDef {
         kind: sf_core::CustomKind::Brick,
         // An L: a row of four along x and one more at (0, 1).
         colors: Default::default(),
+        trim: None,
+        mesh: None,
         cells: vec![(0, 0), (1, 0), (2, 0), (3, 0), (0, 1)],
         plates: 3,
         studs: vec![(0, 0), (1, 0), (2, 0), (3, 0)],

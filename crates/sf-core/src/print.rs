@@ -41,6 +41,78 @@ pub struct CustomDef {
     pub units: Vec<Vec<(u8, u8)>>,
     /// Columns that take studs from below (a brick: all its cells; a detail: its base).
     pub sockets: Vec<(u8, u8)>,
+    /// A brick that follows the model's true curved surface where it is exposed (print
+    /// mode with curves). `None`: the plain extruded cells.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim: Option<Box<Trim>>,
+    /// Key into `Model::meshes` of an approximate display mesh (trimmed bricks), in the same
+    /// frame as catalog parts' meshes. `None`: draw from `cells`, `studs` and `units`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mesh: Option<String>,
+}
+
+/// The true surface a printed brick follows. Frame: millimetres in the brick's own print
+/// frame, as `sf-custom` builds it: x along local `lx`, y along local `lz` (column
+/// `(lx, lz)` spans `x ∈ [8·lx, 8·lx + 8]`, `y ∈ [8·lz, 8·lz + 8]`), z up from the bottom
+/// of the body (`z ∈ [0, 3.2·plates]`; studs stand above).
+///
+/// The finished brick keeps exactly `block ∩ (S ∪ P)`, where `S` is the model's solid
+/// (the `shapes`, applied in order: `Add` unions, `Subtract` removes, from empty) and `P`
+/// the union of the `protect` boxes: everything that touches another part (a flat top
+/// with studs under a part above, faces against neighbours, the bottom and its sockets)
+/// stays as the plain brick. Boxes in `protect` reach past the brick's faces by at least
+/// a wall's thickness, so an inward offset of `S ∪ P` still covers those faces.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Trim {
+    pub shapes: Vec<TrimShape>,
+    pub protect: Vec<TrimBox>,
+    /// The kept solid has a downward-facing surface steeper than 45° (as measured on the
+    /// display mesh): printing it studs up needs supports.
+    #[serde(default)]
+    pub overhang: bool,
+}
+
+/// One primitive of a [`Trim`]: `kind` in its own frame, placed by `rotation` (row-major,
+/// local → brick) and `translation` (mm, brick frame).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TrimShape {
+    pub op: TrimOp,
+    pub kind: TrimKind,
+    pub rotation: [[f64; 3]; 3],
+    pub translation: [f64; 3],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrimOp {
+    Add,
+    Subtract,
+}
+
+/// Primitive shapes, centred on their own origin, axis along local z where they have one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TrimKind {
+    /// Semi-axes `radii` along local x, y, z.
+    Ellipsoid { radii: [f64; 3] },
+    /// Full `size` along local x, y, z.
+    Box { size: [f64; 3] },
+    /// Elliptic cylinder: semi-axes `radii` in local x, y; `height` along z, centred.
+    Cylinder { radii: [f64; 2], height: f64 },
+    /// Elliptic cone or frustum from `radii` at z = −height/2 to `radii · top_scale` at
+    /// z = +height/2.
+    Cone { radii: [f64; 2], top_scale: f64, height: f64 },
+    /// All points within `radius` of the segment from `a` to `b` (local frame).
+    Capsule { a: [f64; 3], b: [f64; 3], radius: f64 },
+    /// A simple polygon in local x, y extruded `height` along z, centred.
+    Prism { points: Vec<[f64; 2]>, height: f64 },
+}
+
+/// An axis-aligned box, mm, brick frame.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TrimBox {
+    pub min: [f64; 3],
+    pub max: [f64; 3],
 }
 
 /// What a printed part is.
@@ -208,6 +280,8 @@ impl DetailDesign {
             },
             cells: self.cells.clone(),
             colors: BTreeMap::new(),
+            trim: None,
+            mesh: None,
             plates: self.plates,
             studs: self.studs.clone(),
             units: Vec::new(),
@@ -513,6 +587,8 @@ mod tests {
             kind: CustomKind::Brick,
             cells: vec![(0, 0), (1, 0), (2, 0), (0, 1)],
             colors: BTreeMap::new(),
+            trim: None,
+            mesh: None,
             plates: 3,
             studs: vec![(1, 0), (2, 0)],
             units: vec![vec![(1, 0), (2, 0)]],
