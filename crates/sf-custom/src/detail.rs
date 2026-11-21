@@ -90,8 +90,11 @@ pub struct Detail {
     pub part: CustomPart,
     /// Whether printing it standing on its base needs supports: see [`overhang_area`].
     pub supports: bool,
-    /// Downward-facing area flatter than 45° above the socket's ceiling, mm².
+    /// Downward-facing area flatter than 45° above the socket's ceiling, mm² (a kit: the
+    /// sum over its parts, each above its own bed).
     pub overhang_mm2: f64,
+    /// A kit's part prints, in `design.kit` part order (empty for a one-piece detail).
+    pub kit_prints: Vec<CustomPart>,
 }
 
 /// Most triangles a detail's display mesh keeps (the print keeps them all).
@@ -187,7 +190,14 @@ pub fn decimate(mesh: &DetailMesh, max: usize) -> DetailMesh {
 
 /// Builds a detail from a template (see [`TEMPLATES`]): `params` may leave anything out,
 /// which takes its default. `name` is the design's key, `label` its human name.
+///
+/// The decorative templates in [`crate::KITS`] are built as **kits** of separately printed
+/// parts (see [`crate::kits`]) unless `params` has `"one_piece": true`.
 pub fn detail_template(name: &str, label: &str, template: &str, params: &Value) -> Result<Detail> {
+    let one_piece = params.get("one_piece").and_then(Value::as_bool).unwrap_or(false);
+    if !one_piece && crate::kits::KITS.iter().any(|(n, _)| *n == template) {
+        return crate::kits::kit_template(name, label, template, params);
+    }
     let (base, deco, full) = template_commands(template, params)?;
     let source = json!({"template": template, "params": full});
     assemble(name, label, &base, deco, false, None, source)
@@ -237,8 +247,16 @@ pub fn rebuild_detail(source: &Value) -> Result<CustomPart> {
 /// The full [`Detail`] again from a recorded source (template or commands).
 pub fn rebuild(source: &Value, name: &str, label: &str) -> Result<Detail> {
     if let Some(t) = source.get("template").and_then(Value::as_str) {
-        let params = source.get("params").cloned().unwrap_or_else(|| json!({}));
+        let mut params = source.get("params").cloned().unwrap_or_else(|| json!({}));
+        // A one-piece design recorded from a kit template stays one piece.
+        if crate::kits::KITS.iter().any(|(n, _)| *n == t) && params.is_object() {
+            params["one_piece"] = json!(true);
+        }
         return detail_template(name, label, t, &params);
+    }
+    if let Some(t) = source.get("kit").and_then(Value::as_str) {
+        let params = source.get("params").cloned().unwrap_or_else(|| json!({}));
+        return crate::kits::kit_template(name, label, t, &params);
     }
     let pairs = |k: &str| -> Result<Vec<(i32, i32)>> {
         serde_json::from_value(source.get(k).cloned().unwrap_or(Value::Null))
@@ -647,17 +665,9 @@ pub(crate) fn dims(base: &[(i32, i32)]) -> [i32; 2] {
 
 // ---------------------------------------------------------------- assembly
 
-/// Runs base → decoration → trim → hollow → tubes, checks the result and works out the
-/// design.
-fn assemble(
-    name: &str,
-    label: &str,
-    sockets: &[(i32, i32)],
-    deco: Vec<Value>,
-    freeform: bool,
-    limit: Option<Limit>,
-    source: Value,
-) -> Result<Detail> {
+/// Runs base → decoration → trim → hollow → tubes on `sockets` and checks the result: one
+/// closed body, watertight mesh. The base frame: cells from the sockets' coordinates, z up.
+pub(crate) fn build_on_base(sockets: &[(i32, i32)], deco: &[Value], freeform: bool) -> Result<CustomPart> {
     let p = StudProfile::fused();
     let f = Footprint::new(sockets)?;
     // At least two neighbouring sockets in a row.
@@ -707,7 +717,7 @@ fn assemble(
     }
     // 2. Decoration.
     let stage = if freeform { "freeform" } else { "Decoration" };
-    for c in &deco {
+    for c in deco {
         run(&mut s, stage, c)?;
     }
     // 3. Trim: below the base's top, outside the base. A box well round everything, with
@@ -803,6 +813,23 @@ fn assemble(
     if trace {
         eprintln!("export and mesh checks: {:.2} s", t_export.elapsed().as_secs_f64());
     }
+    Ok(part)
+}
+
+/// Builds a detail on its socket base (see [`build_on_base`]) and works out the design.
+fn assemble(
+    name: &str,
+    label: &str,
+    sockets: &[(i32, i32)],
+    deco: Vec<Value>,
+    freeform: bool,
+    limit: Option<Limit>,
+    source: Value,
+) -> Result<Detail> {
+    let p = StudProfile::fused();
+    let hollow_h = BASE_HEIGHT - p.top_thickness;
+    let trace = std::env::var_os("FUSHION_TRACE").is_some();
+    let part = build_on_base(sockets, &deco, freeform)?;
     let (lo, hi) = part.bbox_mm;
     // Occupied columns and plates.
     let col = |v: f64| (v / p.pitch).floor() as i32;
@@ -887,6 +914,7 @@ fn assemble(
         part,
         supports: overhang_mm2 > SUPPORT_AREA_MM2,
         overhang_mm2,
+        kit_prints: Vec::new(),
     })
 }
 
@@ -899,7 +927,7 @@ fn outer_max(loops: &[Vec<P2>], k: usize) -> f64 {
 
 /// Reads a binary STL into an indexed mesh, each vertex mapped by `map` (shared vertices
 /// matched by exact coordinates).
-fn stl_to_ldu(stl: &[u8], map: impl Fn([f64; 3]) -> [f32; 3]) -> Result<DetailMesh> {
+pub(crate) fn stl_to_ldu(stl: &[u8], map: impl Fn([f64; 3]) -> [f32; 3]) -> Result<DetailMesh> {
     analyze_stl(stl)?; // length and finiteness
     let n = u32::from_le_bytes([stl[80], stl[81], stl[82], stl[83]]) as usize;
     let f = |o: usize| f32::from_le_bytes([stl[o], stl[o + 1], stl[o + 2], stl[o + 3]]);

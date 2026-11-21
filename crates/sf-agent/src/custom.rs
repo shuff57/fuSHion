@@ -183,8 +183,24 @@ mod imp {
         let mut defs: BTreeMap<String, sf_core::CustomDef> = BTreeMap::new();
         let mut uses: BTreeMap<(String, ColorId), usize> = BTreeMap::new();
         let mut buy: BTreeMap<(String, ColorId), usize> = BTreeMap::new();
+        // Kit parts by (design, part index, colour): how many to print, and which detail ids
+        // use them.
+        let mut kit_uses: BTreeMap<(String, usize, ColorId), usize> = BTreeMap::new();
+        let mut kit_ids: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for p in &model.placements {
             match &p.custom {
+                Some(c) if matches!(&c.kind, sf_core::CustomKind::Detail { mesh, .. } if model.kits.contains_key(mesh)) => {
+                    let sf_core::CustomKind::Detail { mesh, .. } = &c.kind else { unreachable!() };
+                    let kit = &model.kits[mesh];
+                    for (i, part) in kit.parts.iter().enumerate() {
+                        let colour = kit.role_color(&part.role, p.color, &c.colors, |n| palette.resolve(n));
+                        *kit_uses.entry((mesh.clone(), i, colour)).or_default() += part.copies.len();
+                    }
+                    let ids = kit_ids.entry(mesh.clone()).or_default();
+                    if !ids.contains(&c.id) {
+                        ids.push(c.id.clone());
+                    }
+                }
                 Some(c) => {
                     if let Some(prev) = defs.get(&c.id) {
                         let same = prev.kind == c.kind
@@ -204,7 +220,19 @@ mod imp {
             }
         }
         std::fs::create_dir_all(out)?;
-        let jobs: Vec<&sf_core::CustomDef> = defs.values().collect();
+        // Jobs: each printed part's id, then each kit part (keyed "kit:<design>:<index>").
+        enum Job<'a> {
+            Def(&'a sf_core::CustomDef),
+            Kit(&'a str, usize),
+        }
+        let kit_parts: std::collections::BTreeSet<(String, usize)> =
+            kit_uses.keys().map(|(m, i, _)| (m.clone(), *i)).collect();
+        let jobs: Vec<Job> = defs
+            .values()
+            .filter(|d| uses.keys().any(|(id, _)| id == &d.id))
+            .map(Job::Def)
+            .chain(kit_parts.iter().map(|(m, i)| Job::Kit(m.as_str(), *i)))
+            .collect();
         let total = jobs.len();
         let results: Mutex<BTreeMap<String, Result<sf_custom::CustomPart>>> = Mutex::new(BTreeMap::new());
         let next = AtomicUsize::new(0);
@@ -215,9 +243,18 @@ mod imp {
             for _ in 0..threads {
                 scope.spawn(|| loop {
                     let k = next.fetch_add(1, Ordering::SeqCst);
-                    let Some(def) = jobs.get(k) else { break };
-                    let r = print_part(def, model);
-                    results.lock().unwrap_or_else(|e| e.into_inner()).insert(def.id.clone(), r);
+                    let Some(job) = jobs.get(k) else { break };
+                    let (key, r) = match job {
+                        Job::Def(def) => (def.id.clone(), print_part(def, model)),
+                        Job::Kit(mesh, i) => {
+                            let src = &model.kits[*mesh].parts[*i].source.source;
+                            (
+                                format!("kit:{mesh}:{i}"),
+                                sf_custom::build_kit_part(src).map_err(|e| anyhow::anyhow!("{mesh} {}: {e}", model.kits[*mesh].parts[*i].key)),
+                            )
+                        }
+                    };
+                    results.lock().unwrap_or_else(|e| e.into_inner()).insert(key, r);
                     progress(done.fetch_add(1, Ordering::SeqCst) + 1, total);
                 });
             }
@@ -259,6 +296,38 @@ mod imp {
                 grams: part.volume_mm3 * PLA_G_PER_MM3,
                 supports: supports
                     && sf_custom::overhang_area(&part.stl, DETAIL_CEILING_MM) > sf_custom::SUPPORT_AREA_MM2,
+                file: made.stl.strip_prefix(out).ok().map(|p| p.to_string_lossy().into_owned()),
+            });
+        }
+        for ((mesh, i, color), count) in &kit_uses {
+            let part = &model.kits[mesh].parts[*i];
+            let colour = palette.name(*color);
+            let made_part = match results.get(&format!("kit:{mesh}:{i}")) {
+                Some(Ok(p)) => p,
+                Some(Err(e)) => {
+                    notes.push(format!("{mesh} {} in {colour}: {e:#}", part.key));
+                    continue;
+                }
+                None => continue,
+            };
+            let name = format!("{}_{}", slug(mesh), slug(&part.key));
+            let dir = out.join(slug(&colour));
+            let made = write(made_part, &dir, &name)?;
+            files.push(made.stl.clone());
+            files.push(made.three_mf);
+            let (lo, hi) = made_part.bbox_mm;
+            let studs = |mm: f64| (mm / 8.0).ceil().clamp(0.0, 255.0) as u8;
+            rows.push(PrintRow {
+                id: kit_ids.get(mesh).map(|v| v.join(" ")).unwrap_or_default(),
+                kind: "kit part".into(),
+                description: format!("{} ({mesh})", part.label),
+                colour,
+                count: *count,
+                plates: ((hi[2] - lo[2]) / 3.2).ceil() as u32,
+                size_studs: [studs(hi[0] - lo[0]), studs(hi[1] - lo[1])],
+                volume_mm3: made_part.volume_mm3,
+                grams: made_part.volume_mm3 * PLA_G_PER_MM3,
+                supports: part.supports,
                 file: made.stl.strip_prefix(out).ok().map(|p| p.to_string_lossy().into_owned()),
             });
         }
@@ -383,6 +452,12 @@ pub fn make_part_from_commands(batch: &Value, out: &Path, name: &str) -> Result<
     imp::from_commands(batch, out, &slug(name))
 }
 
+/// Print files for a model built to print. A detail built as a kit (its design in
+/// `model.kits`) prints as its parts instead: each part once per colour, as
+/// `out/<colour>/<design>_<part>.stl|.3mf`, its count the part's copies times the detail's
+/// uses, in a "kit part" row naming the detail ids; part colours come from the placement
+/// (role "main"), its `colors`, or the kit's role defaults.
+///
 /// Print files for a model built to print: one STL and 3MF per printed part (each id once,
 /// made on as many threads as the machine has, up to 8), copied into a folder per colour as
 /// `out/<colour>/<id>.stl|.3mf`, and `out/print-list.csv` listing every printed part (id,
@@ -533,6 +608,49 @@ mod tests {
         let b1_rows: Vec<_> = set.rows.iter().filter(|r| r.id == "B001").collect();
         assert_eq!(b1_rows.len(), 2);
         assert!(b1_rows.iter().all(|r| r.count == 1 && r.grams > 0.5));
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// A model using a kit: each kit part is printed in its role's colour, one row each.
+    #[test]
+    fn print_set_prints_kit_parts_by_role_colour() {
+        use sf_core::{Cell, Model, Palette, Placement, Rot};
+        let eye = sf_custom::detail_template("eye_kit", "eye", "eye", &serde_json::json!({})).unwrap().design;
+        let kit = eye.kit.clone().expect("eye is a kit");
+        let mut model = Model { title: "t".into(), ..Default::default() };
+        model.meshes.insert(eye.name.clone(), eye.mesh.clone());
+        model.details.insert(eye.name.clone(), eye.source.clone());
+        model.kits.insert(eye.name.clone(), kit.clone());
+        let pal = Palette::builtin();
+        let mut d1 = eye.instance("D001");
+        let d2 = eye.instance("D002");
+        // The second eye's pupil is blue instead of the default black.
+        d1.colors.insert("pupil".into(), pal.resolve("Blue").unwrap());
+        model.placements = vec![
+            Placement::printed(d1, 15, Cell::new(0, 0, 0), Rot(0)),
+            Placement::printed(d2, 15, Cell::new(4, 0, 0), Rot(0)),
+        ];
+        let out = std::env::temp_dir().join(format!("fushion-kit-set-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let set = super::export_print_set(&model, &pal, &out, |_, _| {}).unwrap();
+        assert!(set.notes.is_empty(), "{:?}", set.notes);
+        let white = super::slug(&pal.name(15));
+        let black = super::slug("Black");
+        let blue = super::slug("Blue");
+        assert!(out.join(&white).join("eye-kit_eye.stl").is_file());
+        assert!(out.join(&black).join("eye-kit_pupil.stl").is_file());
+        assert!(out.join(&blue).join("eye-kit_pupil.3mf").is_file());
+        let kit_rows: Vec<_> = set.rows.iter().filter(|r| r.kind == "kit part").collect();
+        // eye ×2 in white; pupil ×1 black, ×1 blue.
+        assert_eq!(kit_rows.len(), 3, "{kit_rows:?}");
+        let eyes: Vec<_> = kit_rows.iter().filter(|r| r.description.starts_with("eye")).collect();
+        assert_eq!(eyes.len(), 1);
+        assert_eq!(eyes[0].count, 2);
+        assert!(kit_rows.iter().all(|r| r.id.contains("D001") && r.id.contains("D002")));
+        let csv = std::fs::read_to_string(&set.list).unwrap();
+        assert!(csv.contains(",kit part,"), "{csv}");
+        // No whole-detail print for a kit.
+        assert!(!set.rows.iter().any(|r| r.kind == "detail"));
         let _ = std::fs::remove_dir_all(&out);
     }
 }

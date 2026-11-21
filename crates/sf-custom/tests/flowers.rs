@@ -4,7 +4,9 @@
 use serde_json::{Value, json};
 use sf_custom::{DISPLAY_TRIANGLES, Detail, SPECIES, analyze_stl, detail_template};
 
-fn build(name: &str, params: Value) -> Detail {
+fn build(name: &str, mut params: Value) -> Detail {
+    // These are the one-piece species (the same names build kits by default).
+    params["one_piece"] = json!(true);
     let t = std::time::Instant::now();
     let d = detail_template(name, name, name, &params).unwrap_or_else(|e| panic!("{name} {params}: {e}"));
     let g = &d.design;

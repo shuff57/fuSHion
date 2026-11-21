@@ -33,6 +33,8 @@ mod detail;
 mod fit;
 mod flower;
 mod geom;
+mod kit;
+mod kits;
 mod label;
 mod mesh;
 mod plan;
@@ -46,6 +48,11 @@ pub use detail::{
     decimate, detail_from_commands, detail_template, overhang_area, rebuild, rebuild_detail,
 };
 pub use flower::SPECIES;
+pub use kit::{
+    BAR_D, BuiltKit, ClipFit, ClipSpec, HOLE_D, MAX_STRAIN, MIN_FEATURE, PEG_D, PEG_LEN, PegFit,
+    append_posed, assemble_kit, build_kit_part, clip_fit, coupon, peg_fit,
+};
+pub use kits::KITS;
 pub use fit::{FitReport, SlantOutline, TopBrick, fit, fit_below, fit_under, slant_outline};
 pub use label::{LABEL_CHARS, LABEL_DEPTH, engravable};
 pub use mesh::{MeshReport, analyze_stl};
