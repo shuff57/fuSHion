@@ -100,7 +100,7 @@ fn build_at(
         }
     }
     if let Some(b) = &c.bouquet {
-        match bouquet::plan_hub(b, &opts.details, &p.placements, &bouquet::hub_id(&p.placements)) {
+        match bouquet::plan_hub(b, &opts.details, &p.placements, &bouquet::hub_id(&p.placements), repair_rounds == 0) {
             Ok(plan) => p.placements.push(plan.placement),
             Err(e) => p.warnings.push(e),
         }
@@ -511,12 +511,14 @@ impl Report {
         if let Some(b) = &self.stems {
             let _ = writeln!(
                 s,
-                "Stems: {} (longest {:.0} mm{}), {} heads, {} leaves; each prints as one piece, plug them in by hole number",
+                "Stems: {} (longest {:.0} mm{}), {} heads, {} leaves{}{}; each prints as one piece, plug them in by hole number",
                 b.stems,
                 b.longest_mm,
                 if b.clamped > 0 { format!(", {} shortened to fit a print bed", b.clamped) } else { String::new() },
                 b.heads,
-                b.leaves
+                b.leaves,
+                if b.leaves_left_off > 0 { format!(" ({} suggested leaves left off: no room)", b.leaves_left_off) } else { String::new() },
+                if b.straightened > 0 { format!("; {} lean less at the hub and bend more, so their holes keep apart", b.straightened) } else { String::new() }
             );
             let _ = writeln!(s, "Hub: {} holes, {} × {} studs on the vase top", b.holes, b.hub_size, b.hub_size);
         }

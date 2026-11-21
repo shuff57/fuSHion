@@ -108,9 +108,10 @@ pub struct StemSpec {
     pub head: Option<String>,
     /// Where the head sits (the mouth of its bar hole), or the end of a bare stem; spec units.
     pub tip: [f32; 3],
-    /// Total bend in degrees, outward, away from the bouquet's middle (0: straight).
-    #[serde(default)]
-    pub bend: f32,
+    /// Total bend in degrees (0: straight). Leave it out to let the engine bend the stem so
+    /// its head faces out toward the viewer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bend: Option<f32>,
     /// Stem colour (default: the stem style's, else Dark Green).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
@@ -135,8 +136,10 @@ pub struct StemSpec {
     /// Turn of the head about the stem, degrees (default: its front toward the viewer).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spin: Option<f32>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub leaves: Vec<LeafSpec>,
+    /// Leaves; leave it out for the stem style's own leaves (placed where they fit), `[]`
+    /// for none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leaves: Option<Vec<LeafSpec>>,
 }
 
 /// A stem's look: `"auto"`, or a style written out.
@@ -200,7 +203,8 @@ pub struct GridStem {
     pub head: Option<String>,
     /// LDU.
     pub tip: [f32; 3],
-    pub bend: f32,
+    /// `None`: chosen by the engine.
+    pub bend: Option<f32>,
     /// `None`: the style's colour, else Dark Green.
     pub color: Option<ColorId>,
     /// `None`: the head design's own stem style.
@@ -210,7 +214,8 @@ pub struct GridStem {
     pub head_color: Option<ColorId>,
     pub head_colors: std::collections::BTreeMap<String, ColorId>,
     pub spin: Option<f32>,
-    pub leaves: Vec<GridLeaf>,
+    /// `None`: the style's leaves.
+    pub leaves: Option<Vec<GridLeaf>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -482,14 +487,14 @@ pub fn compile(spec: &Spec, palette: &Palette, opts: &CompileOptions) -> Result<
         };
         let mut stems = Vec::new();
         for (i, s) in b.stems.iter().enumerate() {
-            if !finite(&s.tip) || !s.bend.is_finite() || s.spin.is_some_and(|v| !v.is_finite()) {
+            if !finite(&s.tip) || s.bend.is_some_and(|v| !v.is_finite()) || s.spin.is_some_and(|v| !v.is_finite()) {
                 bail!("bouquet stem {}: `tip`, `bend` and `spin` must be finite numbers", i + 1);
             }
             let roles = |m: &std::collections::BTreeMap<String, String>, warnings: &mut Vec<String>| {
                 m.iter().map(|(r, c)| (r.clone(), resolve_color(palette, c, warnings))).collect::<std::collections::BTreeMap<_, _>>()
             };
             let mut leaves = Vec::new();
-            for l in &s.leaves {
+            for l in s.leaves.iter().flatten() {
                 if !l.at.is_finite() || !(0.0..=1.0).contains(&l.at) {
                     warnings.push(format!("bouquet stem {}: leaf `at` is a fraction of the stem (0–1); clamped", i + 1));
                 }
@@ -515,7 +520,7 @@ pub fn compile(spec: &Spec, palette: &Palette, opts: &CompileOptions) -> Result<
                 head_color: s.head_color.as_ref().map(|c| resolve_color(palette, c, &mut warnings)),
                 head_colors: roles(&s.head_colors, &mut warnings),
                 spin: s.spin,
-                leaves,
+                leaves: s.leaves.as_ref().map(|_| leaves),
             });
         }
         out.bouquet = Some(GridBouquet { hub: to_ldu(&out.map, b.hub), stems, default_color });
@@ -941,8 +946,8 @@ mod tests {
         let p = Palette::builtin();
         assert_eq!(b.stems[0].color, None);
         assert_eq!(b.stems[1].color, p.resolve("Green"));
-        assert_eq!(b.stems[0].leaves[0].color, p.resolve("Green").unwrap());
-        assert_eq!(b.stems[0].leaves[0].at, 1.0);
+        assert_eq!(b.stems[0].leaves.as_ref().unwrap()[0].color, p.resolve("Green").unwrap());
+        assert_eq!(b.stems[0].leaves.as_ref().unwrap()[0].at, 1.0);
         assert!(c.warnings.iter().any(|w| w.contains("fraction")));
         assert_eq!(b.stems[0].head_colors.get("centre"), p.resolve("Yellow").as_ref());
         assert_eq!(b.stems[1].head, None);
@@ -970,5 +975,17 @@ mod tests {
         // Round trip keeps "auto" implicit.
         let json = serde_json::to_string(&s).unwrap();
         assert!(!json.contains("\"style\":\"auto\"") && json.contains("\"grass\""));
+    }
+
+    #[test]
+    fn bend_and_leaves_can_be_left_out() {
+        let s = spec(
+            r#"{"shapes":[{"shape":"box","center":[0,2,0],"size":[4,4,4]}],
+            "bouquet":{"hub":[0,4,0],"stems":[{"tip":[0,10,0]},{"tip":[1,10,0],"bend":0,"leaves":[]}]}}"#,
+        );
+        let c = compile(&s, &Palette::builtin(), &CompileOptions { resolution: Some(10), image: None }).unwrap();
+        let st = &c.bouquet.unwrap().stems;
+        assert_eq!((st[0].bend, st[0].leaves.is_none()), (None, true));
+        assert_eq!((st[1].bend, st[1].leaves.as_ref().map(Vec::len)), (Some(0.0), Some(0)));
     }
 }

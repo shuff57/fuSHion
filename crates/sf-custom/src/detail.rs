@@ -214,7 +214,9 @@ pub fn detail_template(name: &str, label: &str, template: &str, params: &Value) 
         .get("one_piece")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    if !one_piece && crate::kits::KITS.iter().any(|(n, _)| *n == template) {
+    let kit = !one_piece && crate::kits::KITS.iter().any(|(n, _)| *n == template);
+    let params = &checked_params(template, kit, params)?;
+    if kit {
         return crate::kits::kit_template(name, label, template, params);
     }
     let (base, deco, full, post, mount) = template_commands(template, params)?;
@@ -223,6 +225,53 @@ pub fn detail_template(name: &str, label: &str, template: &str, params: &Value) 
     let mut d = assemble(name, label, &base, deco, &post, false, None, mount, source)?;
     d.design.stem = style;
     Ok(d)
+}
+
+/// The parameter names a template's text lists (`"name":` in it).
+fn listed_params(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(i) = rest.find('"') {
+        let after = &rest[i + 1..];
+        let Some(j) = after.find('"') else { break };
+        let word = &after[..j];
+        let tail = &after[j + 1..];
+        if tail.starts_with(':') && word.chars().all(|c| c.is_ascii_lowercase() || c == '_') && !out.iter().any(|w| w == word) {
+            out.push(word.to_string());
+        }
+        rest = tail;
+    }
+    out
+}
+
+/// `params` with the common other names taken (`"diameter"` for a flower's `"size"`,
+/// `"species"` for a spike's `"kind"`), and refused if it names a parameter the template
+/// doesn't have (so a misspelt size is an error, not a silently default flower).
+fn checked_params(template: &str, kit: bool, params: &Value) -> Result<Value> {
+    let Some(obj) = params.as_object() else { return Ok(params.clone()) };
+    let text = if kit {
+        crate::kits::KITS.iter().find(|(n, _)| *n == template).map(|t| t.1)
+    } else {
+        TEMPLATES.iter().chain(crate::flower::SPECIES.iter()).find(|(n, _)| *n == template).map(|t| t.1)
+    };
+    let Some(text) = text else { return Ok(params.clone()) };
+    let mut known = listed_params(text);
+    known.extend(["one_piece", "mount", "base"].map(String::from));
+    let mut out = obj.clone();
+    for (alias, real) in [("diameter", "size"), ("species", "kind")] {
+        if known.iter().any(|k| k == real) && !known.iter().any(|k| k == alias)
+            && let Some(v) = out.remove(alias)
+        {
+            out.entry(real.to_string()).or_insert(v);
+        }
+    }
+    if let Some(k) = out.keys().find(|k| !known.contains(k)) {
+        return Err(CustomError::InvalidShape(format!(
+            "`{template}` has no parameter `{k}`; it takes {}",
+            known.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ")
+        )));
+    }
+    Ok(Value::Object(out))
 }
 
 /// Builds a detail from Claude's own SolidCraft commands (`{"commands": [...]}` or a bare

@@ -38,31 +38,31 @@ use std::f64::consts::PI;
 pub const KITS: &[(&str, &str)] = &[
     (
         "rose",
-        r#"{"size": 36 (24-60), "petals": 4 (per ring, 3-5), "open": 0.4 (0-1), "stem_height": 0, "mount": true (a bar hole up the hub for a printed stem's tip bar; lifts the hub about 6 mm; only with stem_height 0), "base": [2, 2]} — hub, 4 outer + 4 middle petals, a curled bud; stem: plain Dark Green Ø5, 2 leaf places"#,
+        r#"{"size": 36 (head width in mm, also "diameter"; 64 mm is 8 studs across; 24-64), "petals": 4 (per ring, 3-5), "open": 0.4 (0-1), "stem_height": 0, "mount": true (a bar hole up the hub for a printed stem's tip bar; lifts the hub about 6 mm; only with stem_height 0), "base": [2, 2]} — hub, 4 outer + 4 middle petals, a curled bud; stem: plain Dark Green Ø5, 2 leaf places; colours: main (outer petals), inner (the inner cup, default Tan), centre (the bud, default White)"#,
     ),
     (
         "daisy",
-        r#"{"size": 40 (28-56), "petals": 6 (5-8), "petal_width": 0.7 (0.3-1 of the room), "centre": 0.5 (centre disc / petal ring, 0.3-0.8), "stem_height": 0, "mount": true (a bar hole up the hub for a printed stem's tip bar; lifts the hub about 6 mm; only with stem_height 0), "base": [2, 2]} — hub, flat petals, a centre disc; stem: a forked Dark Green Ø4 sprig, 3 heads at different heights"#,
+        r#"{"size": 40 (head width in mm, also "diameter"; 64 mm is 8 studs across; 28-64), "petals": 6 (5-8), "petal_width": 0.7 (0.3-1 of the room), "centre": 0.5 (centre disc / petal ring, 0.3-0.8), "stem_height": 0, "mount": true (a bar hole up the hub for a printed stem's tip bar; lifts the hub about 6 mm; only with stem_height 0), "base": [2, 2]} — hub, flat petals, a centre disc; stem: a forked Dark Green Ø4 sprig, 3 heads at different heights; colours: main (petals), centre (default Yellow)"#,
     ),
     (
         "aster",
-        r#"{"size": 34 (26-50), "fans": 4 (per ring, 3-4), "per_fan": 4 (2-5), "cup": 25 (inner ring, 0-60), "stem_height": 0, "mount": true (a bar hole up the hub for a printed stem's tip bar; lifts the hub about 6 mm; only with stem_height 0), "base": [2, 2]} — hub, two rings of petal fans, a domed centre; stem: plain Dark Green Ø5, 1 leaf"#,
+        r#"{"size": 34 (head width in mm, also "diameter"; 64 mm is 8 studs across; 26-64), "fans": 4 (per ring, 3-4), "per_fan": 4 (2-5), "cup": 25 (inner ring, 0-60), "stem_height": 0, "mount": true (a bar hole up the hub for a printed stem's tip bar; lifts the hub about 6 mm; only with stem_height 0), "base": [2, 2]} — hub, two rings of petal fans, a domed centre; stem: plain Dark Green Ø5, 1 leaf; colours: main (both rings of fans), centre (default Yellow)"#,
     ),
     (
         "gerbera",
-        r#"{"size": 36 (26-56), "fans": 4 (3-4), "per_fan": 4 (2-5), "stem_height": 0, "mount": true (a bar hole up the hub for a printed stem's tip bar; lifts the hub about 6 mm; only with stem_height 0), "base": [2, 2]} — hub, two rings of petal fans, a dark centre; stem: plain, long, Dark Green Ø5"#,
+        r#"{"size": 36 (head width in mm, also "diameter"; 64 mm is 8 studs across; 26-64), "fans": 4 (3-4), "per_fan": 4 (2-5), "stem_height": 0, "mount": true (a bar hole up the hub for a printed stem's tip bar; lifts the hub about 6 mm; only with stem_height 0), "base": [2, 2]} — hub, two rings of petal fans, a dark centre; stem: plain, long, Dark Green Ø5; colours: main (both rings of fans), centre (default Reddish Brown)"#,
     ),
     (
         "poppy",
-        r#"{"size": 32 (20-56), "petals": 4 (3-5), "open": 0.3 (0-1), "stem_height": 0, "mount": true (a bar hole up the hub for a printed stem's tip bar; lifts the hub about 6 mm; only with stem_height 0), "base": [2, 2]} — hub, cupped petals, a spoked centre; stem: plain Dark Green Ø4.5 with a bud branch"#,
+        r#"{"size": 32 (head width in mm, also "diameter"; 64 mm is 8 studs across; 20-64), "petals": 4 (3-5), "open": 0.3 (0-1), "stem_height": 0, "mount": true (a bar hole up the hub for a printed stem's tip bar; lifts the hub about 6 mm; only with stem_height 0), "base": [2, 2]} — hub, cupped petals, a spoked centre; stem: plain Dark Green Ø4.5 with a bud branch; colours: main (petals), centre (default Black)"#,
     ),
     (
         "cornflower",
-        r#"{"size": 26 (18-44), "florets": 6 (5-6), "angle": 60 (45-85), "stem_height": 0, "mount": true (a bar hole up the hub for a printed stem's tip bar; lifts the hub about 6 mm; only with stem_height 0), "base": [2, 2]} — hub, trumpet florets, a spiky tuft; stem: thin Dark Green Ø3.5, 2 small bud branches"#,
+        r#"{"size": 26 (head width in mm, also "diameter"; 18-48), "florets": 6 (5-6), "angle": 60 (45-85), "stem_height": 0, "mount": true (a bar hole up the hub for a printed stem's tip bar; lifts the hub about 6 mm; only with stem_height 0), "base": [2, 2]} — hub, trumpet florets, a spiky tuft; stem: thin Dark Green Ø3.5, 2 small bud branches; colours: main (florets), centre (default Dark Blue)"#,
     ),
     (
         "spike",
-        r#"{"kind": "lupin" (snapdragon|lupin|lavender|larkspur), "height": 36 (12-48), "rings": 6 (2-10), "florets_per_ring": 5 (3-6), "taper": 0.3 (0-0.8), "floret_size": 6 (3-8), "stem_height": 6 (0-24), "mount": true (a bar hole up a foot under the stem, for a printed stem's tip bar; needs stem_height ≥ 4.8), "base": [2, 1]} — a bar stem, floret collars in three sizes; stem: snapdragon/lupin/larkspur a straight Dark Green Ø5 stalk with 2 bud branches near the top; lavender a Reddish Brown Ø3.5 sprig branching into 3 more heads"#,
+        r#"{"kind": "lupin" (snapdragon|lupin|lavender|larkspur; also "species"), "height": 36 (12-48), "rings": 6 (2-10), "florets_per_ring": 5 (3-6), "taper": 0.3 (0-0.8), "floret_size": 6 (3-8), "stem_height": 6 (0-24), "mount": true (a bar hole up a foot under the stem, for a printed stem's tip bar; needs stem_height ≥ 4.8), "base": [2, 1]} — a bar stem, floret collars in three sizes; stem: snapdragon/lupin/larkspur a straight Dark Green Ø5 stalk with 2 bud branches near the top; lavender a Reddish Brown Ø3.5 sprig branching into 3 more heads"#,
     ),
     (
         "umbel",
@@ -287,6 +287,17 @@ fn hub(at: P2, h: &Hub, base: &[(i32, i32)]) -> (PartDef, f64, Option<crate::ste
         top,
         mount,
     )
+}
+
+/// Biggest flower head the kits make, mm across (a petal part stays well under
+/// [`crate::MAX_PART_MM`]).
+pub const MAX_HEAD: f64 = 64.0;
+
+/// The bar circle for a head `size` mm across that is `default` mm at `r`: as big as `r`
+/// for smaller heads, growing with the head above it, so a big flower's hub, centre and
+/// petal roots scale with its petals (clips and bars keep their size).
+fn grown(r: f64, size: f64, default: f64) -> f64 {
+    r * (size / default).max(1.0)
 }
 
 /// The smallest bar circle for `n` low bars and `m` high bars (alternating when both).
@@ -551,13 +562,13 @@ fn stem_height(p: &Value) -> Result<f64> {
 }
 
 fn rose(p: &Value) -> Result<(KitDef, Value)> {
-    let size = num(p, "size", 36.0, 24.0, 60.0)?;
+    let size = num(p, "size", 36.0, 24.0, MAX_HEAD)?;
     let n = num(p, "petals", 4.0, 3.0, 5.0)?.round() as usize;
     let open = num(p, "open", 0.4, 0.0, 1.0)?;
     let sh = stem_height(p)?;
     let base = base_param(p, [2, 2])?;
     let at = base_centre(&base);
-    let r_b = bar_radius(n, n);
+    let r_b = grown(bar_radius(n, n), size, 36.0);
     let step = 2.0 * PI / n as f64;
     let h = Hub {
         stem_height: sh,
@@ -646,7 +657,7 @@ fn rose(p: &Value) -> Result<(KitDef, Value)> {
         petal_def(
             "middle_petal",
             "middle petal",
-            "main",
+            "inner",
             middle,
             ring_copies(at, r_b, &h.high, top + hc + 0.4),
             PETAL_WHY,
@@ -654,7 +665,7 @@ fn rose(p: &Value) -> Result<(KitDef, Value)> {
         petal_def(
             "bud",
             "bud",
-            "main",
+            "centre",
             bud,
             vec![centre_copy(at, top)],
             "upright on its peg, widening through a cone steeper than 45°; the peg's halves close in the bed plane",
@@ -676,7 +687,7 @@ fn rose(p: &Value) -> Result<(KitDef, Value)> {
         KitDef {
             parts,
             steps,
-            roles: vec![("main", "Red"), ("stem", "Green")],
+            roles: vec![("main", "Red"), ("inner", "Tan"), ("centre", "White"), ("stem", "Green")],
             sockets: base.clone(),
             mount: hub_mount,
         },
@@ -698,14 +709,14 @@ fn cap_profile(r: f64, zb: f64, h: f64) -> Vec<Value> {
 }
 
 fn daisy(p: &Value) -> Result<(KitDef, Value)> {
-    let size = num(p, "size", 40.0, 28.0, 56.0)?;
+    let size = num(p, "size", 40.0, 28.0, MAX_HEAD)?;
     let n = num(p, "petals", 6.0, 5.0, 8.0)?.round() as usize;
     let pw = num(p, "petal_width", 0.7, 0.3, 1.0)?;
     let centre = num(p, "centre", 0.5, 0.3, 0.8)?;
     let sh = stem_height(p)?;
     let base = base_param(p, [2, 2])?;
     let at = base_centre(&base);
-    let r_b = bar_radius(n, 0);
+    let r_b = grown(bar_radius(n, 0), size, 40.0);
     let step = 2.0 * PI / n as f64;
     let h = Hub {
         stem_height: sh,
@@ -782,7 +793,7 @@ fn fans_flower(p: &Value, gerbera: bool) -> Result<(KitDef, Value)> {
         "size",
         if gerbera { 36.0 } else { 34.0 },
         26.0,
-        if gerbera { 56.0 } else { 50.0 },
+        MAX_HEAD,
     )?;
     let n = num(p, "fans", 4.0, 3.0, 4.0)?.round() as usize;
     let per = num(p, "per_fan", 4.0, 2.0, 5.0)?.round() as usize;
@@ -790,7 +801,7 @@ fn fans_flower(p: &Value, gerbera: bool) -> Result<(KitDef, Value)> {
     let sh = stem_height(p)?;
     let base = base_param(p, [2, 2])?;
     let at = base_centre(&base);
-    let r_b = bar_radius(n, n);
+    let r_b = grown(bar_radius(n, n), size, if gerbera { 36.0 } else { 34.0 });
     let fan_step = 2.0 * PI / n as f64;
     let step = fan_step / per as f64;
     let h = Hub {
@@ -917,13 +928,13 @@ fn fans_flower(p: &Value, gerbera: bool) -> Result<(KitDef, Value)> {
 }
 
 fn poppy(p: &Value) -> Result<(KitDef, Value)> {
-    let size = num(p, "size", 32.0, 20.0, 56.0)?;
+    let size = num(p, "size", 32.0, 20.0, MAX_HEAD)?;
     let n = num(p, "petals", 4.0, 3.0, 5.0)?.round() as usize;
     let open = num(p, "open", 0.3, 0.0, 1.0)?;
     let sh = stem_height(p)?;
     let base = base_param(p, [2, 2])?;
     let at = base_centre(&base);
-    let r_b = bar_radius(n, 0).max(4.5);
+    let r_b = grown(bar_radius(n, 0).max(4.5), size, 32.0);
     let step = 2.0 * PI / n as f64;
     let h = Hub {
         stem_height: sh,
@@ -992,13 +1003,13 @@ fn poppy(p: &Value) -> Result<(KitDef, Value)> {
 }
 
 fn cornflower(p: &Value) -> Result<(KitDef, Value)> {
-    let size = num(p, "size", 26.0, 18.0, 44.0)?;
+    let size = num(p, "size", 26.0, 18.0, 48.0)?;
     let n = num(p, "florets", 6.0, 5.0, 6.0)?.round() as usize;
     let angle = num(p, "angle", 60.0, 45.0, 85.0)?;
     let sh = stem_height(p)?;
     let base = base_param(p, [2, 2])?;
     let at = base_centre(&base);
-    let r_b = bar_radius(n, 0);
+    let r_b = grown(bar_radius(n, 0), size, 26.0);
     let h = Hub {
         stem_height: sh,
         mount: crate::stem::wants_mount(p) && sh == 0.0,

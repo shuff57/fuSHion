@@ -1093,7 +1093,7 @@ pub fn pack_print(
         // A bouquet's hub sits on the vase top like a detail, before studs are laid out.
         let mut hub_warning = None;
         if let Some(b) = c.bouquet.as_ref() {
-            match crate::bouquet::plan_hub(b, designs, &ps, &crate::bouquet::hub_id(&ps)) {
+            match crate::bouquet::plan_hub(b, designs, &ps, &crate::bouquet::hub_id(&ps), !repair) {
                 Ok(plan) => ps.push(plan.placement),
                 Err(e) => hub_warning = Some(e),
             }

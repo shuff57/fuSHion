@@ -124,7 +124,7 @@ pub fn check_designs(b: &GridBouquet, designs: &BTreeMap<String, DetailDesign>) 
             .iter()
             .chain(&s.branch_heads)
             .map(|h| (h, MountKind::Hole, "head"))
-            .chain(s.leaves.iter().map(|l| (&l.design, MountKind::Clip, "leaf")));
+            .chain(s.leaves.iter().flatten().map(|l| (&l.design, MountKind::Clip, "leaf")));
         for (name, kind, what) in uses {
             let Some(d) = designs.get(name) else {
                 bail!("bouquet stem {}: {what} design `{name}` doesn't exist; available: {}", i + 1, have());
@@ -262,6 +262,7 @@ fn spot_sets(k: i32, n: usize) -> Vec<Vec<[f32; 2]>> {
 
 /// A stem's arc from its base (a hole on the hub, LDU) to its tip: length (mm, clamped to
 /// [`MAX_STEM_LEN`]), where its head's mount (or its end) sits along it, and its frame.
+#[derive(Clone, Debug)]
 struct StemArc {
     length: f32,
     /// Distance of the head's mount (or the bare tip) from the base, mm.
@@ -285,11 +286,11 @@ fn head_on_tip(s: &sf_spec::GridStem, designs: &BTreeMap<String, DetailDesign>) 
     s.head.is_some() && style_of(s, designs).is_none_or(|st| st.head_on_tip)
 }
 
-/// Solves the arc from `base` to `tip`, turning `bend` degrees in all, ending `tip_bar` mm
-/// past the tip. It bows toward the outward side (away from `centre`) turned `turn`
-/// degrees about the chord; `mirror` flips the stem's own `X` (its branches go to the other
-/// side). `None` when the tip isn't above the base.
-fn stem_arc(tip: V3, base: V3, centre: V3, bend: f32, tip_bar: f32, turn: f32, mirror: bool) -> Option<StemArc> {
+/// Solves the arc from `base` to `tip`, turning `bend` (≥ 0) degrees in all toward `bow`
+/// (a unit vector square to the chord), ending `tip_bar` mm past the tip; `mirror` flips the
+/// stem's own `X` (its branches go to the other side). `None` when the tip isn't above the
+/// base.
+fn arc_toward(tip: V3, base: V3, bend: f32, tip_bar: f32, bow: V3, mirror: bool) -> Option<StemArc> {
     let chord = sub(tip, base);
     let c = len(chord) / LDU_PER_MM;
     if c < 10.0 || -chord[1] <= 0.0 {
@@ -305,7 +306,7 @@ fn stem_arc(tip: V3, base: V3, centre: V3, bend: f32, tip_bar: f32, turn: f32, m
         c + tip_bar
     } else {
         let (mut lo, mut hi) = (c + tip_bar, 4.0 * (c + tip_bar) + 100.0);
-        for _ in 0..80 {
+        for _ in 0..60 {
             let mid = (lo + hi) / 2.0;
             if chord_at(mid) < c { lo = mid } else { hi = mid }
         }
@@ -316,13 +317,6 @@ fn stem_arc(tip: V3, base: V3, centre: V3, bend: f32, tip_bar: f32, turn: f32, m
     let sm = length - tip_bar;
     let theta = beta * sm / length;
     let u = unit(chord)?;
-    let mut out = [tip[0] - centre[0], 0.0, tip[2] - centre[2]];
-    if len(out) < 1e-3 {
-        out = FRONT;
-    }
-    let w = unit(sub(out, mul(u, dot(out, u)))).unwrap_or_else(|| unit(sub(UP, mul(u, dot(UP, u)))).unwrap_or_else(|| any_square(u)));
-    // The side it bows toward: outward (inward for a negative bend), turned about the chord.
-    let bow = rotate(if bend < 0.0 { mul(w, -1.0) } else { w }, u, turn);
     let (sh, ch) = (theta / 2.0).sin_cos();
     let d0 = sub(mul(u, ch), mul(bow, sh));
     let bow_at_base = add(mul(u, sh), mul(bow, ch));
@@ -332,9 +326,9 @@ fn stem_arc(tip: V3, base: V3, centre: V3, bend: f32, tip_bar: f32, turn: f32, m
     Some(StemArc { length, mount_at: sm, tip_bar, d0, rotation: columns(x, y, cross(x, y)), bend: local_bend, clamped })
 }
 
-/// The concrete stem for a use: its style's branches scaled to `arc.length` (mirrored with
-/// the frame), tip shape, rod and name.
-fn stem_def(id: &str, s: &sf_spec::GridStem, style: Option<&StemStyle>, arc: &StemArc, mirror: bool) -> StemDef {
+/// The concrete stem for a use: its style's branches scaled to `arc.length` (their angles
+/// times `spread`, lengths times `reach`; mirrored with the frame), tip shape, rod and name.
+fn stem_def(id: &str, s: &sf_spec::GridStem, style: Option<&StemStyle>, arc: &StemArc, mirror: bool, spread: f32, reach: f32) -> StemDef {
     let l = arc.length;
     let sign = if mirror { -1.0 } else { 1.0 };
     let branches = style
@@ -343,8 +337,8 @@ fn stem_def(id: &str, s: &sf_spec::GridStem, style: Option<&StemStyle>, arc: &St
                 .iter()
                 .map(|br| StemBranch {
                     at: (br.at * l).clamp(10.0, (arc.mount_at - 10.0).max(10.0)),
-                    angle: sign * br.angle,
-                    length: (br.length * l).max(15.0),
+                    angle: sign * (br.angle * spread).clamp(-80.0, 80.0),
+                    length: (br.length * reach * l).max(15.0),
                     bend: sign * br.bend,
                     diameter: None,
                     tip_bar: if br.head { TIP_BAR } else { 0.0 },
@@ -364,6 +358,233 @@ fn stem_def(id: &str, s: &sf_spec::GridStem, style: Option<&StemStyle>, arc: &St
         branches,
         style: style.map(|st| st.name.clone()).unwrap_or_default(),
     }
+}
+
+/// A design's shape seen from far: its radius around the mount's axis (mm) and the
+/// distances (mm) along the way it faces where balls of that radius cover it (a disc is
+/// one ball, a spike a row of them).
+fn head_shape(d: &DetailDesign) -> (f32, Vec<f32>) {
+    let Some(m) = d.mount else { return (10.0, vec![5.0]) };
+    let a = unit(m.axis).unwrap_or([0.0, 1.0, 0.0]);
+    let (mut lo, mut hi, mut r) = (f32::MAX, f32::MIN, 0.0f32);
+    for &p in &d.mesh.positions {
+        let v = sub(p, m.origin);
+        let along = -dot(v, a) / LDU_PER_MM;
+        lo = lo.min(along);
+        hi = hi.max(along);
+        r = r.max(len(sub(v, mul(a, dot(v, a)))) / LDU_PER_MM);
+    }
+    if lo > hi {
+        return (10.0, vec![5.0]);
+    }
+    let r = r.max(3.0);
+    let n = ((hi - lo - r) / r).ceil().max(0.0) as usize;
+    let offs = (0..=n).map(|i| if n == 0 { (lo + hi) / 2.0 } else { lo + r / 2.0 + (hi - lo - r) * i as f32 / n as f32 }).collect();
+    (r, offs)
+}
+
+/// A head's balls in the model (centre, radius mm) for a mount at `at` facing `t`.
+fn head_balls(d: Option<&DetailDesign>, at: V3, t: V3) -> Vec<(V3, f32)> {
+    let (r, offs) = d.map_or((10.0, vec![5.0]), head_shape);
+    offs.into_iter().map(|o| (add(at, mul(t, o * LDU_PER_MM)), r)).collect()
+}
+
+/// How far two sets of balls overlap at worst, mm (0: apart, with a 2 mm gap).
+fn overlap(a: &[(V3, f32)], b: &[(V3, f32)]) -> f32 {
+    let mut worst = 0.0f32;
+    for &(p, rp) in a {
+        for &(q, rq) in b {
+            worst = worst.max(rp + rq + 2.0 - len(sub(p, q)) / LDU_PER_MM);
+        }
+    }
+    worst
+}
+
+/// A planned stem as the others see it: its curve as short segments and its heads as balls
+/// (model frame).
+type RealStem = Option<(Vec<(V3, V3)>, Vec<(V3, f32)>)>;
+
+/// The hub's other holes, for scoring a stem's own: its hole's top (print frame, mm), the
+/// others' tops and directions, and the hub's side in studs.
+struct Pegs {
+    top: V3,
+    others: Vec<(V3, V3)>,
+    k: i32,
+}
+
+impl Pegs {
+    /// How many holes a hole along `dir` comes too close to (or the edge, counting one).
+    fn clashes(&self, dir: V3) -> usize {
+        let mut tops = vec![self.top];
+        let mut dirs = vec![dir];
+        for &(t, d) in &self.others {
+            tops.push(t);
+            dirs.push(d);
+        }
+        // Only pairs with this hole matter.
+        peg_clashes(&tops, &dirs, self.k).iter().filter(|&&(a, b)| a == 0 || b == 0).count()
+    }
+}
+
+/// How a stem is shaped and turned, as chosen by [`choose`].
+#[derive(Clone, Debug)]
+struct Choice {
+    arc: StemArc,
+    def: StemDef,
+    cost: f32,
+}
+
+/// What a head facing away from [`facing`] costs a stem's choice (per unit of `1 − cos`).
+const FACING: f32 = 25.0;
+
+/// Which way heads should face: about 45° from upright, out from the bouquet's middle and
+/// toward the viewer.
+fn facing(tip: V3, centre: V3) -> V3 {
+    let out = unit([tip[0] - centre[0], 0.0, tip[2] - centre[2]]).unwrap_or(FRONT);
+    let ahead = unit(add(out, mul(FRONT, 1.6))).unwrap_or(FRONT);
+    unit(add(UP, ahead)).expect("up and a level direction")
+}
+
+/// Chooses how stem `s` from `base` is bent and turned: the way it bows (and, without a
+/// `bend` in the spec, how much), which side its branches take, and small changes to their
+/// spread and reach. The best faces its heads about 45° up toward the viewer and out from
+/// the middle, keeps its own heads apart and away from the other stems (`others`, as chords),
+/// and leans at most `max_lean` at its base. With `real`, `others` are the other stems' real
+/// curves (as short segments), and crossing them costs too. `None` if no arc reaches the tip.
+#[allow(clippy::too_many_arguments)] // the stem, its place, and everything around it
+fn choose(
+    s: &sf_spec::GridStem,
+    designs: &BTreeMap<String, DetailDesign>,
+    id: &str,
+    base: V3,
+    centre: V3,
+    others: &[(V3, V3)],
+    other_heads: &[(V3, f32)],
+    body: &HashSet<Cell>,
+    max_lean: f32,
+    real: bool,
+    pegs: Option<&Pegs>,
+) -> Option<Choice> {
+    let style = style_of(s, designs);
+    let tip_bar = if head_on_tip(s, designs) { TIP_BAR } else { 0.0 };
+    let u = unit(sub(s.tip, base))?;
+    let want = facing(s.tip, centre);
+    let b0 = unit(sub(want, mul(u, dot(want, u)))).unwrap_or_else(|| any_square(u));
+    let has_branches = style.is_some_and(|st| !st.branches.is_empty());
+    // The spec's bend, unless the stem must lean less at the hub: then more bend is allowed
+    // (the lean moves into the bend; the tip still lands).
+    // A spec's bend is a preference: other bends cost per degree away from it, so they win
+    // only to clear an overlap or a hole clash.
+    let bends: Vec<f32> = match s.bend {
+        Some(b) => {
+            let b = b.abs();
+            let mut v = vec![b, b + 15.0, b + 30.0, b + 45.0, (b - 15.0).max(0.0)];
+            v.dedup();
+            v.into_iter().filter(|&x| x <= 90.0).collect()
+        }
+        None => (0..=6).map(|i| i as f32 * 15.0).collect(),
+    };
+    let deviation = |bend: f32| s.bend.map_or(0.0, |b| 1.5 * (bend - b.abs()).abs());
+    let turns: &[f32] = &[0.0, 30.0, -30.0, 60.0, -60.0, 100.0, -100.0, 180.0];
+    let mirrors: &[bool] = if has_branches { &[false, true] } else { &[false] };
+    let shapes: &[(f32, f32)] = if has_branches { &[(1.0, 1.0), (1.3, 1.0), (1.0, 1.3), (1.3, 1.3), (1.6, 1.5)] } else { &[(1.0, 1.0)] };
+    let pool: Vec<&str> = if s.branch_heads.is_empty() {
+        s.head.iter().map(String::as_str).collect()
+    } else {
+        s.branch_heads.iter().map(String::as_str).collect()
+    };
+    let mut best: Option<Choice> = None;
+    for &turn in turns {
+        let bow = rotate(b0, u, turn);
+        for &bend in &bends {
+            for &mirror in mirrors {
+                let Some(arc) = arc_toward(s.tip, base, bend, tip_bar, bow, mirror) else { continue };
+                let lean = dot(arc.d0, UP).clamp(-1.0, 1.0).acos().to_degrees();
+                if lean > max_lean {
+                    continue;
+                }
+                // Its hole must keep clear of the others in the hub.
+                let peg_cost = pegs.map_or(0.0, |p| 500.0 * p.clashes([arc.d0[0], arc.d0[2], -arc.d0[1]]) as f32);
+                for &(spread, reach) in shapes {
+                    let def = stem_def(id, s, style, &arc, mirror, spread, reach);
+                    // Branches must print clear of the stem and each other.
+                    let tight = if def.branches.is_empty() { 0.0 } else { own_shortfall(&def) };
+                    let world = |p: V3| add(apply(&arc.rotation, p), base);
+                    let dir = |t: V3| apply(&arc.rotation, t);
+                    let mut cost = 300.0 * tight
+                        + peg_cost
+                        + deviation(bend)
+                        + 0.02 * bend
+                        + 0.05 * lean
+                        + 5.0 * ((spread - 1.0).abs() + (reach - 1.0).abs()) / 0.3;
+                    // Crossing other stems (checked against their real curves, which come as
+                    // many short segments).
+                    if real {
+                        for p in local_points(&def, 5.0).into_iter().skip(3).map(world) {
+                            for (a, z) in others {
+                                cost += 20.0 * (def.diameter + 4.0 - point_segment(p, *a, *z) / LDU_PER_MM).max(0.0);
+                            }
+                            // Through another stem's head.
+                            for &(q, rq) in other_heads {
+                                cost += 40.0 * (rq + def.diameter / 2.0 + 1.0 - len(sub(p, q)) / LDU_PER_MM).max(0.0);
+                            }
+                        }
+                    }
+                    // Through the vase: never, if anything else will do.
+                    cost += 50.0 * local_points(&def, 6.0).iter().skip(2).filter(|&&p| body.contains(&grid_cell(world(p)))).count() as f32;
+                    // Heads: (balls, facing).
+                    let mut heads: Vec<(Vec<(V3, f32)>, V3)> = Vec::new();
+                    if let (true, Some(name)) = (tip_bar > 0.0, s.head.as_deref()) {
+                        let t = dir(def.tangent(arc.mount_at));
+                        heads.push((head_balls(designs.get(name), world(def.point(arc.mount_at)), t), t));
+                    } else {
+                        // A headless tip (grass) fans forward too, more gently.
+                        cost += 4.0 * (1.0 - dot(dir(def.tangent(def.length)), want));
+                    }
+                    let mut next = 0;
+                    for (i, br) in def.branches.iter().enumerate() {
+                        let end = world(def.branch_point(i, br.length));
+                        let mid = world(def.branch_point(i, br.length / 2.0));
+                        let start = world(def.branch_point(i, 0.0));
+                        if let Some(d) = unit([end[0] - start[0], 0.0, end[2] - start[2]]) {
+                            cost += 6.0 * dot(d, [0.0, 0.0, 1.0]).max(0.0); // away from the viewer
+                        }
+                        for (a, z) in others {
+                            for p in [end, mid] {
+                                cost += (25.0 - point_segment(p, *a, *z) / LDU_PER_MM).max(0.0);
+                            }
+                        }
+                        if br.tip_bar > 0.0 && !pool.is_empty() {
+                            let name = pool[next % pool.len()];
+                            next += 1;
+                            let at = br.length - br.tip_bar;
+                            let t = dir(def.branch_tangent(i, at));
+                            heads.push((head_balls(designs.get(name), world(def.branch_point(i, at)), t), t));
+                        }
+                    }
+                    for (i, (balls, t)) in heads.iter().enumerate() {
+                        cost += FACING * (1.0 - dot(*t, want));
+                        for &(p, r) in balls {
+                            for (a, z) in others {
+                                // Into another stem: never if avoidable; near it: a little.
+                                let d = point_segment(p, *a, *z) / LDU_PER_MM;
+                                cost += 40.0 * (r + STEM_D / 2.0 + 1.0 - d).max(0.0) + (r + 6.0 - d).max(0.0);
+                            }
+                        }
+                        cost += 40.0 * overlap(balls, other_heads);
+                        // The stem's own heads apart.
+                        for (other, _) in &heads[i + 1..] {
+                            cost += 40.0 * overlap(balls, other);
+                        }
+                    }
+                    if best.as_ref().is_none_or(|b| cost < b.cost) {
+                        best = Some(Choice { arc: arc.clone(), def, cost });
+                    }
+                }
+            }
+        }
+    }
+    best
 }
 
 /// Points along a stem in its own frame (LDU): the main centreline, every branch, and the
@@ -387,6 +608,60 @@ fn local_points(def: &StemDef, step: f32) -> Vec<V3> {
         out.extend((1..=m).map(|j| add(p, mul(t, reach * j as f32 / m as f32 * LDU_PER_MM))));
     }
     out
+}
+
+/// Short segments along a stem's main line and each branch (own frame, LDU), about `step`
+/// mm long, without joining one to the next.
+fn stem_segments(def: &StemDef, step: f32) -> Vec<(V3, V3)> {
+    let n = (def.length / step).ceil().max(1.0) as usize;
+    let main: Vec<V3> = (0..=n).map(|i| def.point(def.length * i as f32 / n as f32)).collect();
+    let mut out: Vec<(V3, V3)> = main.windows(2).map(|w| (w[0], w[1])).collect();
+    for (bi, b) in def.branches.iter().enumerate() {
+        let m = (b.length / step).ceil().max(1.0) as usize;
+        let pts: Vec<V3> = (0..=m).map(|j| def.branch_point(bi, b.length * j as f32 / m as f32)).collect();
+        out.extend(pts.windows(2).map(|w| (w[0], w[1])));
+    }
+    out
+}
+
+/// How far a stem's branches come inside the 1 mm gap they need from the main stem (away
+/// from where they fork) and from each other, mm (0: clear), as `sf_custom` checks it.
+fn own_shortfall(def: &StemDef) -> f32 {
+    let d = def.diameter;
+    let mm = |p: V3| [p[0] / LDU_PER_MM, p[1] / LDU_PER_MM];
+    let dist = |a: [f32; 2], b: [f32; 2]| ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2)).sqrt();
+    let n = def.length.ceil().max(1.0) as usize;
+    let main: Vec<[f32; 2]> = (0..=n).map(|i| mm(def.point(def.length * i as f32 / n as f32))).collect();
+    let line = |i: usize, from: f32| -> Vec<[f32; 2]> {
+        let b = &def.branches[i];
+        let m = (b.length - from).ceil().max(1.0) as usize;
+        (0..=m).map(|k| mm(def.branch_point(i, from + (b.length - from) * k as f32 / m as f32))).collect()
+    };
+    let mut worst = 0.0f32;
+    for j in 0..def.branches.len() {
+        let b = &def.branches[j];
+        let rj = def.branch_diameter(j) / 2.0;
+        let fork = (d / 2.0 + rj + 1.0) / b.angle.to_radians().sin().abs().max(0.05) + 1.0;
+        if fork >= b.length {
+            continue;
+        }
+        let at = mm(def.point(b.at));
+        let mine = line(j, fork);
+        for &p in main.iter().filter(|&&p| dist(p, at) >= fork + d) {
+            for &q in &mine {
+                worst = worst.max(1.0 - (dist(p, q) - d / 2.0 - rj));
+            }
+        }
+        for i in 0..j {
+            let ri = def.branch_diameter(i) / 2.0;
+            for p in line(i, 0.0) {
+                for &q in &mine {
+                    worst = worst.max(1.0 - (dist(p, q) - ri - rj));
+                }
+            }
+        }
+    }
+    worst.max(0.0)
 }
 
 /// The stem's extent laid flat on the bed (its own XY plane), mm: (long side, short side).
@@ -431,57 +706,310 @@ fn peg_clashes(tops: &[[f32; 3]], dirs: &[V3], k: i32) -> Vec<(usize, usize)> {
     out
 }
 
-/// The holes of a `k × k` hub at grid `(x0, y_top, z0)`: the layout (of [`spot_sets`])
-/// whose pegs keep apart, then the least total lean mismatch. Returns the used holes
-/// numbered back to front, each stem's hole, and the peg clashes left (0 when it fits).
+/// Every stem's hole, shape and turn for a `k × k` hub at grid `(x0, y_top, z0)`.
+#[derive(Clone, Debug)]
+pub struct StemsPlan {
+    /// The used holes, numbered (from 0) back to front.
+    pub holes: Vec<[f32; 2]>,
+    /// Each stem's hole.
+    pub hole_of: Vec<usize>,
+    /// Holes still too close (as hole numbers from 0; `(a, a)`: too near the edge).
+    pub clashes: Vec<(usize, usize)>,
+    /// Stems that had to lean less at the base (bending more) so the holes keep apart.
+    pub straightened: usize,
+    /// The plan's total cost (how far heads face from the ideal, overlaps, crowding).
+    pub cost: f32,
+    choices: Vec<Option<Choice>>,
+}
+
+/// Plans every stem on a `k × k` hub: for each hole layout (of [`spot_sets`]), gives each
+/// stem the hole in the direction it leans and [`choose`]s its shape; where holes come too
+/// close, those stems lean less at the base (bending more to land their tips) and are
+/// chosen again. Keeps the layout with the fewest clashes, then the lowest cost.
+pub fn plan_stems(
+    b: &GridBouquet,
+    designs: &BTreeMap<String, DetailDesign>,
+    body: &HashSet<Cell>,
+    x0: i32,
+    y_top: i32,
+    z0: i32,
+    k: i32,
+) -> StemsPlan {
+    // Planning is deterministic and the hub's plan is asked for again when the stems are
+    // attached: remember recent plans by their inputs.
+    static CACHE: std::sync::Mutex<Vec<(u64, StemsPlan)>> = std::sync::Mutex::new(Vec::new());
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        format!("{b:?}").hash(&mut h);
+        for (name, d) in designs {
+            name.hash(&mut h);
+            format!("{:?}{:?}{}", d.mount, d.stem, d.mesh.positions.len()).hash(&mut h);
+        }
+        let mut cells: Vec<&Cell> = body.iter().collect();
+        cells.sort();
+        cells.hash(&mut h);
+        (x0, y_top, z0, k).hash(&mut h);
+        h.finish()
+    };
+    if let Some((_, p)) = CACHE.lock().ok().and_then(|c| c.iter().find(|(k2, _)| *k2 == key).cloned()) {
+        return p;
+    }
+    let plan = plan_stems_uncached(b, designs, body, x0, y_top, z0, k);
+    if let Ok(mut c) = CACHE.lock() {
+        c.push((key, plan.clone()));
+        if c.len() > 16 {
+            c.remove(0);
+        }
+    }
+    plan
+}
+
+fn plan_stems_uncached(
+    b: &GridBouquet,
+    designs: &BTreeMap<String, DetailDesign>,
+    body: &HashSet<Cell>,
+    x0: i32,
+    y_top: i32,
+    z0: i32,
+    k: i32,
+) -> StemsPlan {
+    let top_y = -8.0 * y_top as f32 - HUB_HEIGHT * LDU_PER_MM;
+    let centre = [20.0 * x0 as f32 + 10.0 * k as f32, top_y, 20.0 * z0 as f32 + 10.0 * k as f32];
+    let to_print = |v: V3| [v[0], v[2], -v[1]];
+    let n = b.stems.len();
+    let ids: Vec<String> = (1..=n).map(|i| format!("S{i:02}")).collect();
+    // (clashes, cost, spots, each stem's spot, choices, clashes, straightened, lean limits)
+    type Planned = (usize, f32, Vec<[f32; 2]>, Vec<usize>, Vec<Option<Choice>>, Vec<(usize, usize)>, usize, Vec<f32>);
+    let mut best: Option<Planned> = None;
+    for spots in spot_sets(k, n) {
+        let (hole, assign_cost) = assign(b, &spots, x0, z0, k);
+        let bases: Vec<V3> = hole
+            .iter()
+            .map(|&h| [20.0 * x0 as f32 + spots[h][0] * LDU_PER_MM, top_y, 20.0 * z0 as f32 + spots[h][1] * LDU_PER_MM])
+            .collect();
+        let chords: Vec<(V3, V3)> = (0..n).map(|i| (bases[i], b.stems[i].tip)).collect();
+        let others = |i: usize| -> Vec<(V3, V3)> { chords.iter().enumerate().filter(|&(j, _)| j != i).map(|(_, &c)| c).collect() };
+        // Other stems' heads, as balls round their tips.
+        let balls: Vec<Vec<(V3, f32)>> = b
+            .stems
+            .iter()
+            .map(|s| s.head.as_ref().map(|h| head_balls(designs.get(h), s.tip, facing(s.tip, centre))).unwrap_or_default())
+            .collect();
+        let heads_but =
+            |i: usize| -> Vec<(V3, f32)> { balls.iter().enumerate().filter(|&(j, _)| j != i).flat_map(|(_, b)| b.clone()).collect() };
+        let pick = |i: usize, lean: f32| {
+            choose(&b.stems[i], designs, &ids[i], bases[i], centre, &others(i), &heads_but(i), body, lean, false, None).or_else(|| {
+                choose(&b.stems[i], designs, &ids[i], bases[i], centre, &others(i), &heads_but(i), body, MAX_BASE_LEAN, false, None)
+            })
+        };
+        let mut max_lean = vec![MAX_BASE_LEAN; n];
+        let mut choices: Vec<Option<Choice>> = (0..n).map(|i| pick(i, max_lean[i])).collect();
+        let clashes_of = |choices: &[Option<Choice>]| {
+            let live: Vec<usize> = (0..n).filter(|&i| choices[i].is_some()).collect();
+            let tops: Vec<[f32; 3]> = live.iter().map(|&i| [spots[hole[i]][0], spots[hole[i]][1], HUB_HEIGHT]).collect();
+            let dirs: Vec<V3> = live.iter().map(|&i| to_print(choices[i].as_ref().expect("live").arc.d0)).collect();
+            peg_clashes(&tops, &dirs, k).into_iter().map(|(a, c)| (live[a], live[c])).collect::<Vec<_>>()
+        };
+        let mut clashes = clashes_of(&choices);
+        let pegs_for = |choices: &[Option<Choice>], i: usize| Pegs {
+            top: [spots[hole[i]][0], spots[hole[i]][1], HUB_HEIGHT],
+            others: (0..n)
+                .filter(|&j| j != i)
+                .filter_map(|j| choices[j].as_ref().map(|c| ([spots[hole[j]][0], spots[hole[j]][1], HUB_HEIGHT], to_print(c.arc.d0))))
+                .collect(),
+            k,
+        };
+        let mut straightened: HashSet<usize> = HashSet::new();
+        // Lean less at the base where holes come close, in steps, while it helps.
+        for _round in 0..4 {
+            if clashes.is_empty() {
+                break;
+            }
+            // In order, so plans don't depend on hashing.
+            let involved: std::collections::BTreeSet<usize> = clashes.iter().flat_map(|&(a, c)| [a, c]).collect();
+            for &i in &involved {
+                let now = choices[i].as_ref().map_or(MAX_BASE_LEAN, |c| dot(c.arc.d0, UP).clamp(-1.0, 1.0).acos().to_degrees());
+                max_lean[i] = (now - 12.0).max(8.0);
+                let pegs = pegs_for(&choices, i);
+                if let Some(c) = choose(
+                    &b.stems[i],
+                    designs,
+                    &ids[i],
+                    bases[i],
+                    centre,
+                    &others(i),
+                    &heads_but(i),
+                    body,
+                    max_lean[i],
+                    false,
+                    Some(&pegs),
+                ) {
+                    choices[i] = Some(c);
+                    straightened.insert(i);
+                }
+            }
+            let again = clashes_of(&choices);
+            if again.len() >= clashes.len() && again == clashes {
+                break;
+            }
+            clashes = again;
+        }
+        let cost = assign_cost * 0.001 + choices.iter().flatten().map(|c| c.cost).sum::<f32>();
+        if best.as_ref().is_none_or(|b| (clashes.len(), cost) < (b.0, b.1)) {
+            best = Some((clashes.len(), cost, spots, hole, choices, clashes, straightened.len(), max_lean));
+        }
+    }
+    let (_, _, spots, hole, mut choices, mut clashes, straightened, max_lean) = best.expect("the lattice always fits");
+    // The chosen layout, refined against the others' real curves and heads.
+    let bases: Vec<V3> =
+        hole.iter().map(|&h| [20.0 * x0 as f32 + spots[h][0] * LDU_PER_MM, top_y, 20.0 * z0 as f32 + spots[h][1] * LDU_PER_MM]).collect();
+    let clashes_of = |choices: &[Option<Choice>]| {
+        let live: Vec<usize> = (0..n).filter(|&i| choices[i].is_some()).collect();
+        let tops: Vec<[f32; 3]> = live.iter().map(|&i| [spots[hole[i]][0], spots[hole[i]][1], HUB_HEIGHT]).collect();
+        let dirs: Vec<V3> = live.iter().map(|&i| to_print(choices[i].as_ref().expect("live").arc.d0)).collect();
+        peg_clashes(&tops, &dirs, k).into_iter().map(|(a, c)| (live[a], live[c])).collect::<Vec<_>>()
+    };
+    // Twice more against the others' real curves and heads, not their chords; each kept
+    // only where the holes stay apart.
+    let real_of = |choices: &[Option<Choice>], i: usize| -> RealStem {
+        choices[i].as_ref().map(|c| {
+            let segs = stem_segments(&c.def, 8.0)
+                .into_iter()
+                .map(|(p, q)| (add(apply(&c.arc.rotation, p), bases[i]), add(apply(&c.arc.rotation, q), bases[i])))
+                .collect();
+            let ball = |name: &str, at: V3, t: V3| head_balls(designs.get(name), at, t);
+            let mut hs = Vec::new();
+            if let (true, Some(h)) = (c.arc.tip_bar > 0.0, b.stems[i].head.as_deref()) {
+                let sm = c.arc.mount_at;
+                hs.extend(ball(h, add(apply(&c.arc.rotation, c.def.point(sm)), bases[i]), apply(&c.arc.rotation, c.def.tangent(sm))));
+            }
+            let st = &b.stems[i];
+            let pool: Vec<&str> = if st.branch_heads.is_empty() {
+                st.head.iter().map(String::as_str).collect()
+            } else {
+                st.branch_heads.iter().map(String::as_str).collect()
+            };
+            let mut next = 0;
+            for (bi, br) in c.def.branches.iter().enumerate() {
+                if br.tip_bar > 0.0 && !pool.is_empty() {
+                    let at = br.length - br.tip_bar;
+                    hs.extend(ball(
+                        pool[next % pool.len()],
+                        add(apply(&c.arc.rotation, c.def.branch_point(bi, at)), bases[i]),
+                        apply(&c.arc.rotation, c.def.branch_tangent(bi, at)),
+                    ));
+                    next += 1;
+                }
+            }
+            (segs, hs)
+        })
+    };
+    let mut real: Vec<RealStem> = (0..n).map(|i| real_of(&choices, i)).collect();
+    let pegs_for = |choices: &[Option<Choice>], i: usize| Pegs {
+        top: [spots[hole[i]][0], spots[hole[i]][1], HUB_HEIGHT],
+        others: (0..n)
+            .filter(|&j| j != i)
+            .filter_map(|j| choices[j].as_ref().map(|c| ([spots[hole[j]][0], spots[hole[j]][1], HUB_HEIGHT], to_print(c.arc.d0))))
+            .collect(),
+        k,
+    };
+    // How much everything overlaps, over all pairs of stems: heads into heads, heads into
+    // stems, stems crossing (the measure a change must not raise).
+    let total = |real: &[RealStem]| -> f32 {
+        let mut g = 0.0;
+        for i in 0..n {
+            for j in i + 1..n {
+                let (Some(a), Some(c)) = (&real[i], &real[j]) else { continue };
+                g += overlap(&a.1, &c.1);
+                for (x, y) in [(a, c), (c, a)] {
+                    for &(p, r) in &x.1 {
+                        for &(s0, s1) in &y.0 {
+                            g += (r + STEM_D / 2.0 + 1.0 - point_segment(p, s0, s1) / LDU_PER_MM).max(0.0);
+                        }
+                    }
+                }
+                for &(p, _) in a.0.iter().skip(1) {
+                    for &(s0, s1) in c.0.iter().skip(1) {
+                        g += (STEM_D + 0.5 - point_segment(p, s0, s1) / LDU_PER_MM).max(0.0);
+                    }
+                }
+            }
+        }
+        g
+    };
+    let mut now = total(&real);
+    for _pass in 0..3 {
+        let mut improved = false;
+        for i in 0..n {
+            let segs: Vec<(V3, V3)> = (0..n).filter(|&j| j != i).filter_map(|j| real[j].as_ref()).flat_map(|r| r.0.clone()).collect();
+            let hs: Vec<(V3, f32)> = (0..n).filter(|&j| j != i).filter_map(|j| real[j].as_ref()).flat_map(|r| r.1.clone()).collect();
+            let pegs = pegs_for(&choices, i);
+            if let Some(c) = choose(&b.stems[i], designs, &ids[i], bases[i], centre, &segs, &hs, body, max_lean[i], true, Some(&pegs)) {
+                let own = c.cost;
+                let old = choices[i].replace(c);
+                let before = real[i].clone();
+                real[i] = real_of(&choices, i);
+                let next = total(&real);
+                let better = next < now - 1e-3 || (next <= now + 1e-3 && old.as_ref().is_none_or(|o| own < o.cost - 1e-3));
+                if better && clashes_of(&choices).len() <= clashes.len() {
+                    improved |= next < now - 1e-3 || old.is_none();
+                    now = next;
+                } else {
+                    choices[i] = old;
+                    real[i] = before;
+                }
+            }
+        }
+        if !improved {
+            break;
+        }
+    }
+    clashes = clashes_of(&choices);
+
+    // Number the used holes back to front (larger z first), then left to right.
+    let mut taken: Vec<usize> = hole.clone();
+    taken.sort_by(|&a, &b| spots[b][1].total_cmp(&spots[a][1]).then(spots[a][0].total_cmp(&spots[b][0])));
+    let number: HashMap<usize, usize> = taken.iter().enumerate().map(|(i, &h)| (h, i)).collect();
+    let hole_of: Vec<usize> = hole.iter().map(|h| number[h]).collect();
+    let cost = choices.iter().flatten().map(|c| c.cost).sum();
+    StemsPlan {
+        cost,
+        holes: taken.iter().map(|&h| spots[h]).collect(),
+        clashes: clashes.iter().map(|&(a, c)| (hole_of[a], hole_of[c])).collect(),
+        hole_of,
+        straightened,
+        choices,
+    }
+}
+
+/// The holes of a `k × k` hub at grid `(x0, y_top, z0)` (see [`plan_stems`]): the used
+/// holes numbered back to front, each stem's hole, and the clashes left (0 when it fits).
 pub fn layout(
     b: &GridBouquet,
     designs: &BTreeMap<String, DetailDesign>,
+    body: &HashSet<Cell>,
     x0: i32,
     y_top: i32,
     z0: i32,
     k: i32,
 ) -> (Vec<[f32; 2]>, Vec<usize>, usize) {
-    let top_y = -8.0 * y_top as f32 - HUB_HEIGHT * LDU_PER_MM;
-    let centre = [20.0 * x0 as f32 + 10.0 * k as f32, top_y, 20.0 * z0 as f32 + 10.0 * k as f32];
-    let to_print = |v: V3| [v[0], v[2], -v[1]];
-    // (clashes, cost, spots, each stem's spot)
-    type Layout = (usize, f32, Vec<[f32; 2]>, Vec<usize>);
-    let mut best: Option<Layout> = None;
-    for spots in spot_sets(k, b.stems.len()) {
-        let (hole, cost) = assign(b, &spots, x0, z0, k);
-        let mut tops = Vec::new();
-        let mut dirs = Vec::new();
-        for (si, s) in b.stems.iter().enumerate() {
-            let p = spots[hole[si]];
-            let base = [20.0 * x0 as f32 + p[0] * LDU_PER_MM, top_y, 20.0 * z0 as f32 + p[1] * LDU_PER_MM];
-            let tip_bar = if head_on_tip(s, designs) { TIP_BAR } else { 0.0 };
-            if let Some(arc) = stem_arc(s.tip, base, centre, s.bend, tip_bar, 0.0, false) {
-                tops.push([p[0], p[1], HUB_HEIGHT]);
-                dirs.push(to_print(arc.d0));
-            }
-        }
-        let clashes = peg_clashes(&tops, &dirs, k).len();
-        if best.as_ref().is_none_or(|b| (clashes, cost) < (b.0, b.1)) {
-            best = Some((clashes, cost, spots, hole));
-        }
-    }
-    let (clashes, _, spots, hole) = best.expect("the lattice always fits");
-    // Number the used holes back to front (larger z first), then left to right.
-    let mut taken: Vec<usize> = hole.clone();
-    taken.sort_by(|&a, &b| spots[b][1].total_cmp(&spots[a][1]).then(spots[a][0].total_cmp(&spots[b][0])));
-    let number: HashMap<usize, usize> = taken.iter().enumerate().map(|(i, &h)| (h, i)).collect();
-    (taken.iter().map(|&h| spots[h]).collect(), hole.iter().map(|h| number[h]).collect(), clashes)
+    let p = plan_stems(b, designs, body, x0, y_top, z0, k);
+    (p.holes, p.hole_of, p.clashes.len())
 }
 
 /// Puts the hub on the vase top under `b.hub`: the smallest flat square of studs (at least
 /// 2 × 2) that holds every stem's hole, on the highest body surface there. `ps` are the
 /// parts so far (body and details); `id` the hub's detail id. `Err` explains what to fix.
+///
+/// `quick` (the budget search, which only counts parts) skips planning the stems: the hub
+/// takes the smallest size that holds the holes.
 pub fn plan_hub(
     b: &GridBouquet,
     designs: &BTreeMap<String, DetailDesign>,
     ps: &[Placement],
     id: &str,
+    quick: bool,
 ) -> std::result::Result<HubPlan, String> {
     let mut owner: HashMap<Cell, usize> = HashMap::new();
     let mut top: HashMap<(i32, i32), i32> = HashMap::new();
@@ -492,6 +1020,7 @@ pub fn plan_hub(
             *t = (*t).max(c.y + 1);
         }
     }
+    let body: HashSet<Cell> = owner.keys().copied().collect();
     let (gx, gz) = (b.hub[0] / 20.0, b.hub[2] / 20.0);
     let n = b.stems.len();
     let k_min = (2..=MAX_HUB)
@@ -512,15 +1041,23 @@ pub fn plan_hub(
         ));
     };
     let mut k = k_min;
-    // Leaning stems' pegs slant inward under the hub: grow it while the top allows until
-    // they keep apart.
-    while layout(b, designs, at.0, at.1, at.2, k).2 > 0 && k < MAX_HUB {
-        match square(k + 1) {
-            Some(next) => {
+    // Every size the flat top allows: the one whose holes keep apart with the best plan (a
+    // bigger hub lets stems lean naturally instead of standing straight to fit).
+    if !quick {
+        let mut best = {
+            let p = plan_stems(b, designs, &body, at.0, at.1, at.2, k);
+            (p.clashes.len(), p.cost)
+        };
+        let mut size = k;
+        while size < MAX_HUB {
+            let Some(next) = square(size + 1) else { break };
+            size += 1;
+            let p = plan_stems(b, designs, &body, next.0, next.1, next.2, size);
+            if (p.clashes.len(), p.cost) < best {
+                best = (p.clashes.len(), p.cost);
                 at = next;
-                k += 1;
+                k = size;
             }
-            None => break,
         }
     }
     let (x0, y_top, z0) = at;
@@ -540,7 +1077,12 @@ pub fn plan_hub(
     if let Some(c) = placement.cells().find(|c| owner.contains_key(c)) {
         return Err(format!("bouquet: something already sits on the vase top where the hub goes (cell {}, {}, {})", c.x, c.y, c.z));
     }
-    let (holes, hole_of, _) = layout(b, designs, x0, y_top, z0, k);
+    let (holes, hole_of) = if quick {
+        (Vec::new(), Vec::new())
+    } else {
+        let l = layout(b, designs, &body, x0, y_top, z0, k);
+        (l.0, l.1)
+    };
     Ok(HubPlan { placement, size: k, holes, hole_of })
 }
 
@@ -560,6 +1102,10 @@ pub struct StemSummary {
     pub branches: usize,
     /// The largest stem laid flat for printing (long × short side), mm.
     pub laid_flat_mm: [f32; 2],
+    /// Stems that lean less at the hub (and bend more) so their holes keep apart.
+    pub straightened: usize,
+    /// Leaves a style suggested that found no free spot.
+    pub leaves_left_off: usize,
     /// The model with the bouquet in stands (centre of mass over the vase's footprint).
     pub balanced: bool,
 }
@@ -580,65 +1126,33 @@ pub fn attach(
     let hub_p = model.placements[hub_i].clone();
     let k = hub_p.footprint()[0];
     let (x0, y_top, z0) = (hub_p.origin.x, hub_p.origin.y, hub_p.origin.z);
-    let (holes, hole_of, _) = layout(b, designs, x0, y_top, z0, k);
+    // The parts the hub was planned on: everything but the hub itself.
+    let body: HashSet<Cell> = model.placements.iter().enumerate().filter(|&(i, _)| i != hub_i).flat_map(|(_, p)| p.cells()).collect();
+    let plan = plan_stems(b, designs, &body, x0, y_top, z0, k);
+    let (holes, hole_of) = (plan.holes.clone(), plan.hole_of.clone());
     let mut warnings = Vec::new();
     let hub_top = -8.0 * y_top as f32 - HUB_HEIGHT * LDU_PER_MM;
-    let centre = [20.0 * x0 as f32 + 10.0 * k as f32, hub_top, 20.0 * z0 as f32 + 10.0 * k as f32];
     let mut summary = StemSummary { stems: b.stems.len(), holes: holes.len(), hub_size: k, ..Default::default() };
     let mut hub_holes = vec![HubHole { top: [0.0; 3], dir: [0.0, 0.0, 1.0], key: [1.0, 0.0, 0.0] }; holes.len()];
     let mut stems: Vec<(usize, StemPlacement)> = Vec::new();
     // To print frame (mm axes: x = X, y = Z, z = −Y) for directions.
     let to_print = |v: V3| [v[0], v[2], -v[1]];
-    // Each stem's chord (hole to tip), as a stand-in for the others when choosing a plane.
     let hole_world = |h: usize| [20.0 * x0 as f32 + holes[h][0] * LDU_PER_MM, hub_top, 20.0 * z0 as f32 + holes[h][1] * LDU_PER_MM];
-    let chords: Vec<(V3, V3)> = b.stems.iter().enumerate().map(|(si, s)| (hole_world(hole_of[si]), s.tip)).collect();
-    let mut leaf_default = false;
+    summary.straightened = plan.straightened;
+    // Leaves to place: (stem, design, at, side given by the spec, colour, colours).
+    type LeafReq = (usize, String, f32, Option<f32>, sf_core::ColorId, BTreeMap<String, sf_core::ColorId>);
+    let mut leaf_reqs: Vec<LeafReq> = Vec::new();
     for (si, s) in b.stems.iter().enumerate() {
         let n = si + 1;
         let h = hole_of[si];
         let hp = holes[h];
         let base = hole_world(h);
         let style = style_of(s, designs);
-        let tip_bar = if head_on_tip(s, designs) { TIP_BAR } else { 0.0 };
-        let def_id = format!("S{n:02}");
-        // The stem's plane: with branches, the turn about its chord (and side) that fans them
-        // toward the viewer and sideways, away from other stems; else bowing straight out.
-        let has_branches = style.is_some_and(|st| !st.branches.is_empty());
-        let candidates: Vec<(f32, bool)> = if has_branches {
-            (0..12).flat_map(|i| [(i as f32 * 30.0, false), (i as f32 * 30.0, true)]).collect()
-        } else {
-            vec![(0.0, false)]
-        };
-        let mut best: Option<(f32, StemArc, StemDef, bool)> = None;
-        for (turn, mirror) in candidates {
-            let Some(arc) = stem_arc(s.tip, base, centre, s.bend, tip_bar, turn, mirror) else { continue };
-            let def = stem_def(&def_id, s, style, &arc, mirror);
-            let mut cost = (1.0 - turn.to_radians().cos()) * (0.5 + 0.2 * s.bend.abs());
-            for (i, br) in def.branches.iter().enumerate() {
-                let start = add(apply(&arc.rotation, def.branch_point(i, 0.0)), base);
-                let end = add(apply(&arc.rotation, def.branch_point(i, br.length)), base);
-                let mid = add(apply(&arc.rotation, def.branch_point(i, br.length / 2.0)), base);
-                if let Some(d) = unit([end[0] - start[0], 0.0, end[2] - start[2]]) {
-                    cost += 10.0 * dot(d, [0.0, 0.0, 1.0]).max(0.0); // pointing away from the viewer
-                }
-                for (oi, &(a, z)) in chords.iter().enumerate() {
-                    if oi == si {
-                        continue;
-                    }
-                    for p in [end, mid] {
-                        let d = point_segment(p, a, z) / LDU_PER_MM;
-                        cost += (30.0 - d).max(0.0);
-                    }
-                }
-            }
-            if best.as_ref().is_none_or(|b| cost < b.0) {
-                best = Some((cost, arc, def, mirror));
-            }
-        }
-        let Some((_, arc, mut def, mirror)) = best else {
+        let Some(Choice { arc, def, .. }) = plan.choices[si].clone() else {
             warnings.push(format!("bouquet stem {n}: its tip is not above the hub; put `tip` higher than the vase top"));
             continue;
         };
+        let mut def = def;
         if arc.clamped {
             warnings.push(format!(
                 "bouquet stem {n} is longer than the {MAX_STEM_LEN:.0} mm a print bed takes; shortened, so its head sits short of its tip: bring the tip nearer the hub"
@@ -646,6 +1160,7 @@ pub fn attach(
             summary.clamped += 1;
         }
         let (length, sm, d0, r) = (arc.length, arc.mount_at, arc.d0, arc.rotation);
+        let tip_bar = arc.tip_bar;
         let lean = dot(d0, UP).clamp(-1.0, 1.0).acos().to_degrees();
         if lean > MAX_BASE_LEAN {
             warnings.push(format!(
@@ -653,11 +1168,6 @@ pub fn attach(
             ));
         }
         let world = |p: V3| add(apply(&r, p), base);
-        let outward = if mirror { -1.0 } else { 1.0 };
-        let normal = |def: &StemDef, sv: f32| {
-            let a = def.bend.to_radians() * sv / def.length.max(1e-3);
-            mul(apply(&r, [a.cos(), a.sin(), 0.0]), outward)
-        };
         // A head on a tip at `p` with tangent `t`: facing out along it, its front toward the
         // viewer (turned by `spin`).
         let pose_head = |name: &str, p: V3, t: V3| {
@@ -679,44 +1189,22 @@ pub fn attach(
                 branch: None,
             }
         };
-        // Leaves: the spec's, else the style's positions with the session's `leaf` design.
-        let mut wanted: Vec<sf_spec::GridLeaf> = s.leaves.clone();
-        if wanted.is_empty()
-            && let Some(st) = style
-            && !st.leaves.is_empty()
-            && designs.get(DEFAULT_LEAF).is_some_and(|d| d.mount.is_some_and(|m| m.kind == MountKind::Clip))
-        {
-            leaf_default = true;
-            wanted = st
-                .leaves
-                .iter()
-                .enumerate()
-                .map(|(i, &at)| sf_spec::GridLeaf {
-                    design: DEFAULT_LEAF.to_string(),
-                    at,
-                    side: if i % 2 == 0 { 90.0 } else { -90.0 },
-                    color: palette.resolve("Green").unwrap_or(b.default_color),
-                    colors: BTreeMap::new(),
-                })
-                .collect();
-        }
-        let mut leaves = Vec::new();
-        for leaf in &wanted {
-            let d = &designs[&leaf.design];
-            let m = d.mount.expect("checked");
-            let at = (leaf.at * length).clamp(LEAF_BAR, (sm - LEAF_BAR).max(LEAF_BAR));
-            def.bars.push(StemBar { at, length: LEAF_BAR });
-            let t = apply(&r, def.tangent(at));
-            let up = rotate(normal(&def, at), t, leaf.side);
-            let rot = align(m.axis, m.up, t, up);
-            leaves.push(StemAttach {
-                design: leaf.design.clone(),
-                color: leaf.color,
-                colors: leaf.colors.clone(),
-                pose: KitPose { rotation: rot, position: sub(world(def.point(at)), apply(&rot, m.origin)) },
-                bar: Some(def.bars.len() - 1),
-                branch: None,
-            });
+        // Leaves the spec places; `None` leaves them to the style (placed below, clear of
+        // everything); `[]` means none.
+        // Leaves are placed once every stem is in, clear of everything: the spec's starting
+        // at its place and turn; with `leaves` left out, the style's (dropped if nothing
+        // fits); `[]` means none.
+        let leaves = Vec::new();
+        match &s.leaves {
+            Some(given) => leaf_reqs.extend(given.iter().map(|l| (si, l.design.clone(), l.at, Some(l.side), l.color, l.colors.clone()))),
+            None => {
+                if let Some(st) = style
+                    && designs.get(DEFAULT_LEAF).is_some_and(|d| d.mount.is_some_and(|m| m.kind == MountKind::Clip))
+                {
+                    let green = palette.resolve("Green").unwrap_or(b.default_color);
+                    leaf_reqs.extend(st.leaves.iter().map(|&at| (si, DEFAULT_LEAF.to_string(), at, None, green, BTreeMap::new())));
+                }
+            }
         }
         let head = if tip_bar > 0.0 {
             s.head.as_deref().map(|name| pose_head(name, world(def.point(sm)), apply(&r, def.tangent(sm))))
@@ -749,18 +1237,7 @@ pub fn attach(
             a.branch = Some(i);
             branch_heads.push(a);
         }
-        let (long, short) = laid_flat(&def);
-        if long > MAX_STEM_LEN + PEG_LEN + 10.0 || short > BED_WIDTH {
-            warnings.push(format!(
-                "bouquet stem {n} ({}) lies {long:.0} × {short:.0} mm flat, more than a {MAX_STEM_LEN:.0} × {BED_WIDTH:.0} mm print bed; shorten it or its branches",
-                if def.style.is_empty() { "plain" } else { def.style.as_str() }
-            ));
-        }
-        if long * short > summary.laid_flat_mm[0] * summary.laid_flat_mm[1] {
-            summary.laid_flat_mm = [long, short];
-        }
         summary.heads += head.is_some() as usize + branch_heads.len();
-        summary.leaves += leaves.len();
         summary.longest_mm = summary.longest_mm.max(length);
         summary.branches += def.branches.len();
         hub_holes[h] = HubHole { top: [hp[0], hp[1], HUB_HEIGHT], dir: to_print(d0), key: to_print(apply(&r, [0.0, 0.0, 1.0])) };
@@ -772,8 +1249,95 @@ pub fn attach(
         let pose = KitPose { rotation: r, position: base };
         stems.push((h, StemPlacement { def, color, pose, hub: hub_p.part.clone(), hole: h as u32 + 1, head, branch_heads, leaves }));
     }
-    if leaf_default {
-        warnings.push(format!("bouquet: stems without `leaves` got their style's leaves, using the `{DEFAULT_LEAF}` design"));
+    // Leaves where they fit: each at its place or a little up or down the stem, turned about
+    // it until it touches no head, leaf, other stem or the vase. A style's leaf that fits
+    // nowhere is left off; a spec's leaf stays where the spec put it (and is reported).
+    if !leaf_reqs.is_empty() {
+        let mut taken: HashSet<[i32; 3]> = HashSet::new();
+        for (_, st) in &stems {
+            for a in st.head.iter().chain(&st.branch_heads) {
+                if let Some(mesh) = designs.get(&a.design).map(|d| &d.mesh) {
+                    taken.extend(mesh.positions.iter().map(|&v| voxel(add(apply(&a.pose.rotation, v), a.pose.position))));
+                }
+            }
+        }
+        let lines: Vec<(u32, f32, Vec<V3>)> = stems.iter().map(|(_, st)| (st.hole, st.def.diameter, centreline(st))).collect();
+        for (si, design, at0, side0, color, colors) in leaf_reqs {
+            let Some(k_st) = stems.iter().position(|(h, _)| *h == hole_of[si]) else { continue };
+            let leaf = &designs[&design];
+            let m = leaf.mount.expect("checked");
+            let st = &stems[k_st].1;
+            let (r, base) = (st.pose.rotation, st.pose.position);
+            let sm = st.def.length - st.def.tip_bar;
+            let flip = if st.def.bend < 0.0 { -1.0 } else { 1.0 };
+            let pose_at = |at_frac: f32, side: f32| {
+                let at = (at_frac * st.def.length).clamp(LEAF_BAR, (sm - LEAF_BAR).max(LEAF_BAR));
+                let t = apply(&r, st.def.tangent(at));
+                let a = st.def.bend.to_radians() * at / st.def.length.max(1e-3);
+                let up = rotate(mul(apply(&r, [a.cos(), a.sin(), 0.0]), flip), t, side);
+                let rot = align(m.axis, m.up, t, up);
+                let pos = sub(add(apply(&r, st.def.point(at)), base), apply(&rot, m.origin));
+                let pts: Vec<V3> = leaf.mesh.positions.iter().map(|&v| add(apply(&rot, v), pos)).collect();
+                (at, rot, pos, pts)
+            };
+            let clear = |pts: &[V3]| {
+                pts.iter().all(|&p| !taken.contains(&voxel(p)) && !body.contains(&grid_cell(p)))
+                    && lines.iter().filter(|(h, _, _)| *h != st.hole).all(|(_, d, line)| {
+                        let rad = (d / 2.0 + 1.0) * LDU_PER_MM;
+                        pts.iter().all(|&p| line.iter().all(|&q| len(sub(p, q)) >= rad))
+                    })
+            };
+            let start = side0.unwrap_or(90.0);
+            let sides = [0.0, 45.0, -45.0, 90.0, -90.0, 135.0, -135.0, 180.0].map(|d| start + d);
+            let mut placed = None;
+            'search: for dat in [0.0, 0.05, -0.05, 0.1, -0.1, 0.15, -0.15, 0.2, -0.2, 0.25] {
+                for side in sides {
+                    let c = pose_at(at0 + dat, side);
+                    if clear(&c.3) {
+                        placed = Some(c);
+                        break 'search;
+                    }
+                }
+            }
+            let placed = match (placed, side0) {
+                (Some(c), _) => Some(c),
+                (None, Some(side)) => Some(pose_at(at0, side)), // the spec's, as written
+                (None, None) => None,
+            };
+            match placed {
+                Some((at, rot, pos, pts)) => {
+                    taken.extend(pts.iter().map(|&p| voxel(p)));
+                    let st = &mut stems[k_st].1;
+                    st.def.bars.push(StemBar { at, length: LEAF_BAR });
+                    let bar = Some(st.def.bars.len() - 1);
+                    st.leaves.push(StemAttach { design, color, colors, pose: KitPose { rotation: rot, position: pos }, bar, branch: None });
+                }
+                None => summary.leaves_left_off += 1,
+            }
+        }
+    }
+    for (_, st) in &stems {
+        let tight = own_shortfall(&st.def);
+        if tight > 0.05 {
+            warnings.push(format!(
+                "bouquet stem {} ({}): a branch comes within {:.1} mm of the stem or another branch (it needs 1 mm to print); widen the style's branch angles",
+                st.def.id,
+                st.def.style,
+                1.0 - tight
+            ));
+        }
+        summary.leaves += st.leaves.len();
+        let (long, short) = laid_flat(&st.def);
+        if long > MAX_STEM_LEN + PEG_LEN + 10.0 || short > BED_WIDTH {
+            warnings.push(format!(
+                "bouquet stem {} ({}) lies {long:.0} × {short:.0} mm flat, more than a {MAX_STEM_LEN:.0} × {BED_WIDTH:.0} mm print bed; shorten it or its branches",
+                st.def.id,
+                if st.def.style.is_empty() { "plain" } else { st.def.style.as_str() }
+            ));
+        }
+        if long * short > summary.laid_flat_mm[0] * summary.laid_flat_mm[1] {
+            summary.laid_flat_mm = [long, short];
+        }
     }
     stems.sort_by_key(|(h, _)| *h);
     model.stems = stems.into_iter().map(|(_, s)| s).collect();
@@ -785,7 +1349,7 @@ pub fn attach(
             format!("bouquet: the hole for the stem in hole {} comes too near the hub's edge; lean that stem less at its base (or bend it more)", a + 1)
         } else {
             format!(
-                "bouquet: the pegs in holes {} and {} meet inside the hub; lean those stems less at the base (bend them instead) or make the vase top wider so the hub can grow",
+                "bouquet: the holes for stems in holes {} and {} come too close inside the hub even after re-assigning holes, leaning them less and growing the hub; spread those stems' tips farther apart around the vase, or make the vase top wider and flat so the hub can grow",
                 a + 1,
                 b2 + 1
             )
@@ -879,6 +1443,17 @@ fn point_segment(p: V3, a: V3, b: V3) -> f32 {
     len(sub(p, add(a, mul(ab, t))))
 }
 
+/// Is this the bouquet's hub?
+fn is_hub(p: &Placement) -> bool {
+    matches!(p.custom.as_deref().map(|c| &c.kind), Some(CustomKind::Detail { mesh, .. }) if mesh == HUB_KEY)
+}
+
+/// The 2 mm voxel of a point (LDU), for touching tests.
+fn voxel(p: V3) -> [i32; 3] {
+    let c = 2.0 * LDU_PER_MM;
+    [(p[0] / c).floor() as i32, (p[1] / c).floor() as i32, (p[2] / c).floor() as i32]
+}
+
 fn grid_cell(p: V3) -> Cell {
     Cell::new((p[0] / 20.0).floor() as i32, (-p[1] / 8.0).floor() as i32, (p[2] / 20.0).floor() as i32)
 }
@@ -887,7 +1462,8 @@ fn grid_cell(p: V3) -> Cell {
 /// and the vase.
 fn collisions(model: &Model) -> Vec<String> {
     let mut warnings = Vec::new();
-    let body: HashSet<Cell> = model.placements.iter().flat_map(|p| p.cells()).collect();
+    // The vase, without the hub: its cells reach a little above its top, where stems leave.
+    let body: HashSet<Cell> = model.placements.iter().filter(|p| !is_hub(p)).flat_map(|p| p.cells()).collect();
     let atts = attachments(model);
     let lines: Vec<Vec<V3>> = model.stems.iter().map(centreline).collect();
     const CELL: f32 = 2.0 * LDU_PER_MM; // 2 mm voxels
@@ -1184,7 +1760,8 @@ mod tests {
             .iter()
             .find(|p| matches!(p.custom.as_deref().map(|c| &c.kind), Some(CustomKind::Detail { mesh, .. }) if mesh == HUB_KEY))
             .unwrap();
-        let (holes, hole_of, _) = layout(b, &opts.details, hub.origin.x, hub.origin.y, hub.origin.z, hub.footprint()[0]);
+        let body: HashSet<Cell> = m.placements.iter().filter(|p| !std::ptr::eq(*p, *hub)).flat_map(|p| p.cells()).collect();
+        let (holes, hole_of, _) = layout(b, &opts.details, &body, hub.origin.x, hub.origin.y, hub.origin.z, hub.footprint()[0]);
         for (si, spec_stem) in b.stems.iter().enumerate() {
             let st = m.stems.iter().find(|p| p.hole as usize == hole_of[si] + 1).unwrap();
             assert!(st.def.length <= MAX_STEM_LEN);
@@ -1318,5 +1895,114 @@ mod tests {
         }
         let _ = std::fs::create_dir_all("/tmp/fushion-bouquet");
         let _ = std::fs::write("/tmp/fushion-bouquet/mixed-model.json", serde_json::to_string_pretty(m).unwrap());
+    }
+
+    /// The stub designs, a `leaf` like `test_leaf`, and the daisy's style suggesting leaves.
+    fn designs_with_leaves() -> BTreeMap<String, DetailDesign> {
+        let mut d = stub_designs();
+        let mut leaf = d["test_leaf"].clone();
+        leaf.name = "leaf".into();
+        d.insert("leaf".into(), leaf);
+        d.get_mut("test_daisy").unwrap().stem.as_mut().unwrap().leaves = vec![0.3, 0.45];
+        d
+    }
+
+    fn build_json(json: &str, designs: BTreeMap<String, DetailDesign>) -> crate::BuildResult {
+        build(&Spec::from_json(json).unwrap(), &BuildOptions { print: true, details: designs, ..Default::default() }, None).unwrap()
+    }
+
+    #[test]
+    fn leaves_off_or_left_to_the_style() {
+        let json = r#"{"resolution":22,"shapes":[{"shape":"cylinder","center":[0,3,0],"size":[6,6,6],"color":"Sand Blue"}],
+            "bouquet":{"hub":[0,6,0],"stems":[
+              {"head":"test_daisy","tip":[-5,18,-3],"leaves":[]},
+              {"head":"test_daisy","tip":[5,19,-2]},
+              {"head":"test_rose","tip":[0,22,3]}]}}"#;
+        let r = build_json(json, designs_with_leaves());
+        let text = r.report.to_text();
+        println!("{text}");
+        let by_tip_x = |sign: f32| {
+            let b = r.compiled.bouquet.as_ref().unwrap();
+            let si = b.stems.iter().position(|s| s.tip[0] * sign > 30.0).unwrap();
+            let tip = b.stems[si].tip;
+            r.model
+                .stems
+                .iter()
+                .find(|st| {
+                    let p = add(apply(&st.pose.rotation, st.def.point(st.def.length - st.def.tip_bar)), st.pose.position);
+                    len(sub(p, tip)) < 3.0
+                })
+                .unwrap()
+        };
+        // `[]`: none; left out: the style's two, placed clear of everything (or left off).
+        assert!(by_tip_x(-1.0).leaves.is_empty());
+        let auto = by_tip_x(1.0);
+        let s = r.report.stems.as_ref().unwrap();
+        assert_eq!(auto.leaves.len() + s.leaves_left_off, 2, "{s:?}");
+        assert!(!auto.leaves.is_empty());
+        assert!(auto.leaves.iter().all(|l| l.design == "leaf" && l.bar.is_some()));
+        assert_eq!(auto.def.bars.len(), auto.leaves.len());
+        for bad in ["touch", "hits", "cross", "runs into"] {
+            assert!(!r.report.warnings.iter().any(|w| w.contains(bad)), "{bad}: {:#?}", r.report.warnings);
+        }
+    }
+
+    #[test]
+    fn heads_face_out_toward_the_viewer_without_a_bend() {
+        // The seven-stem bouquet with every `bend` left to the engine.
+        let json = seven_stems().replace(r#","bend":15"#, "").replace(r#","bend":0"#, "");
+        assert!(!json.contains("\"bend\""));
+        let r = build_json(&json, stub_designs());
+        let mut good = 0;
+        for st in &r.model.stems {
+            let t = apply(&st.pose.rotation, st.def.tangent(st.def.length - st.def.tip_bar));
+            let tilt = dot(t, UP).clamp(-1.0, 1.0).acos().to_degrees();
+            let toward_viewer = dot(t, FRONT) > -0.2;
+            println!("{} tilt {tilt:.0}° front {:.2}", st.def.id, dot(t, FRONT));
+            if (20.0..=70.0).contains(&tilt) && toward_viewer {
+                good += 1;
+            }
+        }
+        assert!(good >= 5, "only {good} of 7 heads face out toward the viewer");
+        for bad in ["touch", "hits", "cross", "runs into", "too close", "tips over"] {
+            assert!(!r.report.warnings.iter().any(|w| w.contains(bad)), "{bad}: {:#?}", r.report.warnings);
+        }
+    }
+
+    #[test]
+    fn a_crowded_hub_keeps_its_holes_apart() {
+        // Fourteen stems on a vase whose flat top allows only a modest hub.
+        let stems: Vec<String> = (0..14)
+            .map(|i| {
+                let a = (i as f32 * 360.0 / 14.0).to_radians();
+                let (r, y) = (if i % 2 == 0 { 9.0 } else { 6.0 }, if i % 2 == 0 { 20.0 } else { 25.0 });
+                format!(r#"{{"head":null,"tip":[{:.2},{y},{:.2}],"leaves":[]}}"#, r * a.cos(), r * a.sin())
+            })
+            .collect();
+        let json = format!(
+            r#"{{"resolution":25,"shapes":[{{"shape":"cylinder","center":[0,4,0],"size":[9,8,9],"color":"White"}}],"bouquet":{{"hub":[0,8,0],"stems":[{}]}}}}"#,
+            stems.join(",")
+        );
+        let r = build_json(&json, stub_designs());
+        println!("{}", r.report.to_text());
+        assert_eq!(r.model.stems.len(), 14);
+        assert!(!r.report.warnings.iter().any(|w| w.contains("too close") || w.contains("hub's edge")), "{:#?}", r.report.warnings);
+        let hub: Hub = serde_json::from_value(r.model.details[HUB_KEY].source["hub"].clone()).unwrap();
+        let side = 8.0 * (hub.cells.iter().map(|c| c.0).max().unwrap() + 1) as f32;
+        for (i, a) in hub.holes.iter().enumerate() {
+            let ab = sub(a.top, mul(a.dir, HOLE_DEPTH));
+            for p in [a.top, ab] {
+                assert!(
+                    p[0] >= HUB_HOLE_EDGE - 1e-3
+                        && p[1] >= HUB_HOLE_EDGE - 1e-3
+                        && p[0] <= side - HUB_HOLE_EDGE + 1e-3
+                        && p[1] <= side - HUB_HOLE_EDGE + 1e-3
+                );
+            }
+            for c in &hub.holes[i + 1..] {
+                let d = segment_distance(a.top, ab, c.top, sub(c.top, mul(c.dir, HOLE_DEPTH)));
+                assert!(d >= HUB_HOLE_GAP, "holes {d:.2} mm apart");
+            }
+        }
     }
 }

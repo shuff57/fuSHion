@@ -164,10 +164,13 @@ with its **head** pushed onto the stem's tip and **leaves** clipped on along it.
 - **Size heads to the model**: a rose about 6–8 studs (48–64 mm) across in a bouquet 30
   studs wide, smaller flowers in proportion. Tiny heads on long stems look wrong.
 - **Fan the stems out**: the tallest in the middle, others leaning out around it, tips
-  spread so heads and leaves don't touch, a little `bend` on the outer ones. A stem must
-  print in one piece, so keep each at most **240 mm** (30 studs) from the vase top to its
-  head; longer ones are shortened. Lean at the base is limited (60°): with a wide fan,
-  `bend` the stems rather than tilting them at the base.
+  spread so heads don't overlap. Place the tips; **leave `bend` out**: the engine bends
+  each stem so its head bows out toward the viewer (about 45° from upright), keeps heads,
+  leaves and stems clear of each other, and leans stems less at the hub where their holes
+  would crowd. Give `bend` only to force a shape. A stem must print in one piece, so keep
+  each at most **240 mm** (30 studs) from the vase top to its head; longer ones are
+  shortened. Heads far out at the sides and low face sideways: put such tips a little
+  forward (`-z`) or higher.
 - A fan that leans to one side can tip the vase: the report says so. Give the vase a
   wider or solid base, or lean the stems less.
 - **Each flower brings its own stem**, as in LEGO's bouquet: the head design suggests
@@ -186,8 +189,10 @@ with its **head** pushed onto the stem's tip and **leaves** clipped on along it.
 - Branches stay in the stem's plane, since the whole stem prints flat as one piece; the
   engine turns that plane so branches fan toward the viewer and sideways, away from other
   stems. A whole stem must lie within 240 × 200 mm flat; the report gives the largest.
-- A style's suggested leaves appear only when a stem lists no `leaves` and a leaf design
-  named `leaf` exists; otherwise give `leaves` yourself.
+- Leaves: leave `leaves` out and a stem gets its style's suggested leaves (with a leaf
+  design named `leaf`), each placed where it touches nothing, or left off with a note.
+  `"leaves": []` means none. Listed leaves start where you put them and move a little
+  (up or down the stem, turned about it) if they would touch something.
 
 ```json
 "resolution": 30,
@@ -197,11 +202,11 @@ with its **head** pushed onto the stem's tip and **leaves** clipped on along it.
   "stems": [
     {"head": "peach_rose", "tip": [0, 26, 1], "head_color": "Coral",
      "leaves": [{"design": "leaf", "at": 0.35, "side": 90}]},
-    {"head": "peach_rose", "tip": [-7, 22, -2], "bend": 15},
-    {"head": "white_daisy", "tip": [7, 21, -3], "bend": 12, "spin": 20,
+    {"head": "peach_rose", "tip": [-7, 22, -2], "leaves": []},
+    {"head": "white_daisy", "tip": [7, 21, -3], "spin": 20,
      "head_colors": {"centre": "Yellow"},
      "leaves": [{"design": "leaf", "at": 0.5, "side": -90, "color": "Dark Green"}]},
-    {"head": "peach_rose", "tip": [2, 19, 7], "bend": 20},
+    {"head": "peach_rose", "tip": [2, 19, 7]},
     {"head": "lavender", "tip": [-4, 24, 5]},
     {"head": null, "tip": [9, 14, 2], "tip_shape": {"kind": "blade", "length": 40, "width": 5},
      "style": {"name": "grass", "diameter": 3.5, "color": "Bright Green", "head_on_tip": false,
@@ -212,12 +217,13 @@ with its **head** pushed onto the stem's tip and **leaves** clipped on along it.
 - `hub`: the centre of the vase's top, in the shapes' units. The hub goes on the highest
   surface there.
 - Each stem: `tip` is where its head sits (shapes' units); `head` a design or `null`;
-  `bend` degrees, bowing outward away from the middle (default 0, straight); `color` the
+  `bend` degrees (leave it out: chosen so the head faces the viewer; 0: straight); `color` the
   stem's (default: its style's, else Dark Green); `style`, `branch_heads`, `tip_shape` as
   above; `head_color` and `head_colors` (by role) the head's;
   `spin` degrees to turn the head about the stem (by default its front faces the viewer,
-  `-z`); `leaves`, each a `design` clipped `at` a fraction (0–1) of the stem from its base,
-  turned `side` degrees around the stem (0: outward), `color` default Green.
+  `-z`); `leaves` (left out: the style's; `[]`: none), each a `design` clipped `at` a
+  fraction (0–1) of the stem from its base, turned `side` degrees around the stem
+  (0: outward), `color` default Green.
 - `resolution` measures the whole bouquet, vase and stem tips together.
 - The report lists the stems ("Stems: 7 (longest 182 mm)…") and the hub's holes; build
   the vase, put on the hub, then plug in the stems by hole number.

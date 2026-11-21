@@ -512,8 +512,14 @@ pub(crate) fn finish_with(
             mesh.volume_mm3, m.volume
         )));
     }
-    // Units: the mesh must span the solid's box in mm, not in m or inches.
-    if let Some(why) = bbox_off(mesh.bbox_mm, m.bbox, BBOX_TOL_MM) {
+    // Units: the mesh must span the solid's box in mm, not in m or inches. SolidCraft's box
+    // of some curved faces (a surface of revolution about a slanting axis) is a little
+    // smaller than the faces themselves, whose mesh vertices lie on them, so the tolerance
+    // grows with the part: 0.2 % of its largest side (0.07 mm short on a 110 mm stem's bud).
+    let size = (0..3)
+        .map(|k| m.bbox.1[k] - m.bbox.0[k])
+        .fold(0.0, f64::max);
+    if let Some(why) = bbox_off(mesh.bbox_mm, m.bbox, BBOX_TOL_MM.max(0.002 * size)) {
         return Err(CustomError::Export(format!("STL {why}")));
     }
     Ok(CustomPart {

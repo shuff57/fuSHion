@@ -296,3 +296,77 @@ fn flower_templates_carry_mounts_and_stems() {
     .unwrap();
     assert!(plain.design.mount.is_none());
 }
+
+/// A head's size scales the whole head (its hub and centre with its petals), takes the name
+/// "diameter" too, and a parameter a template doesn't have is refused.
+#[test]
+fn head_sizes_scale_and_unknown_params_are_refused() {
+    // Twice the farthest any point reaches from the head's vertical axis (the middle of its
+    // box seen from above), mm.
+    let across = |d: &sf_custom::Detail| {
+        let ps = &d.design.mesh.positions;
+        let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+        for p in ps {
+            for (k, v) in [p[0], p[2]].into_iter().enumerate() {
+                lo[k] = lo[k].min(v);
+                hi[k] = hi[k].max(v);
+            }
+        }
+        let c = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+        let r = ps
+            .iter()
+            .map(|p| (p[0] - c[0]).hypot(p[2] - c[1]))
+            .fold(0.0f32, f32::max);
+        f64::from(r) * 2.0 / 2.5
+    };
+    // Claude's "diameter" is the kits' "size".
+    let rose = detail_template("r", "rose", "rose", &json!({"diameter": 56})).unwrap();
+    assert!(
+        across(&rose) > 52.0,
+        "a 56 mm rose is {:.1} mm across",
+        across(&rose)
+    );
+    assert_eq!(rose.design.source.source["params"]["size"], json!(56.0));
+    // Its layers have their own colours.
+    let kit = rose.design.kit.as_ref().unwrap();
+    let role = |key: &str| {
+        kit.parts
+            .iter()
+            .find(|p| p.key == key)
+            .map(|p| p.role.clone())
+            .unwrap()
+    };
+    assert_eq!(
+        (role("outer_petal"), role("middle_petal"), role("bud")),
+        ("main".into(), "inner".into(), "centre".into())
+    );
+    assert!(kit.roles.iter().any(|(r, c)| r == "inner" && c == "Tan"));
+    assert!(kit.roles.iter().any(|(r, c)| r == "centre" && c == "White"));
+    // Every big flower builds at its largest.
+    for (t, size) in [("poppy", 64.0), ("gerbera", 64.0), ("cornflower", 48.0)] {
+        let d = detail_template(t, t, t, &json!({"size": size}))
+            .unwrap_or_else(|e| panic!("{t} at {size}: {e}"));
+        assert!(
+            across(&d) > size - 6.0,
+            "{t} at {size} is {:.1} mm across",
+            across(&d)
+        );
+    }
+    // A misspelt parameter is an error naming the ones it takes.
+    let e = detail_template("r", "rose", "rose", &json!({"bogus": 1}))
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("bogus") && e.contains("`size`"), "{e}");
+    // A spike's "species" is its "kind".
+    let s = detail_template(
+        "s",
+        "snapdragon",
+        "spike",
+        &json!({"species": "snapdragon"}),
+    )
+    .unwrap();
+    assert_eq!(
+        s.design.source.source["params"]["kind"],
+        json!("snapdragon")
+    );
+}
