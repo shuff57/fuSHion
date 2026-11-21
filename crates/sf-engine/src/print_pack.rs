@@ -23,6 +23,10 @@ use sf_core::{Cell, ColorId, CustomDef, CustomKind, DetailDesign, DetailMesh, Fi
 use sf_spec::{Compiled, GridDetail};
 use std::collections::{BTreeMap, HashMap, HashSet};
 
+/// Straight bricks: brick columns this close (in studs, 4-neighbour steps) to a course's
+/// curved rim are packed as plates (see `Body::widen_rim`).
+pub const RIM_BAND: i32 = 3;
+
 /// Longest side of a printed body part, in studs (64 mm, inside sf-custom's limit).
 pub const MAX_SIDE: i32 = 8;
 /// Most cells (columns) in one printed body part.
@@ -189,6 +193,9 @@ impl<'a> Body<'a> {
                         }
                     }
                 }
+                if self.min_fill == 2 {
+                    self.widen_rim(y, &mut cells);
+                }
                 self.layer(y, 3, cells, horizontal);
                 for dy in 0..3 {
                     self.plate_layer(y + dy, horizontal ^ (dy % 2 == 1));
@@ -201,6 +208,59 @@ impl<'a> Body<'a> {
             }
         }
         merge_stacks(self.parts)
+    }
+
+    /// Straight bricks: where the outline changes inside a course (a curve), the columns
+    /// that don't make a brick leave a rim of single plates, often one column wide and
+    /// joined only at corners, which fused studs can't hold. Hand the brick columns next to
+    /// that rim to the plate layers too, so the rim is at least two columns wide: plates
+    /// stacked with offset seams, stepping the arc a plate at a time.
+    fn widen_rim(&self, y: i32, cells: &mut HashMap<(i32, i32), ColorId>) {
+        let mut rim: HashSet<(i32, i32)> = HashSet::new();
+        for z in 0..self.dims[2] {
+            for x in 0..self.dims[0] {
+                if !cells.contains_key(&(x, z)) && (0..3).any(|dy| self.cell_color(x, y + dy, z).is_some()) {
+                    rim.insert((x, z));
+                }
+            }
+        }
+        let r = RIM_BAND;
+        cells.retain(|&(x, z), _| {
+            !(-r..=r).any(|dx: i32| (-r..=r).any(|dz: i32| dx.abs() + dz.abs() <= r && rim.contains(&(x + dx, z + dz))))
+        });
+        // Settle: every plate cell needs a plate of its colour beside it in its layer (the
+        // band reaches across gaps, so a column it takes can end up alone), and every brick
+        // column a brick of its colour beside it. Each round only moves bricks to plates.
+        loop {
+            let mut take: HashSet<(i32, i32)> = HashSet::new();
+            for z in 0..self.dims[2] {
+                for x in 0..self.dims[0] {
+                    if let Some(col) = cells.get(&(x, z)) {
+                        if !NEIGHBOURS.iter().any(|&(dx, dz)| cells.get(&(x + dx, z + dz)) == Some(col)) {
+                            take.insert((x, z));
+                        }
+                        continue;
+                    }
+                    for dy in 0..3 {
+                        let Some(col) = self.cell_color(x, y + dy, z) else { continue };
+                        let plate_beside = NEIGHBOURS.iter().any(|&(dx, dz)| {
+                            !cells.contains_key(&(x + dx, z + dz)) && self.cell_color(x + dx, y + dy, z + dz) == Some(col)
+                        });
+                        if !plate_beside
+                            && let Some(&(dx, dz)) = NEIGHBOURS.iter().find(|&&(dx, dz)| cells.get(&(x + dx, z + dz)) == Some(&col))
+                        {
+                            take.insert((x + dx, z + dz));
+                        }
+                    }
+                }
+            }
+            if take.is_empty() {
+                break;
+            }
+            for c in take {
+                cells.remove(&c);
+            }
+        }
     }
 
     fn plate_layer(&mut self, y: i32, horizontal: bool) {
@@ -336,7 +396,35 @@ fn merge_tiny(pieces: &mut Vec<Vec<(i32, i32)>>) {
         }
         pieces.retain(|p| !p.is_empty());
         if !merged {
-            return;
+            break;
+        }
+    }
+    lend_cells(pieces);
+}
+
+/// A single cell no neighbour could take (it would grow past the size limit) borrows an
+/// adjacent cell from a neighbour that stays connected and more than tiny without it: a
+/// piece of two in a row can be held by a fused pair, a single cell can't.
+fn lend_cells(pieces: &mut [Vec<(i32, i32)>]) {
+    for t in 0..pieces.len() {
+        if pieces[t].len() != 1 {
+            continue;
+        }
+        let c = pieces[t][0];
+        'n: for (dx, dz) in NEIGHBOURS {
+            let n = (c.0 + dx, c.1 + dz);
+            for j in 0..pieces.len() {
+                if j == t || !pieces[j].contains(&n) || pieces[j].len() <= TINY + 1 {
+                    continue;
+                }
+                let rest: Vec<(i32, i32)> = pieces[j].iter().copied().filter(|&q| q != n).collect();
+                if components(&rest, |_, _| true).len() == 1 {
+                    pieces[j] = rest;
+                    pieces[t].push(n);
+                    pieces[t].sort_by_key(|c| (c.1, c.0));
+                    break 'n;
+                }
+            }
         }
     }
 }
@@ -893,6 +981,96 @@ fn keep_holdable(c: &Compiled, mut grown: Compiled) -> Compiled {
     grown
 }
 
+/// Re-shapes small loose groups (at most [`DROP_MAX`] parts) so they join a held part
+/// beside them instead of being removed. For each part of a group, the first held part `q`
+/// beside it in its layer whose height range covers the part's: the part's column is filled
+/// out to `q`'s range (only where those cells are empty) in `q`'s colour, so it joins `q`.
+/// With nothing beside it, a one-column piece grows a second column instead.
+///
+/// Returns the new grid and how many groups changed, or `None`.
+fn rescue(c: &Compiled, ps: &[Placement], groups: &[Vec<usize>]) -> Option<(Compiled, usize)> {
+    let mut owner: HashMap<Cell, usize> = HashMap::new();
+    for (i, p) in ps.iter().enumerate() {
+        for cell in p.cells() {
+            owner.insert(cell, i);
+        }
+    }
+    let loose: HashSet<usize> = groups.iter().flatten().copied().collect();
+    let mut out = c.clone();
+    let mut changed = 0;
+    for g in groups.iter().filter(|g| g.len() <= DROP_MAX) {
+        let mut done = false;
+        'parts: for &i in g {
+            let p = &ps[i];
+            if !is_brick(p) {
+                continue;
+            }
+            for cell in p.cells() {
+                for (dx, dz) in NEIGHBOURS {
+                    let Some(&j) = owner.get(&Cell::new(cell.x + dx, cell.y, cell.z + dz)) else { continue };
+                    let q = &ps[j];
+                    if loose.contains(&j) || !is_brick(q) {
+                        continue;
+                    }
+                    let (lo, hi) = (q.origin.y, q.top());
+                    if lo > p.origin.y || hi < p.top() {
+                        continue;
+                    }
+                    // The rest of this column within q's range must be free to fill.
+                    let fill: Vec<Cell> =
+                        (lo..hi).map(|y| Cell::new(cell.x, y, cell.z)).filter(|c2| c2.y < p.origin.y || c2.y >= p.top()).collect();
+                    if !fill.iter().all(|&c2| out.grid.in_bounds(c2) && !out.grid.get(c2).is_filled() && !owner.contains_key(&c2)) {
+                        continue;
+                    }
+                    for c2 in fill.into_iter().chain(p.cells()) {
+                        out.grid.set(c2, Fill::Solid(q.color));
+                    }
+                    done = true;
+                    break 'parts;
+                }
+            }
+        }
+        if !done {
+            // Nothing beside it to join: a one-column piece grows a second column over the
+            // same part below (or under the same part above), where the shape covers most, so
+            // a fused pair can hold it.
+            for &i in g {
+                let p = &ps[i];
+                if !is_brick(p) || p.custom.as_ref().is_none_or(|d| d.cells.len() != 1) {
+                    continue;
+                }
+                let (x, z) = (p.origin.x, p.origin.z);
+                let support = |y: i32, x: i32, z: i32| owner.get(&Cell::new(x, y, z)).copied().filter(|j| !loose.contains(j));
+                let pick = [(p.origin.y - 1, p.origin.y > 0), (p.top(), true)].into_iter().filter(|&(_, ok)| ok).find_map(|(sy, _)| {
+                    let l = support(sy, x, z)?;
+                    NEIGHBOURS
+                        .iter()
+                        .map(|&(dx, dz)| (x + dx, z + dz))
+                        .filter(|&(nx, nz)| support(sy, nx, nz) == Some(l))
+                        .filter(|&(nx, nz)| {
+                            (p.origin.y..p.top()).all(|y| {
+                                let c2 = Cell::new(nx, y, nz);
+                                out.grid.in_bounds(c2) && !out.grid.get(c2).is_filled() && !owner.contains_key(&c2)
+                            })
+                        })
+                        .max_by_key(|&(nx, nz)| {
+                            (p.origin.y..p.top()).map(|y| c.sample_mask(Cell::new(nx, y, nz)).count_ones()).sum::<u32>()
+                        })
+                });
+                if let Some((nx, nz)) = pick {
+                    for y in p.origin.y..p.top() {
+                        out.grid.set(Cell::new(nx, y, nz), Fill::Solid(p.color));
+                    }
+                    done = true;
+                    break;
+                }
+            }
+        }
+        changed += done as usize;
+    }
+    (changed > 0).then_some((out, changed))
+}
+
 /// Packs `c` into printed parts, rests the spec's details on it and lays out studs.
 pub fn pack_print(
     c: &Compiled,
@@ -905,7 +1083,8 @@ pub fn pack_print(
     let meshes = details::design_meshes(designs);
     let curves = curves && !c.surface.is_empty();
     let mut owned: Option<Compiled> = if curves { grow_to_shape(c, GROW_SAMPLES).map(|g| keep_holdable(c, g)) } else { None };
-    for attempt in 0..3 {
+    let mut rescued = 0;
+    for attempt in 0..5 {
         let cc = owned.as_ref().unwrap_or(c);
         let body: Vec<Placement> = Body::new(cc, if curves { 1 } else { 2 }).pack().iter().map(to_placement).collect();
         let placed = details::place_details(uses, designs, &body)?;
@@ -917,13 +1096,21 @@ pub fn pack_print(
         } else {
             Vec::new()
         };
-        if !small.is_empty()
-            && attempt < 2
-            && let Some(next) = anchor(cc, &ps, &small)
-        {
-            anchored += small.len();
-            owned = Some(next);
-            continue;
+        if !small.is_empty() && attempt < 4 {
+            // First anchor (a short gap filled, or a hidden cell recoloured); then re-shape what
+            // is still loose before anything is removed.
+            if attempt < 2
+                && let Some(next) = anchor(cc, &ps, &small)
+            {
+                anchored += small.len();
+                owned = Some(next);
+                continue;
+            }
+            if let Some((next, n)) = rescue(cc, &ps, &small) {
+                rescued += n;
+                owned = Some(next);
+                continue;
+            }
         }
         let drop: HashSet<usize> = small.iter().filter(|g| g.len() <= DROP_MAX).flatten().copied().collect();
         let dropped = drop.len();
@@ -944,6 +1131,11 @@ pub fn pack_print(
             None => BTreeMap::new(),
         };
         let mut warnings = placed.warnings;
+        if rescued > 0 {
+            warnings.push(format!(
+                "re-shaped {rescued} small piece(s) no stud could hold: each joined the part beside it (filled out to its height, in its colour) or grew a second stud's width"
+            ));
+        }
         for d in unsupported_details(&ps) {
             warnings.push(format!(
                 "detail {d} has no stud under its base and will fall off: give it a base at least two studs long along a row of the part below"
@@ -1241,5 +1433,32 @@ mod tests {
         let bad = json.replace("\"centre\":\"Orange\"", "\"stem\":\"Green\"");
         let e = build(&Spec::from_json(&bad).unwrap(), &opts, None).err().unwrap().to_string();
         assert!(e.contains("stem") && e.contains("centre"), "{e}");
+    }
+
+    #[test]
+    fn straight_bricks_hold_every_part_of_round_shapes() {
+        let pot = r#"{"shapes":[
+            {"shape":"cylinder","center":[0,3,0],"size":[8,6,8],"color":"Reddish Brown"},
+            {"shape":"cylinder","center":[0,6.3,0],"size":[9,1,9],"color":"Reddish Brown"},
+            {"shape":"cylinder","center":[0,6.6,0],"size":[7.5,0.6,7.5],"color":"Dark Brown"}]}"#;
+        for (what, json, res) in [("snowman", SNOWMAN, 21), ("pot", pot, 12)] {
+            let r =
+                build(&Spec::from_json(json).unwrap(), &BuildOptions { resolution: Some(res), print: true, ..Default::default() }, None)
+                    .unwrap();
+            let text = r.report.to_text();
+            println!("{what}: {} parts\n{text}", r.report.parts);
+            assert!(!text.contains("removed"), "{what}: parts removed\n{text}");
+            assert!(r.analysis.floating.is_empty(), "{what}");
+            // At most the odd sideways feature (the snowman's nose) is anchored.
+            let anchored = r
+                .report
+                .warnings
+                .iter()
+                .find(|w| w.contains("small feature"))
+                .map_or(0, |w| w.split(' ').next().unwrap().parse::<usize>().unwrap());
+            assert!(anchored <= 2, "{what}: {anchored} anchored");
+            assert!(fused_splits(&r.model.placements).is_empty(), "{what}");
+            assert!(r.model.placements.iter().all(|p| p.custom.as_ref().is_some_and(|d| d.trim.is_none())), "{what}: straight bricks only");
+        }
     }
 }

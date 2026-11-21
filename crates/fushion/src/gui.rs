@@ -201,7 +201,7 @@ fn read_print_mode(dir: &Path) -> bool {
 
 /// Whether printed bricks follow curves in this session (off when the file is missing).
 fn read_curves(dir: &Path) -> bool {
-    std::fs::read_to_string(dir.join("curves.txt")).map_or(false, |t| t.trim() == "1")
+    std::fs::read_to_string(dir.join("curves.txt")).is_ok_and(|t| t.trim() == "1")
 }
 
 fn mtime(p: &Path) -> Option<SystemTime> {
