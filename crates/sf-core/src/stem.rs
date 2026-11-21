@@ -45,6 +45,17 @@ pub const BAR_D: f32 = 3.18;
 pub const PEG_D: f32 = 4.8;
 /// The base peg's length into the hub, mm.
 pub const PEG_LEN: f32 = 10.0;
+/// Length of a stem's tip bar, mm: as deep as a head's bar hole, so the head seats on the
+/// rod's shoulder.
+pub const TIP_BAR: f32 = 4.5;
+/// A hub's thickness, mm: the peg hole (10.5 mm) plus the floor over the hub's sockets at
+/// the steepest lean the engine allows.
+pub const HUB_HEIGHT: f32 = 13.2;
+/// Closest the axes of two hub holes may come anywhere along the hole depth, mm.
+pub const HUB_HOLE_GAP: f32 = 5.8;
+/// Closest a hub hole's axis may come to the edge of the hub's footprint, at the top and
+/// at the bottom of the hole, mm.
+pub const HUB_HOLE_EDGE: f32 = 3.6;
 /// Longest stem that prints on a common bed (250–256 mm), centreline, mm.
 pub const MAX_STEM_LEN: f32 = 240.0;
 /// Millimetres to LDU.
