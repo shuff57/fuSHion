@@ -452,8 +452,15 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
                 }
             }
             cells.clone_from(&f.cells);
-            let given_units = slant::units_from(&f.cells, &units)?;
-            let studs: Vec<(i32, i32)> = given_units.iter().flat_map(Unit::cells).collect();
+            // Round studs go on every cell; the units only mean something for fused studs.
+            let given_units = match p.stud_style {
+                StudStyle::SlantV2 { .. } => slant::units_from(&f.cells, &units)?,
+                StudStyle::Solid => Vec::new(),
+            };
+            let studs: Vec<(i32, i32)> = match p.stud_style {
+                StudStyle::SlantV2 { .. } => given_units.iter().flat_map(Unit::cells).collect(),
+                StudStyle::Solid => f.cells.iter().copied().collect(),
+            };
             // A 2-wide rectangle gets centre ribs, as a box does.
             let (w, d) = (
                 f.cells.iter().map(|c| c.0).max().unwrap_or(0) + 1,
@@ -596,6 +603,26 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
     };
     if p.wall_ribs {
         wall_ribs(&mut b, p, &cells, &studs, along_y, hollow_h, roof.as_ref())?;
+    }
+
+    // Compliant sockets: springs in the hollow (boxes and footprints only).
+    if let Some(spec) = p.socket {
+        if roof.is_some() {
+            return Err(CustomError::InvalidShape(
+                "compliant sockets are made for boxes and footprints, not slopes".into(),
+            ));
+        }
+        if !matches!(p.stud_style, StudStyle::Solid) {
+            return Err(CustomError::InvalidProfile("compliant sockets go with round studs".into()));
+        }
+        for (name, step) in crate::socket::stages(p, &spec, &cells, hollow_h)? {
+            let sk = format!("{name}Sketch");
+            let mut c = vec![sketch(&sk, "XY", step.z0)];
+            c.extend(step.loops.iter().map(|l| polyline(l)));
+            c.push(finish());
+            c.push(extrude(&sk, &name, step.z1 - step.z0, if step.add { "join" } else { "cut" }));
+            b.stage(&name, c, step.volume);
+        }
     }
 
     // The stud units, the stud profile's lobe and its finned lobes' frames.

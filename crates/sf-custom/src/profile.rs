@@ -142,6 +142,10 @@ pub struct StudProfile {
     /// hollow keeps a full wall at every corner, and more than the bottom chamfer.
     #[serde(default)]
     pub edge_radius: f64,
+    /// Compliant sockets (round studs only): springs in the hollow that grip studs pushed in
+    /// from below (see [`crate::socket`]). `None`: the plain hollow of the stud style.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub socket: Option<crate::socket::SocketSpec>,
 }
 
 /// Thickness of a centre rib, in mm.
@@ -208,6 +212,33 @@ impl StudProfile {
             wall_ribs: false,
             wall_rib_interference: default_rib_interference(),
             edge_radius: 0.0,
+            socket: None,
+        }
+    }
+
+    /// **Prototype.** Plain round studs (Ø4.8 × 1.8, set `stud_diameter` to calibrate a
+    /// printer) on top, and **compliant sockets** underneath: in-plane springs that grip
+    /// studs pushed in from below (see [`crate::socket`]), numbers for a 0.2–0.25 mm nozzle
+    /// ([`crate::socket::SocketSpec::fine`]). Any footprint works, a 1×1 and 1-wide bricks
+    /// included; there are no fused-unit rules. Walls 1.2 mm and 0.3 mm clear of a stud,
+    /// rigid Ø6.4 tubes as stops, no centre ribs, 0.4 mm rounded vertical edges, a 0.2 mm
+    /// bottom chamfer.
+    pub fn compliant_socket() -> Self {
+        Self {
+            tube_outer_diameter: 6.4,
+            center_ribs: false,
+            edge_radius: 0.4,
+            socket: Some(crate::socket::SocketSpec::fine()),
+            ..Self::standard_fdm()
+        }
+    }
+
+    /// [`StudProfile::compliant_socket`] for a 0.4 mm nozzle: 0.6 mm fingers and slots
+    /// ([`crate::socket::SocketSpec::nozzle04`]).
+    pub fn compliant_socket_nozzle04() -> Self {
+        Self {
+            socket: Some(crate::socket::SocketSpec::nozzle04()),
+            ..Self::compliant_socket()
         }
     }
 
