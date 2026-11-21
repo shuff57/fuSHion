@@ -141,12 +141,16 @@ mod imp {
         write(&part, out, name)
     }
 
+    /// How long a curved (trimmed) brick may take before the plain one is printed instead.
+    const TRIM_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
     /// The print of one printed part: a brick from its cells and units (labelled with its
-    /// id), a detail rebuilt from its recorded source.
-    pub(super) fn print_part(def: &sf_core::CustomDef, model: &Model) -> Result<sf_custom::CustomPart> {
+    /// id), following its curve when it has a trim; a detail rebuilt from its recorded
+    /// source. The second value is a note when a curved brick had to be printed plain.
+    pub(super) fn print_part(def: &sf_core::CustomDef, model: &Model) -> Result<(sf_custom::CustomPart, Option<String>)> {
         match &def.kind {
             sf_core::CustomKind::Brick => {
-                let shape = CustomShape::Printed {
+                let plain = CustomShape::Printed {
                     cells: def.cells.iter().map(|&(a, b)| (i32::from(a), i32::from(b))).collect(),
                     plates: u32::from(def.plates),
                     units: def
@@ -155,14 +159,32 @@ mod imp {
                         .map(|u| u.iter().map(|&(a, b)| (i32::from(a), i32::from(b))).collect())
                         .collect(),
                     label: Some(def.id.clone()),
+                    trim: None,
                 };
-                sf_custom::build(&shape, &profile()).map_err(|e| anyhow::anyhow!("{}: {e}", def.id))
+                let build_plain = || sf_custom::build(&plain, &profile()).map_err(|e| anyhow::anyhow!("{}: {e}", def.id));
+                let Some(trim) = def.trim.as_deref() else {
+                    return Ok((build_plain()?, None));
+                };
+                // The curved brick, on its own thread so a stuck SolidCraft boolean can't
+                // hold up the whole print set.
+                let CustomShape::Printed { cells, plates, units, label, .. } = plain.clone() else { unreachable!() };
+                let curved = CustomShape::Printed { cells, plates, units, label, trim: Some(trim.clone()) };
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let _ = tx.send(sf_custom::build_trimmed(&curved, &profile()));
+                });
+                let why = match rx.recv_timeout(TRIM_TIMEOUT) {
+                    Ok(Ok(t)) => return Ok((t.part, None)),
+                    Ok(Err(e)) => e.to_string(),
+                    Err(_) => format!("it took over {} s", TRIM_TIMEOUT.as_secs()),
+                };
+                Ok((build_plain()?, Some(format!("{} printed without its curve: {why}", def.id))))
             }
             sf_core::CustomKind::Detail { mesh, .. } => {
                 let Some(src) = model.details.get(mesh) else {
                     bail!("{}: the model has no design `{mesh}`", def.id)
                 };
-                sf_custom::rebuild_detail(&src.source).map_err(|e| anyhow::anyhow!("{}: {e}", def.id))
+                Ok((sf_custom::rebuild_detail(&src.source).map_err(|e| anyhow::anyhow!("{}: {e}", def.id))?, None))
             }
         }
     }
@@ -237,6 +259,7 @@ mod imp {
         let results: Mutex<BTreeMap<String, Result<sf_custom::CustomPart>>> = Mutex::new(BTreeMap::new());
         let next = AtomicUsize::new(0);
         let done = AtomicUsize::new(0);
+        let trim_notes: Mutex<Vec<String>> = Mutex::new(Vec::new());
         progress(0, total);
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 8).min(total.max(1));
         std::thread::scope(|scope| {
@@ -245,7 +268,12 @@ mod imp {
                     let k = next.fetch_add(1, Ordering::SeqCst);
                     let Some(job) = jobs.get(k) else { break };
                     let (key, r) = match job {
-                        Job::Def(def) => (def.id.clone(), print_part(def, model)),
+                        Job::Def(def) => (def.id.clone(), print_part(def, model).map(|(p, note)| {
+                            if let Some(n) = note {
+                                trim_notes.lock().unwrap_or_else(|e| e.into_inner()).push(n);
+                            }
+                            p
+                        })),
                         Job::Kit(mesh, i) => {
                             let src = &model.kits[*mesh].parts[*i].source.source;
                             (
@@ -262,7 +290,7 @@ mod imp {
         let results = results.into_inner().unwrap_or_else(|e| e.into_inner());
         let mut files = Vec::new();
         let mut rows = Vec::new();
-        let mut notes = Vec::new();
+        let mut notes = trim_notes.into_inner().unwrap_or_else(|e| e.into_inner());
         for ((id, color), count) in &uses {
             let def = &defs[id];
             let colour = palette.name(*color);
@@ -271,7 +299,7 @@ mod imp {
                 sf_core::CustomKind::Brick => ("plate", def.describe()),
                 sf_core::CustomKind::Detail { .. } => ("detail", def.describe()),
             };
-            let supports = matches!(def.kind, sf_core::CustomKind::Detail { .. });
+            let is_detail = matches!(def.kind, sf_core::CustomKind::Detail { .. });
             let part = match results.get(id) {
                 Some(Ok(p)) => p,
                 Some(Err(e)) => {
@@ -294,8 +322,13 @@ mod imp {
                 size_studs: def.size(),
                 volume_mm3: part.volume_mm3,
                 grams: part.volume_mm3 * PLA_G_PER_MM3,
-                supports: supports
-                    && sf_custom::overhang_area(&part.stl, DETAIL_CEILING_MM) > sf_custom::SUPPORT_AREA_MM2,
+                // Details: overhang above their socket's ceiling; bricks (plain or curved):
+                // sloped downward faces above the bottom 0.3 mm (level ceilings bridge).
+                supports: if is_detail {
+                    sf_custom::overhang_area(&part.stl, DETAIL_CEILING_MM) > sf_custom::SUPPORT_AREA_MM2
+                } else {
+                    sf_custom::brick_overhang(&part.stl) > sf_custom::SUPPORT_AREA_MM2
+                },
                 file: made.stl.strip_prefix(out).ok().map(|p| p.to_string_lossy().into_owned()),
             });
         }
@@ -653,6 +686,33 @@ mod tests {
         assert!(csv.contains(",kit part,"), "{csv}");
         // No whole-detail print for a kit.
         assert!(!set.rows.iter().any(|r| r.kind == "detail"));
+        let _ = std::fs::remove_dir_all(&out);
+    }
+
+    /// A curved brick whose trim fails is printed plain, with a note saying so.
+    #[test]
+    fn failed_curve_prints_plain_with_a_note() {
+        use sf_core::{Cell, CustomDef, CustomKind, Model, Palette, Placement, Rot, Trim};
+        let mut def = CustomDef {
+            id: "B007".into(),
+            kind: CustomKind::Brick,
+            cells: vec![(0, 0), (1, 0)],
+            colors: Default::default(),
+            plates: 3,
+            studs: vec![(0, 0), (1, 0)],
+            units: vec![vec![(0, 0), (1, 0)]],
+            sockets: vec![(0, 0), (1, 0)],
+            trim: None,
+            mesh: None,
+        };
+        // A trim that keeps nothing can't be built.
+        def.trim = Some(Box::new(Trim { shapes: vec![], protect: vec![], overhang: false }));
+        let model = Model { placements: vec![Placement::printed(def, 4, Cell::new(0, 0, 0), Rot(0))], ..Default::default() };
+        let out = std::env::temp_dir().join(format!("fushion-curve-fallback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let set = super::export_print_set(&model, &Palette::builtin(), &out, |_, _| {}).unwrap();
+        assert!(set.notes.iter().any(|n| n.starts_with("B007 printed without its curve")), "{:?}", set.notes);
+        assert!(set.rows.iter().any(|r| r.id == "B007" && r.file.is_some() && !r.supports));
         let _ = std::fs::remove_dir_all(&out);
     }
 }

@@ -69,6 +69,58 @@ impl Target {
         }
     }
 
+    /// Fill a triangle with colours interpolated between its corners (Gouraud shading),
+    /// depth-tested, double-sided.
+    #[inline]
+    pub fn tri_smooth(&mut self, a: SVert, b: SVert, c: SVert, rgb: [[f32; 3]; 3]) {
+        let (w, h) = (self.w as f32, self.h as f32);
+        let minx = a[0].min(b[0]).min(c[0]);
+        let maxx = a[0].max(b[0]).max(c[0]);
+        let miny = a[1].min(b[1]).min(c[1]);
+        let maxy = a[1].max(b[1]).max(c[1]);
+        let x0 = (minx - 0.5).ceil().max(0.0);
+        let x1 = (maxx - 0.5).floor().min(w - 1.0);
+        let y0 = (miny - 0.5).ceil().max(0.0);
+        let y1 = (maxy - 0.5).floor().min(h - 1.0);
+        if x0 > x1 || y0 > y1 || !(x0.is_finite() && y0.is_finite()) {
+            return;
+        }
+        let area = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        if area.abs() < 1e-12 {
+            return;
+        }
+        let inv = 1.0 / area;
+        let (ea, eb, ec) = (edge(b, c, inv), edge(c, a, inv), edge(a, b, inv));
+        let (x0i, x1i, y0i, y1i) = (x0 as usize, x1 as usize, y0 as usize, y1 as usize);
+        let px0 = x0 + 0.5;
+        let zx = ea.0 * a[2] + eb.0 * b[2] + ec.0 * c[2];
+        let zy = ea.1 * a[2] + eb.1 * b[2] + ec.1 * c[2];
+        let zc = ea.2 * a[2] + eb.2 * b[2] + ec.2 * c[2];
+        const E: f32 = -1e-5;
+        for y in y0i..=y1i {
+            let py = y as f32 + 0.5;
+            let mut w0 = ea.0 * px0 + ea.1 * py + ea.2;
+            let mut w1 = eb.0 * px0 + eb.1 * py + eb.2;
+            let mut w2 = ec.0 * px0 + ec.1 * py + ec.2;
+            let mut z = zx * px0 + zy * py + zc;
+            let row = y * self.w;
+            for x in x0i..=x1i {
+                let d = &mut self.depth[row + x];
+                if w0 >= E && w1 >= E && w2 >= E && z < *d {
+                    *d = z;
+                    let (u0, u1, u2) = (w0.max(0.0), w1.max(0.0), w2.max(0.0));
+                    let s = 1.0 / (u0 + u1 + u2).max(1e-12);
+                    self.color[row + x] =
+                        [0, 1, 2].map(|k| ((rgb[0][k] * u0 + rgb[1][k] * u1 + rgb[2][k] * u2) * s).clamp(0.0, 255.0) as u8);
+                }
+                w0 += ea.0;
+                w1 += eb.0;
+                w2 += ec.0;
+                z += zx;
+            }
+        }
+    }
+
     /// Draw a 1-px line blended over the image with `alpha`, visible where
     /// it is no more than `bias` behind the stored depth.
     #[inline]

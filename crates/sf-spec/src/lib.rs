@@ -120,6 +120,20 @@ pub struct GridDetail {
     pub colors: std::collections::BTreeMap<String, ColorId>,
 }
 
+/// A spec primitive placed in the **grid-mm** frame: millimetres, `X = 8·x`, `Y = 3.2·y`
+/// (up), `Z = 8·z` for grid position `(x, y, z)`. `grid_mm = m · q + t` for a point `q` of
+/// `kind` in its own frame; `m` is a rotation times a uniform scale, possibly a reflection.
+/// Used to trim printed bricks to the true surface.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SurfaceShape {
+    pub op: sf_core::TrimOp,
+    pub kind: sf_core::TrimKind,
+    pub m: [[f64; 3]; 3],
+    pub t: [f64; 3],
+    /// Bounding box in grid-mm.
+    pub aabb: ([f64; 3], [f64; 3]),
+}
+
 /// Maps spec coordinates onto the grid, kept through cropping and the base.
 #[derive(Clone, Debug, PartialEq)]
 pub enum GridMap {
@@ -231,6 +245,9 @@ pub struct Compiled {
     pub map: GridMap,
     /// The spec's detail uses, mapped onto the grid.
     pub details: Vec<GridDetail>,
+    /// The spec's `add` and `subtract` primitives in spec order, in grid-mm (empty for
+    /// reliefs). `paint` adds nothing and is left out.
+    pub surface: Vec<SurfaceShape>,
 }
 
 impl Compiled {
@@ -263,11 +280,14 @@ pub fn compile(spec: &Spec, palette: &Palette, opts: &CompileOptions) -> Result<
         Some(name) => resolve_color(palette, name, &mut warnings),
         None => sf_core::color::FILLER,
     };
+    let mut prims = Vec::new();
     let mut out = if let Some(relief) = &spec.relief {
         relief::compile(relief, palette, opts, default_color, &mut warnings)?
     } else {
         let res = opts.resolution.or(spec.resolution).unwrap_or(24).clamp(2, 160);
-        compile_shapes(&spec.shapes, palette, res, default_color, &mut warnings)?
+        let (c, p) = compile_shapes(&spec.shapes, palette, res, default_color, &mut warnings)?;
+        prims = p;
+        c
     };
     if let Some(base) = &spec.base {
         let color = resolve_color(palette, &base.color, &mut warnings);
@@ -298,6 +318,26 @@ pub fn compile(spec: &Spec, palette: &Palette, opts: &CompileOptions) -> Result<
         let at = out.map.to_grid(d.at);
         out.details.push(GridDetail { design: d.design.clone(), at, turn: d.turn % 4, color, colors });
     }
+    if let GridMap::Shapes { origin, ups, upp, shift } = &out.map {
+        // spec → grid-mm: uniform scale 8 / ups (a plate is 0.4 studs both ways).
+        let s = 8.0 / *ups as f64;
+        debug_assert!((3.2 / *upp as f64 - s).abs() < 1e-6 * s);
+        let sh = [8.0 * shift[0] as f64, 3.2 * shift[1] as f64, 8.0 * shift[2] as f64];
+        for p in prims.iter().filter(|p| p.op != Op::Paint) {
+            let g = p.spec_shape();
+            let mut m = g.m;
+            for row in m.iter_mut() {
+                for v in row.iter_mut() {
+                    *v *= s;
+                }
+            }
+            let t = [0, 1, 2].map(|k| s * (g.t[k] - origin[k] as f64) + sh[k]);
+            let (lo, hi) = p.aabb();
+            let aabb = ([0, 1, 2].map(|k| s * (lo[k] - origin[k]) as f64 + sh[k]), [0, 1, 2].map(|k| s * (hi[k] - origin[k]) as f64 + sh[k]));
+            let op = if g.op == Op::Subtract { sf_core::TrimOp::Subtract } else { sf_core::TrimOp::Add };
+            out.surface.push(SurfaceShape { op, kind: g.kind, m, t, aabb });
+        }
+    }
     out.grid.mark_interior();
     out.warnings = warnings;
     Ok(out)
@@ -319,7 +359,7 @@ fn compile_shapes(
     resolution: u32,
     default_color: ColorId,
     warnings: &mut Vec<String>,
-) -> Result<Compiled> {
+) -> Result<(Compiled, Vec<geom::Prim>)> {
     let prims = geom::flatten(shapes, palette, default_color, warnings)?;
     let Some((lo, hi)) = geom::bounds(&prims) else {
         bail!("the spec adds no volume (every shape is subtract or paint)");
@@ -471,9 +511,10 @@ fn compile_shapes(
         units_per_stud: ups,
         map: GridMap::Shapes { origin, ups, upp, shift: [0; 3] },
         details: Vec::new(),
+        surface: Vec::new(),
     };
     crop(&mut out);
-    Ok(out)
+    Ok((out, prims))
 }
 
 /// Shrink the grid to the bounding box of filled cells (keeping y = 0 as the

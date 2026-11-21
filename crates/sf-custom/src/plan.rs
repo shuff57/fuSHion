@@ -316,6 +316,16 @@ pub fn fused_units(shape: &CustomShape, profile: &StudProfile) -> Result<Vec<Vec
 
 /// The plan for `shape` under `profile`: commands, stage volumes and bounding box.
 pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
+    plan_with(shape, profile, None)
+}
+
+/// [`plan`] keeping studs only on the cells in `keep` (a [`CustomShape::Printed`]'s cells
+/// after moving them to start at 0): round studs one by one, fused units whole.
+pub(crate) fn plan_with(
+    shape: &CustomShape,
+    profile: &StudProfile,
+    keep: Option<&BTreeSet<(i32, i32)>>,
+) -> Result<Plan> {
     profile.validate()?;
     let plates = shape.plates();
     if plates == 0 {
@@ -427,8 +437,11 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
             let j0 = list.iter().map(|c| c.1).min().unwrap_or(0);
             let shift = |c: &(i32, i32)| (c.0 - i0, c.1 - j0);
             let list: Vec<(i32, i32)> = list.iter().map(shift).collect();
-            let units: Vec<Vec<(i32, i32)>> =
+            let mut units: Vec<Vec<(i32, i32)>> =
                 units.iter().map(|u| u.iter().map(shift).collect()).collect();
+            if let Some(k) = keep {
+                units.retain(|u| u.iter().all(|c| k.contains(c)));
+            }
             let f = Footprint::new(&list)?;
             let outer = f.offset_loops(p.pitch, p.clearance);
             let inner = f.offset_loops(p.pitch, p.clearance + p.wall);
@@ -459,7 +472,12 @@ pub fn plan(shape: &CustomShape, profile: &StudProfile) -> Result<Plan> {
             };
             let studs: Vec<(i32, i32)> = match p.stud_style {
                 StudStyle::SlantV2 { .. } => given_units.iter().flat_map(Unit::cells).collect(),
-                StudStyle::Solid => f.cells.iter().copied().collect(),
+                StudStyle::Solid => f
+                    .cells
+                    .iter()
+                    .copied()
+                    .filter(|c| keep.is_none_or(|k| k.contains(c)))
+                    .collect(),
             };
             // A 2-wide rectangle gets centre ribs, as a box does.
             let (w, d) = (

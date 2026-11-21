@@ -153,7 +153,16 @@ When the model is built for printing, every brick is designed for its place: sam
 areas merge into bricks of any shape up to 8 × 8 studs. A feature only one stud wide in
 both directions (a 1 × 1 pole, a single-stud nub) can't be held, because its stud would
 stand alone. Make thin parts at least two studs long along one direction, or use a
-detail. Slopes aren't used; round the shape with details instead.
+detail.
+
+Surfaces are smooth in print mode: where a brick's outside is exposed, it is cut to the
+true shape you described (a dome is a dome, a back is rounded), not stair-stepped. Studs
+appear only where another part sits; exposed tops are smooth. So describe the real
+curves with ellipsoids, cones and capsules instead of approximating them with boxes.
+Anything that overhangs more than 45° (the underside of a ball, a jutting chin) keeps
+its true shape, but its bricks are flagged as needing supports when printed. Where you
+have a choice, let shapes sit on their widest part (a dome rather than a ball, a head
+resting on the body rather than hanging off it).
 
 ## How to work
 1. Look at the image. Pick the mode. Note the 3–6 features that make the

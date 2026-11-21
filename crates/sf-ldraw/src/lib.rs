@@ -20,5 +20,5 @@ pub mod procedural;
 pub use install::{InstallReport, default_cache_dir, default_zip_path, ensure_installed, install_from_zip, is_installed};
 pub use library::{MeshLibrary, parse_ldconfig};
 pub use parse::{MAIN_COLOR, PartMesh, Xform};
-pub use printed::{brick_key, custom_mesh, detail_key, detail_mesh};
+pub use printed::{brick_key, custom_mesh, detail_key, detail_mesh, smooth_mesh, trimmed_key, trimmed_mesh};
 pub use procedural::procedural_mesh;

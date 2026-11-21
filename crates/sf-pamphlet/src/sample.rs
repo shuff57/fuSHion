@@ -19,7 +19,7 @@ fn brick(id: &str, cells: Vec<(u8, u8)>, plates: u8) -> CustomDef {
 
 /// A box mesh in the part frame (LDU, -Y up, origin at the top centre of the bounding
 /// box): `w × d` LDU, from `top` (negative: above the bounding box) down to `bottom`.
-fn box_mesh(m: &mut DetailMesh, w: f32, d: f32, top: f32, bottom: f32) {
+pub(crate) fn box_mesh(m: &mut DetailMesh, w: f32, d: f32, top: f32, bottom: f32) {
     let (x0, x1, z0, z1) = (-w / 2.0, w / 2.0, -d / 2.0, d / 2.0);
     let b = m.positions.len() as u32;
     for &(x, y, z) in &[

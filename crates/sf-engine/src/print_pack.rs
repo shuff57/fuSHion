@@ -14,6 +14,7 @@
 //! into units by [`sf_core::print::stud_layout`] so no unit lies under an edge of what sits
 //! on it; a column left alone gets no stud. Parts get one id per distinct geometry.
 
+use crate::curves;
 use crate::details::{self, is_detail};
 use crate::pack::{ANCHOR_MAX, DROP_MAX, anchor, nearest_surface_colors, small_floating};
 use anyhow::Result;
@@ -35,6 +36,8 @@ const TINY: usize = 3;
 pub struct PrintPacked {
     /// Body parts then details, with studs, units and ids assigned.
     pub placements: Vec<Placement>,
+    /// Display meshes of trimmed bricks, by `CustomDef::mesh` (`"trim:B007"`).
+    pub meshes: BTreeMap<String, DetailMesh>,
     pub dropped: usize,
     pub anchored: usize,
     pub compiled: Option<Compiled>,
@@ -417,7 +420,10 @@ fn is_brick(p: &Placement) -> bool {
 /// Lays out every printed brick's studs for what sits on it (see the module docs). Bricks
 /// must be placed at `Rot(0)`, so local columns are grid columns less the origin. `meshes`
 /// are the detail meshes by design name: a detail fills only what its mesh reaches.
-pub fn assign_studs(placements: &mut [Placement], meshes: &BTreeMap<String, DetailMesh>) {
+///
+/// With `exposed_studs` false (curved surfaces), columns with nothing on them get no stud,
+/// so the top of the sculpture is smooth.
+pub fn assign_studs(placements: &mut [Placement], meshes: &BTreeMap<String, DetailMesh>, exposed_studs: bool) {
     let mut owner: HashMap<Cell, usize> = HashMap::new();
     // Columns over which a stud would hit a detail's body rather than its socket base.
     let mut no_stud: HashSet<Cell> = HashSet::new();
@@ -447,7 +453,10 @@ pub fn assign_studs(placements: &mut [Placement], meshes: &BTreeMap<String, Deta
             let mut v: Vec<(i32, i32)> = p.cells().filter(|c| c.y == p.origin.y).map(|c| (c.x, c.z)).collect();
             v.sort_unstable();
             v.dedup();
-            v.into_iter().filter(|&(x, z)| !no_stud.contains(&Cell::new(x, top, z))).collect()
+            v.into_iter()
+                .filter(|&(x, z)| !no_stud.contains(&Cell::new(x, top, z)))
+                .filter(|&(x, z)| exposed_studs || owner.contains_key(&Cell::new(x, top, z)))
+                .collect()
         };
         let above = |x: i32, z: i32| owner.get(&Cell::new(x, top, z)).copied();
         let [fx, fz] = p.footprint();
@@ -478,18 +487,60 @@ pub fn assign_ids(placements: &mut [Placement]) {
         let o = placements[i].origin;
         (o.y, o.z, o.x)
     });
-    type Key = (Vec<(u8, u8)>, u8, Vec<Vec<(u8, u8)>>);
+    type Key = (Vec<(u8, u8)>, u8, Vec<Vec<(u8, u8)>>, String);
     let mut ids: HashMap<Key, String> = HashMap::new();
     for i in order {
         let def = placements[i].custom.as_ref().expect("a printed brick");
         let mut units = def.units.clone();
         units.sort();
-        let key = (def.cells.clone(), def.plates, units);
+        let trim = def.trim.as_ref().map(|t| serde_json::to_string(t).unwrap_or_default()).unwrap_or_default();
+        let key = (def.cells.clone(), def.plates, units, trim);
         let n = ids.len() + 1;
         let id = ids.entry(key).or_insert_with(|| format!("B{n:03}")).clone();
         placements[i].custom.as_mut().expect("a printed brick").id = id.clone();
         placements[i].part = id;
     }
+}
+
+/// Builds one display mesh per distinct trimmed brick (in parallel), sets each trimmed
+/// brick's `mesh` key and overhang flag, and returns the meshes by key.
+fn mesh_trims(ps: &mut [Placement]) -> BTreeMap<String, DetailMesh> {
+    let mut jobs: BTreeMap<String, (CustomDef, sf_core::Trim)> = BTreeMap::new();
+    for p in ps.iter() {
+        if let Some(def) = p.custom.as_deref()
+            && let Some(t) = &def.trim
+        {
+            jobs.entry(def.id.clone()).or_insert_with(|| (def.clone(), (**t).clone()));
+        }
+    }
+    let jobs: Vec<(String, CustomDef, sf_core::Trim)> = jobs.into_iter().map(|(k, (d, t))| (k, d, t)).collect();
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(jobs.len().max(1));
+    let mut results: Vec<(String, curves::TrimmedMesh)> = Vec::with_capacity(jobs.len());
+    std::thread::scope(|s| {
+        let chunks: Vec<&[(String, CustomDef, sf_core::Trim)]> = jobs.chunks(jobs.len().div_ceil(threads).max(1)).collect();
+        let handles: Vec<_> = chunks
+            .into_iter()
+            .map(|chunk| s.spawn(move || chunk.iter().map(|(k, d, t)| (k.clone(), curves::trimmed_mesh(d, t))).collect::<Vec<_>>()))
+            .collect();
+        for h in handles {
+            results.extend(h.join().expect("mesh thread panicked"));
+        }
+    });
+    let mut meshes = BTreeMap::new();
+    let mut overhang: HashMap<String, bool> = HashMap::new();
+    for (id, m) in results {
+        overhang.insert(id.clone(), m.overhang);
+        meshes.insert(format!("trim:{id}"), m.mesh);
+    }
+    for p in ps.iter_mut() {
+        if let Some(def) = p.custom.as_mut()
+            && let Some(t) = def.trim.as_mut()
+        {
+            t.overhang = overhang.get(&def.id).copied().unwrap_or(false);
+            def.mesh = Some(format!("trim:{}", def.id));
+        }
+    }
+    meshes
 }
 
 /// Details with no stud under any socket column (they will fall off), as "D001 (flower head)".
@@ -515,17 +566,19 @@ pub fn pack_print(
     uses: &[GridDetail],
     designs: &BTreeMap<String, DetailDesign>,
     repair: bool,
+    curves: bool,
 ) -> Result<PrintPacked> {
     let mut owned: Option<Compiled> = None;
     let mut anchored = 0;
     let meshes = details::design_meshes(designs);
+    let curves = curves && !c.surface.is_empty();
     for attempt in 0..3 {
         let cc = owned.as_ref().unwrap_or(c);
         let body: Vec<Placement> = Body::new(cc).pack().iter().map(to_placement).collect();
         let placed = details::place_details(uses, designs, &body)?;
         let mut ps = body;
         ps.extend(placed.placements);
-        assign_studs(&mut ps, &meshes);
+        assign_studs(&mut ps, &meshes, !curves);
         let small: Vec<Vec<usize>> = if repair {
             small_floating(&ps, ANCHOR_MAX).into_iter().filter(|g| !g.iter().any(|&i| is_detail(&ps[i]))).collect()
         } else {
@@ -548,16 +601,32 @@ pub fn pack_print(
                 i += 1;
                 keep
             });
-            assign_studs(&mut ps, &meshes);
+            assign_studs(&mut ps, &meshes, !curves);
+        }
+        if curves {
+            let occ = curves::Occupancy::new(&ps, &meshes);
+            let exposed: Vec<bool> = ps.iter().enumerate().map(|(i, p)| is_brick(p) && curves::is_exposed(i, p, &occ)).collect();
+            let trimmed = |j: usize| exposed[j];
+            let trims: Vec<Option<sf_core::Trim>> = ps
+                .iter()
+                .enumerate()
+                .map(|(i, p)| if exposed[i] { curves::brick_trim(i, p, &occ, &cc.surface, &trimmed) } else { None })
+                .collect();
+            for (p, t) in ps.iter_mut().zip(trims) {
+                if let (Some(def), Some(t)) = (p.custom.as_mut(), t) {
+                    def.trim = Some(Box::new(t));
+                }
+            }
         }
         assign_ids(&mut ps);
+        let trim_meshes = if curves { mesh_trims(&mut ps) } else { BTreeMap::new() };
         let mut warnings = placed.warnings;
         for d in unsupported_details(&ps) {
             warnings.push(format!(
                 "detail {d} has no stud under its base and will fall off: give it a base at least two studs long along a row of the part below"
             ));
         }
-        return Ok(PrintPacked { placements: ps, dropped, anchored, compiled: owned, warnings });
+        return Ok(PrintPacked { placements: ps, meshes: trim_meshes, dropped, anchored, compiled: owned, warnings });
     }
     unreachable!("the last attempt always returns")
 }
@@ -638,7 +707,7 @@ mod tests {
             let Ok(spec) = Spec::from_json(&json) else { continue };
             let res = 8 + (case % 4) as u32 * 6;
             let Ok(c) = compile(&spec, &Palette::builtin(), &CompileOptions { resolution: Some(res), image: None }) else { continue };
-            let p = pack_print(&c, &[], &BTreeMap::new(), true).unwrap();
+            let p = pack_print(&c, &[], &BTreeMap::new(), true, false).unwrap();
             check(&c, &p, &format!("case {case}\n{json}"));
         }
     }
@@ -673,7 +742,7 @@ mod tests {
             {"shape":"box","center":[0,2,0.5],"size":[2,2.4,1],"color":"Brown"}]}"#,
             4,
         );
-        let p = pack_print(&c, &[], &BTreeMap::new(), true).unwrap();
+        let p = pack_print(&c, &[], &BTreeMap::new(), true, false).unwrap();
         check(&c, &p, "pole");
         let brown = Palette::builtin().resolve("Brown").unwrap();
         let browns: Vec<&Placement> = p.placements.iter().filter(|q| q.color == brown).collect();

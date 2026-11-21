@@ -409,7 +409,10 @@ pub fn build_scene(generation: u64, inp: &SceneInput) -> Scene {
                 continue;
             }
             let local = p.custom.as_deref().map(|def| match &def.kind {
-                sf_core::CustomKind::Brick => sf_ldraw::brick_key(def),
+                sf_core::CustomKind::Brick => match &def.mesh {
+                    Some(k) => format!("trimmed:{k}"),
+                    None => sf_ldraw::brick_key(def),
+                },
                 sf_core::CustomKind::Detail { mesh, .. } => format!("detail:{mesh}"),
             });
             let key = match &local {

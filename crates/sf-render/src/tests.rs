@@ -402,3 +402,146 @@ fn kit_sample_png() {
     }
     sheet.save(path).unwrap();
 }
+
+// ---- Trimmed (curved) printed bricks ----------------------------------------------------
+
+/// A trimmed 2 × 2 brick, 3 plates: vertical sides from the bottom (y = 24) up to a domed
+/// top that rises 8 LDU at the centre and meets the top plane (y = 0) at the rim. Indexed,
+/// outward faces, in the catalog frame (top centre, -y up).
+fn dome_mesh(n: usize) -> sf_core::DetailMesh {
+    let (h, bottom) = (8.0f32, 24.0f32);
+    let at = |i: usize| -20.0 + 40.0 * i as f32 / n as f32;
+    let top = |x: f32, z: f32| -h * (1.0 - (x / 20.0).powi(2)) * (1.0 - (z / 20.0).powi(2));
+    let mut positions = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    // Top grid.
+    for j in 0..=n {
+        for i in 0..=n {
+            positions.push([at(i), top(at(i), at(j)), at(j)]);
+        }
+    }
+    let id = |i: usize, j: usize| (j * (n + 1) + i) as u32;
+    for j in 0..n {
+        for i in 0..n {
+            // Outward = -y (up): wind so (b-a)×(c-a) points to -y.
+            indices.extend([id(i, j), id(i, j + 1), id(i + 1, j), id(i + 1, j), id(i, j + 1), id(i + 1, j + 1)]);
+        }
+    }
+    // Sides: a strip along each edge of the grid down to the bottom.
+    let side = |rim: Vec<[f32; 3]>, out: [f32; 3], positions: &mut Vec<[f32; 3]>, indices: &mut Vec<u32>| {
+        for w in rim.windows(2) {
+            let (a, b) = (w[0], w[1]);
+            let (ad, bd) = ([a[0], bottom, a[2]], [b[0], bottom, b[2]]);
+            let base = positions.len() as u32;
+            positions.extend([a, b, bd, ad]);
+            let nrm = {
+                let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let v = [bd[0] - a[0], bd[1] - a[1], bd[2] - a[2]];
+                [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
+            };
+            let flip = nrm[0] * out[0] + nrm[1] * out[1] + nrm[2] * out[2] < 0.0;
+            if flip {
+                indices.extend([base, base + 2, base + 1, base, base + 3, base + 2]);
+            } else {
+                indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
+        }
+    };
+    let row = |pick: &dyn Fn(usize) -> (usize, usize), positions: &Vec<[f32; 3]>| -> Vec<[f32; 3]> {
+        (0..=n).map(|k| { let (i, j) = pick(k); positions[id(i, j) as usize] }).collect()
+    };
+    let rims = [
+        (row(&|k| (k, 0), &positions), [0.0, 0.0, -1.0]),
+        (row(&|k| (k, n), &positions), [0.0, 0.0, 1.0]),
+        (row(&|k| (0, k), &positions), [-1.0, 0.0, 0.0]),
+        (row(&|k| (n, k), &positions), [1.0, 0.0, 0.0]),
+    ];
+    for (rim, out) in rims {
+        side(rim, out, &mut positions, &mut indices);
+    }
+    // Bottom.
+    let base = positions.len() as u32;
+    positions.extend([[-20.0, bottom, -20.0], [20.0, bottom, -20.0], [20.0, bottom, 20.0], [-20.0, bottom, 20.0]]);
+    indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+    sf_core::DetailMesh { positions, indices }
+}
+
+fn trimmed_brick(mesh: Option<&str>) -> sf_core::CustomDef {
+    let cells = vec![(0, 0), (1, 0), (0, 1), (1, 1)];
+    sf_core::CustomDef {
+        id: "B007".into(),
+        kind: sf_core::CustomKind::Brick,
+        cells: cells.clone(),
+        colors: Default::default(),
+        plates: 3,
+        studs: vec![],
+        units: vec![],
+        sockets: cells,
+        trim: None,
+        mesh: mesh.map(str::to_string),
+    }
+}
+
+#[test]
+fn trimmed_bricks_draw_their_curved_mesh() {
+    let lib = MeshLibrary::procedural();
+    let mut m = model(vec![printed(trimmed_brick(Some("dome")), RED, Cell::new(0, 0, 0))]);
+    m.meshes.insert("dome".into(), dome_mesh(16));
+    let front = render_view(&m, &Palette::builtin(), &lib, View::Front, &opts(96));
+    let b = bbox_of(&front, reddish).expect("drawn");
+    // The silhouette is domed: the top edge is higher in the middle than at the sides.
+    let top_at = |x: u32| (b.1..=b.3).find(|&y| reddish(front.get_pixel(x, y).0[..3].try_into().unwrap()));
+    let (mid, side) = (top_at((b.0 + b.2) / 2).unwrap(), top_at(b.0 + 2).unwrap());
+    assert!(mid + 4 < side, "dome top at {mid}, sides at {side}");
+    // Smooth shading: the iso view of the dome shows many shades of red, not a few facets.
+    let iso = render_view(&m, &Palette::builtin(), &lib, View::Iso, &opts(128));
+    let shades: std::collections::HashSet<[u8; 3]> =
+        iso.pixels().map(|p| [p[0], p[1], p[2]]).filter(|&c| reddish(c)).collect();
+    assert!(shades.len() > 30, "only {} shades", shades.len());
+    // Without the mesh it is the plain 2 × 2 block (flat top).
+    let plain = model(vec![printed(trimmed_brick(None), RED, Cell::new(0, 0, 0))]);
+    let pf = render_view(&plain, &Palette::builtin(), &lib, View::Front, &opts(96));
+    let pb = bbox_of(&pf, reddish).unwrap();
+    let ptop = |x: u32| (pb.1..=pb.3).find(|&y| reddish(pf.get_pixel(x, y).0[..3].try_into().unwrap())).unwrap();
+    assert!((ptop((pb.0 + pb.2) / 2) as i32 - ptop(pb.0 + 2) as i32).abs() <= 1);
+    // A missing mesh falls back to the plain block rather than vanishing.
+    let mut missing = m.clone();
+    missing.meshes.clear();
+    let img = render_view(&missing, &Palette::builtin(), &lib, View::Front, &opts(48));
+    assert!(bbox_of(&img, reddish).is_some());
+    // Thumbnails carry the mesh along.
+    let thumb = render_part_in(&m, &m.placements[0], &Palette::builtin(), &lib, View::Front, &opts(96));
+    let tb = bbox_of(&thumb, reddish).unwrap();
+    let ttop = |x: u32| (tb.1..=tb.3).find(|&y| reddish(thumb.get_pixel(x, y).0[..3].try_into().unwrap())).unwrap();
+    assert!(ttop((tb.0 + tb.2) / 2) + 4 < ttop(tb.0 + 2), "thumbnail lost the dome");
+}
+
+#[test]
+fn trimmed_meshes_are_cached_by_content() {
+    let lib = MeshLibrary::procedural();
+    let mut m = model(vec![printed(trimmed_brick(Some("dome")), RED, Cell::new(0, 0, 0))]);
+    m.meshes.insert("dome".into(), dome_mesh(8));
+    let (k1, a) = lib.placement_mesh(&m.placements[0], &m).unwrap();
+    // Another model reusing the key name with the same content shares the cached mesh...
+    let mut m2 = m.clone();
+    m2.placements[0].part = "B099".into();
+    let (k2, b) = lib.placement_mesh(&m2.placements[0], &m2).unwrap();
+    assert!(k1.starts_with("printed-trimmed:") && k1 == k2 && Arc::ptr_eq(&a, &b));
+    // ...and different content under the same name gets its own.
+    m2.meshes.insert("dome".into(), dome_mesh(12));
+    let (k3, c) = lib.placement_mesh(&m2.placements[0], &m2).unwrap();
+    assert!(k3 != k1 && !Arc::ptr_eq(&a, &c));
+}
+
+#[test]
+fn curved_sample_png() {
+    let Ok(path) = std::env::var("FUSHION_CURVED_PNG") else { return };
+    let lib = MeshLibrary::procedural();
+    let mut m = model(vec![
+        printed(trimmed_brick(Some("dome")), RED, Cell::new(0, 0, 0)),
+        printed(trimmed_brick(None), BLUE, Cell::new(3, 0, 0)),
+    ]);
+    m.meshes.insert("dome".into(), dome_mesh(24));
+    let o = RenderOptions { view_size: 300, edges: true, background: [236, 238, 241] };
+    render_sheet(&m, &Palette::builtin(), &lib, &[View::Iso, View::Front], &o).save(path).unwrap();
+}

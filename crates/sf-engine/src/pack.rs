@@ -62,6 +62,8 @@ pub struct Packed {
     pub unavailable: Vec<(String, ColorId)>,
     /// Notes for the report (details skipped or unsupported, say).
     pub warnings: Vec<String>,
+    /// Display meshes of trimmed printed bricks.
+    pub meshes: std::collections::BTreeMap<String, sf_core::DetailMesh>,
 }
 
 struct Packer<'a> {
@@ -642,7 +644,7 @@ pub fn pack(c: &Compiled, avail: &dyn Availability, opts: &PackOptions) -> Packe
         });
         unavailable.sort();
         unavailable.dedup();
-        return Packed { placements, dropped, anchored, unavailable, compiled: owned, warnings: Vec::new() };
+        return Packed { placements, dropped, anchored, unavailable, compiled: owned, warnings: Vec::new(), meshes: Default::default() };
     }
     unreachable!("the last attempt always returns")
 }

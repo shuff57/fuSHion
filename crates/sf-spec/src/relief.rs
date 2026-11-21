@@ -183,6 +183,7 @@ pub(crate) fn compile(
         units_per_stud: 0.0,
         map: crate::GridMap::Relief { depth, shift: [0; 3] },
         details: Vec::new(),
+        surface: Vec::new(),
     })
 }
 

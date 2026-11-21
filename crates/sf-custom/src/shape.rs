@@ -64,6 +64,10 @@ pub enum CustomShape {
         /// Engraved under the top (digits, `-` and the capitals in [`crate::LABEL_CHARS`]).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
+        /// The true curved surface to follow (see [`crate::trim`]): the brick keeps
+        /// `block ∩ (S ∪ P)`, studs only where the top under them is kept. `None`: plain.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        trim: Option<sf_core::Trim>,
     },
 }
 

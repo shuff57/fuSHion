@@ -205,7 +205,74 @@ fn point_in_polygon(pts: &[[f32; 2]], x: f32, y: f32) -> bool {
     inside
 }
 
+/// A spec primitive as a [`sf_core::TrimKind`] in its own frame, with the map from that
+/// frame into spec space (`spec = m · q + t`; `m` is a rotation times a uniform scale, possibly
+/// with a reflection).
+pub(crate) struct SpecShape {
+    pub op: Op,
+    pub kind: sf_core::TrimKind,
+    pub m: [[f64; 3]; 3],
+    pub t: [f64; 3],
+}
+
 impl Prim {
+    /// This primitive as a trim primitive (see [`SpecShape`]).
+    pub(crate) fn spec_shape(&self) -> SpecShape {
+        use sf_core::TrimKind as T;
+        const I: [[f64; 3]; 3] = [[1., 0., 0.], [0., 1., 0.], [0., 0., 1.]];
+        // Columns: trim-local x', y', z' → spec-local axes.
+        const XZY: [[f64; 3]; 3] = [[1., 0., 0.], [0., 0., 1.], [0., 1., 0.]];
+        const ZXY: [[f64; 3]; 3] = [[0., 0., 1.], [1., 0., 0.], [0., 1., 0.]];
+        const ZYX: [[f64; 3]; 3] = [[0., 0., 1.], [0., 1., 0.], [1., 0., 0.]];
+        let d = |v: f32| v as f64;
+        let radial = |h: &[f32; 3], axis: Axis| -> ([f64; 2], f64, [[f64; 3]; 3]) {
+            match axis {
+                Axis::Z => ([d(h[0]), d(h[1])], 2.0 * d(h[2]), I),
+                Axis::Y => ([d(h[0]), d(h[2])], 2.0 * d(h[1]), XZY),
+                Axis::X => ([d(h[1]), d(h[2])], 2.0 * d(h[0]), ZXY),
+            }
+        };
+        let (kind, pm, off) = match &self.kind {
+            Kind::Box { h } => (T::Box { size: [2.0 * d(h[0]), 2.0 * d(h[1]), 2.0 * d(h[2])] }, I, [0.0; 3]),
+            Kind::Ellipsoid { h } => (T::Ellipsoid { radii: [d(h[0]), d(h[1]), d(h[2])] }, I, [0.0; 3]),
+            Kind::Cylinder { h, axis } => {
+                let (radii, height, m) = radial(h, *axis);
+                (T::Cylinder { radii, height }, m, [0.0; 3])
+            }
+            Kind::Cone { h, axis, top } => {
+                let (radii, height, m) = radial(h, *axis);
+                (T::Cone { radii, top_scale: d(*top), height }, m, [0.0; 3])
+            }
+            Kind::Capsule { a, b, r } => (
+                T::Capsule { a: [d(a[0]), d(a[1]), d(a[2])], b: [d(b[0]), d(b[1]), d(b[2])], radius: d(*r) },
+                I,
+                [0.0; 3],
+            ),
+            Kind::Extrude { plane, pts, d: dep } => {
+                let points = pts.iter().map(|p| [d(p[0]), d(p[1])]).collect();
+                let height = d((dep[1] - dep[0]).abs());
+                let c = d((dep[0] + dep[1]) / 2.0);
+                match plane {
+                    Plane::Xz => (T::Prism { points, height }, XZY, [0.0, c, 0.0]),
+                    Plane::Xy => (T::Prism { points, height }, I, [0.0, 0.0, c]),
+                    Plane::Zy => (T::Prism { points, height }, ZYX, [c, 0.0, 0.0]),
+                }
+            }
+        };
+        let w = &self.world;
+        let mut m = [[0.0f64; 3]; 3];
+        for (i, row) in m.iter_mut().enumerate() {
+            for (j, v) in row.iter_mut().enumerate() {
+                *v = (0..3).map(|k| w.m[i][k] as f64 * pm[k][j]).sum();
+            }
+        }
+        let mut t = [0.0f64; 3];
+        for (i, v) in t.iter_mut().enumerate() {
+            *v = (0..3).map(|k| w.m[i][k] as f64 * off[k]).sum::<f64>() + w.t[i] as f64;
+        }
+        SpecShape { op: self.op, kind, m, t }
+    }
+
     pub fn contains(&self, w: [f32; 3]) -> bool {
         let p = self.inv.apply(w);
         match &self.kind {

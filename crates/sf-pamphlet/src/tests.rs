@@ -174,3 +174,47 @@ fn view_choice_prefers_the_side_showing_new_parts() {
     assert!(seen >= seen0, "{seen} < {seen0}");
     assert_ne!(t, 0, "the front-left view is blocked by the walls (seen {seen0})");
 }
+
+/// A brick trimmed to a curved surface reads "curved brick", and gets the SUPPORTS tag when
+/// its trim overhangs.
+#[test]
+fn curved_bricks_are_named_and_tagged() {
+    use sf_core::{CustomDef, CustomKind, DetailMesh, Trim};
+    let mut m = sample_model();
+    let mut mesh = DetailMesh::default();
+    crate::sample::box_mesh(&mut mesh, 20.0, 40.0, 0.0, 24.0);
+    m.meshes.insert("curve:B009".into(), mesh);
+    let def = CustomDef {
+        id: "B009".into(),
+        kind: CustomKind::Brick,
+        cells: vec![(0, 0), (0, 1)],
+        colors: Default::default(),
+        plates: 3,
+        studs: vec![(0, 0), (0, 1)],
+        units: Vec::new(),
+        sockets: vec![(0, 0), (0, 1)],
+        trim: Some(Box::new(Trim { shapes: Vec::new(), protect: Vec::new(), overhang: true })),
+        mesh: Some("curve:B009".into()),
+    };
+    m.placements.push(Placement::printed(def, 322, Cell::new(5, 4, 1), Rot(0)));
+    let i = m.placements.len() - 1;
+    m.steps[2].push(i);
+    let (bytes, info) = pamphlet_bytes(&m, &Palette::builtin(), &meshes(), &PamphletOptions { step_image_px: 300, thumb_px: 64, ..Default::default() }).unwrap();
+    assert_eq!((info.curved_parts, info.curved_with_supports), (1, 1), "{info:?}");
+    check_pdf(&bytes, info.pages);
+    let dir = std::env::temp_dir().join(format!("sf-pamphlet-curved-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("curved.pdf");
+    std::fs::write(&path, &bytes).unwrap();
+    if let Ok(out) = std::process::Command::new("pdftotext").arg(&path).arg("-").output() {
+        let s = String::from_utf8_lossy(&out.stdout);
+        let pages: Vec<&str> = s.split('\u{c}').collect();
+        assert!(pages[1].contains("Curved bricks are printed bricks"), "{}", pages[1]);
+        assert!(pages[1].contains("tagged SUPPORTS"));
+        let print = pages[2];
+        assert!(print.contains("B009") && print.contains("Curved brick, 2 studs area, 3 plates"), "{print}");
+        // Two SUPPORTS tags before: the rose petals in red and yellow; now three.
+        assert_eq!(print.matches("SUPPORTS").count(), 3, "{print}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}

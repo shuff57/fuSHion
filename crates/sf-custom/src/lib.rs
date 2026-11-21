@@ -43,6 +43,7 @@ mod run;
 mod shape;
 mod slant;
 mod socket;
+pub mod trim;
 
 pub use detail::{
     BASE_HEIGHT, DISPLAY_TRIANGLES, Detail, OVERHANG_MARGIN, SINK, SUPPORT_AREA_MM2, TEMPLATES,
@@ -54,6 +55,7 @@ pub use kit::{
     append_posed, assemble_kit, build_kit_part, clip_fit, coupon, peg_fit,
 };
 pub use kits::KITS;
+pub use trim::{TRIM_VOLUME_TOL, Trimmed, brick_overhang, build_trimmed, inside_mesh, inside_trim};
 pub use socket::{Contact, E_PLA_MPA, SocketFit, SocketSpec, TDims, socket_fit, t_dims};
 pub use fit::{FitReport, SlantOutline, TopBrick, fit, fit_below, fit_under, slant_outline};
 pub use label::{LABEL_CHARS, LABEL_DEPTH, engravable};

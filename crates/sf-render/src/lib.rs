@@ -152,8 +152,8 @@ impl Camera {
 /// A mesh pre-projected for one (part, rotation) under one camera, relative
 /// to the placement's anchor.
 struct Projected {
-    /// Three vertices, shade factor, colour code.
-    tris: Vec<([SVert; 3], f32, u16)>,
+    /// Three vertices, their shade factors (equal for flat faces), colour code.
+    tris: Vec<([SVert; 3], [f32; 3], u16)>,
     edges: Vec<[SVert; 2]>,
 }
 
@@ -165,9 +165,16 @@ fn project_mesh(cam: &Camera, mesh: &PartMesh, m: [[f32; 3]; 3], with_edges: boo
         let (Some(&a), Some(&b), Some(&c)) = (mesh.positions.get(i0), mesh.positions.get(i1), mesh.positions.get(i2)) else {
             continue;
         };
-        let n = mesh.normals.get(i0).copied().unwrap_or([0.0, -1.0, 0.0]);
+        let shade = |i: usize| cam.shade(mat_vec(m, mesh.normals.get(i).copied().unwrap_or([0.0, -1.0, 0.0])));
+        let s0 = shade(i0);
+        // Flat meshes (every catalog part) repeat one normal per triangle: shade it once.
+        let s = if mesh.normals.get(i1) == mesh.normals.get(i0) && mesh.normals.get(i2) == mesh.normals.get(i0) {
+            [s0; 3]
+        } else {
+            [s0, shade(i1), shade(i2)]
+        };
         let color = mesh.colors.get(i0).copied().unwrap_or(MAIN_COLOR);
-        tris.push(([cam.lin(xf(a)), cam.lin(xf(b)), cam.lin(xf(c))], cam.shade(mat_vec(m, n)), color));
+        tris.push(([cam.lin(xf(a)), cam.lin(xf(b)), cam.lin(xf(c))], s, color));
     }
     let edges =
         if with_edges { mesh.edges.iter().map(|e| [cam.lin(xf(e[0])), cam.lin(xf(e[1]))]).collect() } else { Vec::new() };
@@ -315,7 +322,10 @@ fn mesh_key(pl: &Placement) -> String {
     match pl.custom.as_deref() {
         None => pl.part.clone(),
         Some(def) => match &def.kind {
-            sf_core::CustomKind::Brick => sf_ldraw::brick_key(def),
+            sf_core::CustomKind::Brick => match &def.mesh {
+                Some(k) => format!("trimmed:{k}"),
+                None => sf_ldraw::brick_key(def),
+            },
             sf_core::CustomKind::Detail { mesh, .. } => format!("detail:{mesh}"),
         },
     }
@@ -334,7 +344,12 @@ fn draw_projected(target: &mut Target, proj: &Projected, o: SVert, main: [u8; 3]
             last = (*code, c);
             c
         };
-        target.tri(add(v[0], o), add(v[1], o), add(v[2], o), shaded(rgb, *s));
+        if s[0] == s[1] && s[1] == s[2] {
+            target.tri(add(v[0], o), add(v[1], o), add(v[2], o), shaded(rgb, s[0]));
+        } else {
+            let c = s.map(|f| rgb.map(|ch| (ch as f32 * f).min(255.0)));
+            target.tri_smooth(add(v[0], o), add(v[1], o), add(v[2], o), c);
+        }
     }
 }
 
@@ -476,10 +491,18 @@ pub fn render_part_in(
     let mut p = placement.clone();
     p.origin = sf_core::Cell::new(0, 0, 0);
     let mut one = Model { placements: vec![p], ..Default::default() };
-    if let Some(sf_core::CustomKind::Detail { mesh, .. }) = placement.custom.as_deref().map(|d| &d.kind)
-        && let Some(m) = model.meshes.get(mesh)
-    {
-        one.meshes.insert(mesh.clone(), m.clone());
+    // Detail parts and trimmed bricks are drawn from the model's meshes (and kits).
+    let key = placement.custom.as_deref().and_then(|d| match &d.kind {
+        sf_core::CustomKind::Detail { mesh, .. } => Some(mesh),
+        sf_core::CustomKind::Brick => d.mesh.as_ref(),
+    });
+    if let Some(key) = key {
+        if let Some(m) = model.meshes.get(key) {
+            one.meshes.insert(key.clone(), m.clone());
+        }
+        if let Some(k) = model.kits.get(key) {
+            one.kits.insert(key.clone(), k.clone());
+        }
     }
     render_view(&one, palette, meshes, view, opts)
 }

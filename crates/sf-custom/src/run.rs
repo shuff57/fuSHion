@@ -21,7 +21,13 @@ const DELTA_ABS_MM3: f64 = 0.01;
 
 /// Builds `shape` with `profile`: runs [`plan`]'s batch, checks each stage's volume and the
 /// finished bounding box against their closed forms, and exports a checked STL and 3MF.
+///
+/// A [`CustomShape::Printed`] with a `trim` is built by [`crate::build_trimmed`]: these checks
+/// for every stage before the trim, then the trim's own (see [`crate::trim`]).
 pub fn build(shape: &CustomShape, profile: &StudProfile) -> Result<CustomPart> {
+    if let CustomShape::Printed { trim: Some(_), .. } = shape {
+        return Ok(crate::trim::build_trimmed(shape, profile)?.part);
+    }
     build_plan(&plan(shape, profile)?)
 }
 
@@ -31,15 +37,25 @@ pub fn build(shape: &CustomShape, profile: &StudProfile) -> Result<CustomPart> {
 /// (a slot, a pocket) is caught even when the whole part's volume hardly moves.
 pub fn build_plan(plan: &Plan) -> Result<CustomPart> {
     let mut s = Session::default();
+    let volumes = run_stages(&mut s, plan)?;
+    let last = plan.stages.last().map_or("(empty)", |s| s.name.as_str());
+    let mut part = finish(&mut s, last, Some(plan.volume_mm3), Some(plan.bbox_mm))?;
+    part.stage_volumes_mm3 = volumes;
+    Ok(part)
+}
+
+/// Runs a plan's stages in `s`, checking each (see [`build_plan`]); returns each stage's
+/// measured volume.
+pub(crate) fn run_stages(s: &mut Session, plan: &Plan) -> Result<Vec<(String, f64)>> {
     let mut index = 0;
     let (mut before, mut expected_before) = (0.0, 0.0);
     let mut volumes = Vec::new();
     for stage in &plan.stages {
         for c in &stage.commands {
-            run_step(&mut s, &stage.name, index, c)?;
+            run_step(s, &stage.name, index, c)?;
             index += 1;
         }
-        let m = measure(&mut s, &stage.name)?;
+        let m = measure(s, &stage.name)?;
         if m.bodies != 1 {
             return mismatch(&stage.name, format!("{} bodies, expected 1", m.bodies));
         }
@@ -57,10 +73,7 @@ pub fn build_plan(plan: &Plan) -> Result<CustomPart> {
         expected_before = stage.volume_mm3;
         volumes.push((stage.name.clone(), m.volume));
     }
-    let last = plan.stages.last().map_or("(empty)", |s| s.name.as_str());
-    let mut part = finish(&mut s, last, Some(plan.volume_mm3), Some(plan.bbox_mm))?;
-    part.stage_volumes_mm3 = volumes;
-    Ok(part)
+    Ok(volumes)
 }
 
 /// Builds a freeform part from a SolidCraft batch Claude (or anyone) wrote: `{"commands":

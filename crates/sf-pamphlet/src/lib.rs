@@ -84,6 +84,9 @@ pub struct PamphletInfo {
     pub kit_uses: usize,
     pub kit_parts: usize,
     pub sub_builds: usize,
+    /// Printed bricks trimmed to the model's curved surface, and how many need supports.
+    pub curved_parts: usize,
+    pub curved_with_supports: usize,
     /// Page (1-based) where each sub-build starts, in order.
     pub sub_build_pages: Vec<usize>,
     /// Page (1-based) of each main build step.
@@ -129,7 +132,15 @@ pub fn pamphlet_bytes(model: &Model, palette: &Palette, meshes: &MeshLibrary, op
     let mut info = PamphletInfo { steps: steps.len(), sub_builds: subs.len(), ..Default::default() };
     for e in entries.values() {
         match e.kind {
-            Kind::Printed => info.printed_parts += e.count,
+            Kind::Printed => {
+                info.printed_parts += e.count;
+                if e.curved {
+                    info.curved_parts += e.count;
+                    if e.supports {
+                        info.curved_with_supports += e.count;
+                    }
+                }
+            }
             Kind::Detail => info.detail_parts += e.count,
             Kind::KitPart => info.kit_parts += e.count,
             Kind::Kit => info.kit_uses += e.count,
@@ -231,8 +242,11 @@ struct Entry {
     count: usize,
     name: String,
     thumb: ImageId,
-    /// A kit piece that needs support material.
+    /// Needs support material: a kit piece laid out with overhangs, or a curved brick
+    /// whose trimmed surface overhangs when printed studs up.
     supports: bool,
+    /// A printed brick trimmed to the model's curved surface.
+    curved: bool,
 }
 
 const MARGIN: f32 = 40.0;
@@ -307,7 +321,25 @@ impl Builder<'_> {
             let (p, count) = &samples[&k];
             let thumb = self.add(&img)?;
             self.thumbs.insert(k.clone(), thumb);
-            out.insert(k.clone(), Entry { kind: kind(p), part: k.0.clone(), title: k.0.clone(), color: k.1, count: *count, name: p.name(), thumb, supports: false });
+            let trim = p.custom.as_deref().and_then(|c| c.trim.as_deref());
+            let name = match trim {
+                Some(_) => curved_name(&p.name()),
+                None => p.name(),
+            };
+            out.insert(
+                k.clone(),
+                Entry {
+                    kind: kind(p),
+                    part: k.0.clone(),
+                    title: k.0.clone(),
+                    color: k.1,
+                    count: *count,
+                    name,
+                    thumb,
+                    supports: trim.is_some_and(|t| t.overhang),
+                    curved: trim.is_some(),
+                },
+            );
         }
 
         // Kits: the finished detail per sub-build, and every piece in every colour.
@@ -318,7 +350,7 @@ impl Builder<'_> {
             let key = (sb.key(g), sb.main);
             out.insert(
                 key.clone(),
-                Entry { kind: Kind::Kit, part: key.0.clone(), title: sb.label.clone(), color: sb.main, count: sb.uses.len(), name: sb.label.clone(), thumb, supports: false },
+                Entry { kind: Kind::Kit, part: key.0.clone(), title: sb.label.clone(), color: sb.main, count: sb.uses.len(), name: sb.label.clone(), thumb, supports: false, curved: false },
             );
         }
         // (design, part index) and count for each piece × colour.
@@ -352,6 +384,7 @@ impl Builder<'_> {
                     name: format!("Kit piece, {per} per {label}"),
                     thumb,
                     supports: part.supports,
+                    curved: false,
                 },
             );
         }
@@ -468,6 +501,16 @@ impl Builder<'_> {
                  print with its number as you go."
             };
             y = page.paragraph(MARGIN, y, w, 11.0, Font::Regular, INK, num) + 4.0;
+            if info.curved_parts > 0 {
+                let mut line = String::from(
+                    "Curved bricks are printed bricks whose outside faces follow the model's shape instead of \
+                     stepping in whole studs. They go on like any other brick.",
+                );
+                if info.curved_with_supports > 0 {
+                    line.push_str(" Print the ones tagged SUPPORTS in the parts list with support material.");
+                }
+                y = page.paragraph(MARGIN, y, w, 11.0, Font::Regular, INK, &line) + 4.0;
+            }
             if kits {
                 page.fill_rect(MARGIN, y, w, 40.0, TINT);
                 page.stroke_rect(MARGIN, y, w, 40.0, 0.75, TINT_EDGE);
@@ -871,6 +914,16 @@ impl Builder<'_> {
             page.text_right(PAGE_W - MARGIN, y, 8.5, Font::Regular, MUTED, &format!("page {} of {n}", i + 1));
         }
     }
+}
+
+/// A trimmed brick's description: "printed brick …" becomes "curved brick …".
+fn curved_name(name: &str) -> String {
+    for (from, to) in [("printed brick", "curved brick"), ("printed plate", "curved plate")] {
+        if let Some(rest) = name.strip_prefix(from) {
+            return format!("{to}{rest}");
+        }
+    }
+    format!("curved {name}")
 }
 
 /// The parts-list wording for a printed part: drop the id `describe()` repeats.

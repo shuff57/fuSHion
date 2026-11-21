@@ -5475,6 +5475,8 @@ dependencies = [
  "serde",
  "serde_json",
  "sf-core",
+ "sf-ldraw",
+ "sf-render",
  "sf-spec",
 ]
 

@@ -1,5 +1,6 @@
 //! The fushion engine: spec → voxels → parts → checks → steps.
 
+pub mod curves;
 pub mod details;
 pub mod pack;
 pub mod physics;
@@ -32,6 +33,9 @@ pub struct BuildOptions {
     pub print: bool,
     /// Detail designs the spec's `details` may use, by name.
     pub details: BTreeMap<String, DetailDesign>,
+    /// In print mode, exposed brick surfaces follow the true shape (smooth, no studs on
+    /// exposed tops) instead of stair-stepping.
+    pub curves: bool,
 }
 
 impl Default for BuildOptions {
@@ -44,6 +48,7 @@ impl Default for BuildOptions {
             slopes: true,
             print: false,
             details: BTreeMap::new(),
+            curves: true,
         }
     }
 }
@@ -65,9 +70,12 @@ fn build_at(
     let c = compile(spec, &opts.palette, &CompileOptions { resolution: res, image })?;
     details::check_designs(&c.details, &opts.details)?;
     if opts.print {
-        let p = print_pack::pack_print(&c, &c.details, &opts.details, repair_rounds > 0)?;
+        // Curves don't change part counts, so the budget search (no repair) skips them.
+        let curves = opts.curves && repair_rounds > 0;
+        let p = print_pack::pack_print(&c, &c.details, &opts.details, repair_rounds > 0, curves)?;
         let packed = pack::Packed {
             placements: p.placements,
+            meshes: p.meshes,
             dropped: p.dropped,
             anchored: p.anchored,
             compiled: p.compiled,
@@ -142,6 +150,7 @@ pub fn build(spec: &Spec, opts: &BuildOptions, image: Option<&image::RgbaImage>)
         placements: std::mem::take(&mut packed.placements),
         steps: Vec::new(),
         printable: opts.print,
+        meshes: std::mem::take(&mut packed.meshes),
         ..Default::default()
     };
     details::attach_designs(&mut model, &opts.details);
@@ -233,6 +242,10 @@ pub struct PrintSummary {
     pub kit_parts: usize,
     /// Details with no stud under their base, as "printed flower head D001 at (x, y, z)".
     pub unsupported_details: Vec<String>,
+    /// Body bricks whose exposed surface follows the true shape.
+    pub curved: usize,
+    /// Curved bricks with an overhang steeper than 45° (print them with supports).
+    pub need_supports: usize,
 }
 
 impl PrintSummary {
@@ -247,6 +260,10 @@ impl PrintSummary {
                 Some(CustomKind::Brick) => {
                     s.bricks += 1;
                     ids.insert(p.part.clone());
+                    if let Some(t) = p.custom.as_ref().and_then(|c| c.trim.as_ref()) {
+                        s.curved += 1;
+                        s.need_supports += t.overhang as usize;
+                    }
                 }
                 Some(CustomKind::Detail { mesh, .. }) => {
                     s.details += 1;
@@ -464,6 +481,13 @@ impl Report {
                 p.detail_designs,
                 if p.detail_designs == 1 { "" } else { "s" }
             );
+            if p.curved > 0 {
+                let _ = writeln!(
+                    s,
+                    "Curved: {} bricks follow the true surface ({} need supports)",
+                    p.curved, p.need_supports
+                );
+            }
             for d in &p.unsupported_details {
                 let _ = writeln!(s, "Unsupported detail: {d} has no stud under its base and will fall off");
             }

@@ -115,7 +115,11 @@ impl MeshLibrary {
             return self.mesh(&p.part).map(|m| (p.part.clone(), m));
         };
         let (key, make): (String, Box<dyn FnOnce() -> PartMesh>) = match &def.kind {
-            sf_core::CustomKind::Brick => (brick_key(def), Box::new(|| custom_mesh(def))),
+            sf_core::CustomKind::Brick => match def.mesh.as_ref().and_then(|k| model.meshes.get(k)) {
+                // A trimmed (curved) brick: its approximate surface mesh, smooth shaded.
+                Some(d) => return Some(self.trimmed(d)),
+                None => (brick_key(def), Box::new(|| custom_mesh(def))),
+            },
             sf_core::CustomKind::Detail { mesh, .. } => return Some(self.detail(model.meshes.get(mesh)?)),
         };
         Some(self.cached(key, make))
@@ -125,6 +129,12 @@ impl MeshLibrary {
     /// content key ([`crate::printed::detail_key`]), cached.
     pub fn detail(&self, d: &sf_core::DetailMesh) -> (String, Arc<PartMesh>) {
         self.cached(crate::printed::detail_key(d), Box::new(|| crate::printed::detail_mesh(d)))
+    }
+
+    /// The display mesh of a trimmed brick's surface mesh, with its content key
+    /// ([`crate::printed::trimmed_key`]), cached.
+    pub fn trimmed(&self, d: &sf_core::DetailMesh) -> (String, Arc<PartMesh>) {
+        self.cached(crate::printed::trimmed_key(d), Box::new(|| crate::printed::trimmed_mesh(d)))
     }
 
     fn cached(&self, key: String, make: Box<dyn FnOnce() -> PartMesh + '_>) -> (String, Arc<PartMesh>) {

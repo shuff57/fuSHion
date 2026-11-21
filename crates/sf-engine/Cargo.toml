@@ -13,3 +13,7 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 image.workspace = true
+
+[dev-dependencies]
+sf-render.workspace = true
+sf-ldraw.workspace = true
