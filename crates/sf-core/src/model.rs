@@ -1,6 +1,6 @@
 //! A finished brick model.
 
-use crate::print::{DetailMesh, DetailSource};
+use crate::print::{DetailMesh, DetailSource, Kit};
 use crate::{Cell, Placement};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -32,6 +32,9 @@ pub struct Model {
     /// Print sources of detail parts, by the same key.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub details: BTreeMap<String, DetailSource>,
+    /// Kits (details built from several printed parts), by the same key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub kits: BTreeMap<String, Kit>,
 }
 
 impl Model {

@@ -21,7 +21,7 @@ pub use grid::{Fill, VoxelGrid};
 pub use model::{Model, ModelMode};
 pub use parts::{PartDef, Shape, CATALOG};
 pub use placement::{Placement, Rot};
-pub use print::{CustomDef, CustomKind, DetailDesign, DetailMesh, DetailSource};
+pub use print::{CustomDef, CustomKind, DetailDesign, DetailMesh, DetailSource, Kit, KitPart, KitPose, KitStep};
 
 /// LDraw units per stud (horizontal pitch).
 pub const LDU_PER_STUD: i32 = 20;

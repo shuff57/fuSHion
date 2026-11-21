@@ -147,6 +147,7 @@ fn l_brick() -> sf_core::CustomDef {
         id: "B001".into(),
         kind: sf_core::CustomKind::Brick,
         // An L: a row of four along x and one more at (0, 1).
+        colors: Default::default(),
         cells: vec![(0, 0), (1, 0), (2, 0), (3, 0), (0, 1)],
         plates: 3,
         studs: vec![(0, 0), (1, 0), (2, 0), (3, 0)],
@@ -172,6 +173,7 @@ fn box_detail() -> (sf_core::CustomDef, sf_core::DetailMesh) {
         sockets: vec![(0, 0), (1, 0)],
         studs: vec![],
         mesh: sf_core::DetailMesh { positions, indices },
+        kit: None,
         source: sf_core::DetailSource { source: serde_json::Value::Null },
     };
     (design.instance("D001"), design.mesh)

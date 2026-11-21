@@ -11,7 +11,7 @@
 
 use crate::{Cell, PartDef, Placement, Shape, parts};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// A part designed for one model and 3D printed, not taken from LEGO's catalog. Stored
 /// inline in its [`Placement`] (`Placement::custom`); the placement's `part` is its `id`.
@@ -26,6 +26,9 @@ pub struct CustomDef {
     pub kind: CustomKind,
     /// The columns the part fills, from `y = origin.y` up `plates` plates.
     pub cells: Vec<(u8, u8)>,
+    /// A detail kit's colours by role, besides "main" (the placement's colour).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub colors: BTreeMap<String, crate::ColorId>,
     /// Height in plates of the filled volume.
     pub plates: u8,
     /// Columns with a stud on top. For a brick these are chosen for its spot (see
@@ -117,6 +120,81 @@ pub struct DetailDesign {
     pub studs: Vec<(u8, u8)>,
     pub mesh: DetailMesh,
     pub source: DetailSource,
+    /// The parts the detail is built from, when it is a kit (a flower from a hub, petals and
+    /// a centre; an eye from a dome and a pupil). `None`: one printed piece made from
+    /// `source`. `mesh` is always the assembled detail in its main colour, for quick views.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kit: Option<Kit>,
+}
+
+/// A detail built from separate printed parts, like the flowers of LEGO's Botanical
+/// bouquets: petals clipped onto a hub with LEGO's 3.18 mm bar and clip, a centre pressed
+/// in, a stem, leaves.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Kit {
+    pub parts: Vec<KitPart>,
+    /// The sub-build, in order: what to attach in each step.
+    pub steps: Vec<KitStep>,
+    /// Colour roles and their default colour names, e.g. `("main", "Red")`,
+    /// `("centre", "Yellow")`, `("leaf", "Green")`. A use of the design sets "main"
+    /// (the placement's colour) and may override any other role.
+    pub roles: Vec<(String, String)>,
+}
+
+/// One kind of part in a kit, with every copy's place in the assembled detail.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct KitPart {
+    /// Key, unique in the kit, e.g. `"outer_petal"`.
+    pub key: String,
+    /// Short human name, e.g. "outer petal".
+    pub label: String,
+    /// Colour role (one of `Kit::roles`).
+    pub role: String,
+    /// One copy, in its own frame (LDU, LDraw axes, `-Y` up; origin where it connects).
+    pub mesh: DetailMesh,
+    /// How to print one copy, already laid out on the print bed in its best direction.
+    pub source: DetailSource,
+    /// Needs support material when printed as laid out.
+    #[serde(default)]
+    pub supports: bool,
+    /// Where each copy goes in the assembled detail (the frame of `DetailDesign::mesh`).
+    pub copies: Vec<KitPose>,
+}
+
+/// A rigid placement: `world = rotation · local + position` (LDU, rotation row-major).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct KitPose {
+    pub rotation: [[f32; 3]; 3],
+    pub position: [f32; 3],
+}
+
+/// One step of a kit's sub-build: the copies attached in it, as `(part index, copy index)`,
+/// and an optional short note ("clip the outer petals onto the ring").
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct KitStep {
+    pub parts: Vec<(usize, usize)>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub note: String,
+}
+
+impl Kit {
+    /// The colour of a role, given the main colour and any overrides; falls back to the
+    /// role's default colour name resolved by `resolve`, then to `main`.
+    pub fn role_color(
+        &self,
+        role: &str,
+        main: crate::ColorId,
+        overrides: &BTreeMap<String, crate::ColorId>,
+        resolve: impl Fn(&str) -> Option<crate::ColorId>,
+    ) -> crate::ColorId {
+        if role == "main" {
+            return main;
+        }
+        if let Some(&c) = overrides.get(role) {
+            return c;
+        }
+        self.roles.iter().find(|(r, _)| r == role).and_then(|(_, name)| resolve(name)).unwrap_or(main)
+    }
 }
 
 impl DetailDesign {
@@ -129,6 +207,7 @@ impl DetailDesign {
                 name: self.label.clone(),
             },
             cells: self.cells.clone(),
+            colors: BTreeMap::new(),
             plates: self.plates,
             studs: self.studs.clone(),
             units: Vec::new(),
@@ -433,6 +512,7 @@ mod tests {
             id: "B001".into(),
             kind: CustomKind::Brick,
             cells: vec![(0, 0), (1, 0), (2, 0), (0, 1)],
+            colors: BTreeMap::new(),
             plates: 3,
             studs: vec![(1, 0), (2, 0)],
             units: vec![vec![(1, 0), (2, 0)]],

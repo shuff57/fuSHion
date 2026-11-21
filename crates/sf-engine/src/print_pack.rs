@@ -398,6 +398,7 @@ fn to_placement(p: &Part) -> Placement {
     let def = CustomDef {
         id: String::new(),
         kind: CustomKind::Brick,
+        colors: Default::default(),
         cells: cells.clone(),
         plates: p.plates as u8,
         studs: Vec::new(),
@@ -688,6 +689,7 @@ mod tests {
             sockets: vec![(0, 0), (1, 0)],
             studs: Vec::new(),
             mesh: DetailMesh { positions: vec![[0.0; 3]; 3], indices: vec![0, 1, 2] },
+            kit: None,
             source: DetailSource { source: serde_json::json!({"template": "flower_head"}) },
         }
     }

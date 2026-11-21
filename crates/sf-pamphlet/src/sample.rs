@@ -10,6 +10,7 @@ fn brick(id: &str, cells: Vec<(u8, u8)>, plates: u8) -> CustomDef {
         units: Vec::new(),
         sockets: cells.clone(),
         cells,
+        colors: Default::default(),
         plates,
     }
 }
@@ -64,6 +65,7 @@ pub fn sample_model() -> Model {
     let head = CustomDef {
         id: "D001".into(),
         kind: CustomKind::Detail { mesh: "flower_head".into(), name: "flower head".into() },
+        colors: Default::default(),
         cells: vec![(0, 0), (1, 0)],
         plates: 3,
         studs: Vec::new(),

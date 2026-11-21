@@ -878,6 +878,7 @@ fn assemble(
         sockets: sockets_u8,
         studs: Vec::new(),
         mesh,
+        kit: None,
         source: DetailSource { source },
     };
     let overhang_mm2 = overhang_area(&part.stl, hollow_h + 0.05);

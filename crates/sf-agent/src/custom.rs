@@ -480,6 +480,7 @@ mod tests {
             studs: units.iter().flatten().copied().collect(),
             sockets: cells.clone(),
             cells,
+            colors: Default::default(),
             plates,
             units,
         };

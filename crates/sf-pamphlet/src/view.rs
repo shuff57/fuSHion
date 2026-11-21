@@ -169,6 +169,7 @@ mod tests {
         let l = CustomDef {
             id: "B001".into(),
             kind: CustomKind::Brick,
+            colors: Default::default(),
             cells: vec![(0, 0), (1, 0), (2, 0), (0, 1)],
             plates: 3,
             studs: vec![],
