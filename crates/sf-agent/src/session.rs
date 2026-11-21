@@ -382,8 +382,25 @@ impl ExportJob {
         }
         // Printed parts: one STL/3MF per part design, per colour, plus print-list.csv.
         let printed = model.placements.iter().any(|p| p.custom.is_some());
+        // The pamphlet shows what was really printed: a curved brick's SUPPORTS tag comes
+        // from the exact part, and a brick that fell back to its plain shape is drawn plain.
+        let mut shown = std::borrow::Cow::Borrowed(model);
         if printed && crate::custom::ENABLED {
             let set = crate::custom::export_print_set(model, &self.palette, &out.join("print"), |_, _| {})?;
+            let supports: std::collections::HashMap<&str, bool> = set.rows.iter().map(|r| (r.id.as_str(), r.supports)).collect();
+            let m = shown.to_mut();
+            for p in &mut m.placements {
+                let Some(def) = p.custom.as_deref_mut() else { continue };
+                if def.trim.is_none() {
+                    continue;
+                }
+                if set.notes.iter().any(|n| n.starts_with(&format!("{} printed without its curve", def.id))) {
+                    def.trim = None;
+                    def.mesh = None;
+                } else if let (Some(t), Some(&s)) = (def.trim.as_deref_mut(), supports.get(def.id.as_str())) {
+                    t.overhang = s;
+                }
+            }
             written.extend(set.files);
             if !set.notes.is_empty() {
                 let p = out.join("print").join("notes.txt");
@@ -399,7 +416,7 @@ impl ExportJob {
             ..Default::default()
         };
         let pdf = out.join(format!("{slug}-instructions.pdf"));
-        sf_pamphlet::write_pamphlet(model, &self.palette, &self.meshes, &opts, &pdf)?;
+        sf_pamphlet::write_pamphlet(&shown, &self.palette, &self.meshes, &opts, &pdf)?;
         written.push(pdf);
         let needs = crate::custom::custom_needs(model, self.availability.as_ref());
         if !needs.is_empty() && crate::custom::ENABLED {
